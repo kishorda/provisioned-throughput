@@ -41,6 +41,19 @@ flowchart TB
 All CRDs are defined in Rust with `kube-rs` `#[derive(CustomResource)]`, and the schemas
 are generated from the same types the controllers use.
 
+> **Implementation:** the Rust types are in `crates/pt-crds`. The generated schemas are in
+> `deploy/crds/` and full examples are in `deploy/examples/`. The examples below are
+> abridged. The implementation adds these fields:
+>
+> - `ModelPool`: `engine` (`backend`, `version`, `image`, `extraArgs`), `disaggregation.prefillShare`,
+>   `targetUtilization`, `burstZ`, `maxReplicas`
+> - `PoolAllocation`: `burstFactor`
+> - `PerformanceProfile`: `roleCapacity` for disaggregated prefill and decode workers
+> - `CapacityReservation`: `sku`, `isolation`, `termMonths` (1, 3, or 6), `termEnd`
+>
+> `ModelPool.status` also reports `desiredReplicas`, `minAvailable`, and `Ready` /
+> `CapacityShortfall` conditions.
+
 ### `PerformanceProfile` (cluster-scoped, produced by Calibration Service)
 ```yaml
 apiVersion: pt.example.com/v1

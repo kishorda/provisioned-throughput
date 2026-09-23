@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Shape {
     pub input_p95: u64,

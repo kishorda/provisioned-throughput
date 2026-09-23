@@ -1,0 +1,32 @@
+# A shared-provisioned, disaggregated pool. The controller sizes it from PoolAllocations
+# and renders a DynamoGraphDeployment with the same name.
+apiVersion: pt.example.com/v1
+kind: ModelPool
+metadata:
+  name: maverick-b200-a1
+  namespace: pt-serving
+spec:
+  model: meta-llama/Llama-4-Maverick-17B-128E-Instruct
+  profileRef: llama-4-maverick.b200.trtllm-1.2.tp8
+  engine:
+    backend: trtllm
+    version: "1.2"
+    image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.0
+  isolation: shared
+  disaggregation:
+    enabled: true
+    conditional: true
+    prefillShare: 0.3
+    prefillReplicasMin: 2
+    decodeReplicasMin: 4
+  headroom:
+    failureDomainK: 2
+    maintenanceSlots: 1
+    hotSpares: 1
+    warmSpares: 2
+  targetUtilization: 0.85
+  burstZ: 2.33
+  payg:
+    backfill: true
+    maxReplicas: 40
+  maxReplicas: 64

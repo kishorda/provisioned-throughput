@@ -1,0 +1,24 @@
+[package]
+name = "pt-operator"
+description = "Regional Capacity Controller: sizes ModelPools and renders Dynamo deployments"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pt-core = { workspace = true, features = ["schema"] }
+pt-crds.workspace = true
+anyhow.workspace = true
+futures.workspace = true
+k8s-openapi.workspace = true
+kube = { workspace = true, features = ["client", "runtime", "derive", "rustls-tls", "ring"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+serde_yaml.workspace = true

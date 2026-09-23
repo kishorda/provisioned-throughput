@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::tier::Tier;
 
 /// Fitted cost coefficients for one (model, GPU, engine version, parallelism).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Coefficients {
     /// WU per uncached prefill token (compute-bound).
@@ -31,6 +32,7 @@ pub struct PerformanceProfile {
     pub capacity_wu_per_s: TierCapacity,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct TierCapacity {
     pub interactive: f64,

@@ -5,6 +5,8 @@ members = [
     "crates/pt-admission",
     "crates/pt-gateway",
     "crates/pt-mock-engine",
+    "crates/pt-crds",
+    "crates/pt-operator",
 ]
 
 [workspace.package]
@@ -17,15 +19,21 @@ rust-version = "1.85"
 pt-core = { path = "crates/pt-core" }
 pt-admission = { path = "crates/pt-admission" }
 pt-mock-engine = { path = "crates/pt-mock-engine" }
+pt-crds = { path = "crates/pt-crds" }
 
 anyhow = "1"
 axum = "0.8"
 bytes = "1"
 futures = "0.3"
+k8s-openapi = { version = "0.28", features = ["latest"] }
+# Crates opt into features. The operator uses rustls with the ring provider, which builds without cmake.
+kube = { version = "4.2", default-features = false }
 # Plain HTTP only: engines are reached inside the cluster. Avoids TLS C build deps.
 reqwest = { version = "0.12", default-features = false, features = ["stream", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
+schemars = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time", "sync", "signal"] }
 toml = "0.8"

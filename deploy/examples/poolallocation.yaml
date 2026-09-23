@@ -1,0 +1,14 @@
+# Written by the global Capacity Planner: 82,000 WU/s of reservation res-7f3a on the pool.
+apiVersion: pt.example.com/v1
+kind: PoolAllocation
+metadata:
+  name: res-7f3a.maverick-b200-a1
+  namespace: pt-serving
+spec:
+  reservation: res-7f3a
+  tenant: acme
+  pool: maverick-b200-a1
+  wuPerSec: 82000
+  tier: agentic
+  kvShare: 0.16
+  burstFactor: 3.0

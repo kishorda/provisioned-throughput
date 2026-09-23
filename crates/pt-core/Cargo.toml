@@ -9,3 +9,7 @@ rust-version.workspace = true
 [dependencies]
 serde.workspace = true
 uuid.workspace = true
+schemars = { workspace = true, optional = true }
+
+[features]
+schema = ["dep:schemars"]

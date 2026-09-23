@@ -5,10 +5,11 @@ reserve Capacity Units (CUs): a fixed rate of calibrated Work Units (WU) per sec
 named latency tier.
 
 - **Design:** [`docs/`](docs/README.md). Start with the executive summary.
-- **Code:** a Rust workspace implementing the P0 admission path (docs/04). The gateway
-  counts input tokens, estimates WU, admits against a debt-based bucket with boundary
-  policies, streams from the engine, settles on the engine's actual usage, and writes a
-  usage record for every request.
+- **Code:** a Rust workspace with:
+  - The P0 admission path (docs/04). The gateway counts input tokens, estimates WU, admits
+    against a debt-based bucket with boundary policies, streams from the engine, settles on
+    the engine's actual usage, and writes a usage record for every request.
+  - The P1 custom resources and the Regional Capacity Controller (docs/06, docs/08).
 
 ## Crates
 
@@ -18,6 +19,8 @@ named latency tier.
 | `pt-admission` | Debt-based WU bucket (ADR-002), burst bank, boundary-policy chain (burst → queue → spillover → reject), `continuation` reserve, output-length estimator |
 | `pt-gateway` | OpenAI-compatible gateway (axum): auth, estimate, admit, proxy/stream, settle, usage JSONL, `/v1/pt/status` |
 | `pt-mock-engine` | Stand-in for a Dynamo frontend: OpenAI chat API with configurable TTFT/TPOT and simulated prefix caching |
+| `pt-crds` | Custom resources (docs/08 §2): `PerformanceProfile`, `ModelPool`, `PoolAllocation`, `CapacityReservation`, and the `crdgen` binary |
+| `pt-operator` | Regional Capacity Controller: sizes each `ModelPool` from its allocations (docs/06 §2), applies a `DynamoGraphDeployment` and per-role PodDisruptionBudgets, and reports status |
 
 ## Run locally
 
@@ -55,17 +58,38 @@ Mock engine settings: `MOCK_ADDR`, `MOCK_NAME`, `MOCK_TTFT_MS` (default 50),
 | `x-pt-wu-estimate`, `x-pt-queue-ms`, `x-request-id` | response | Admission details |
 | `Retry-After`, `x-pt-reason`, `x-pt-entitlement-remaining` | 429 response | Why the request was rejected and when to retry |
 
+## Kubernetes
+
+```sh
+cargo run -p pt-crds --bin crdgen                        # regenerate deploy/crds/ after changing pt-crds
+kubectl apply -f deploy/crds/                            # install the CRDs
+kubectl apply -f deploy/operator/rbac.yaml
+docker build -f deploy/operator/Dockerfile -t pt-operator:dev .
+kubectl apply -f deploy/operator/deployment.yaml
+kubectl create namespace pt-serving
+kubectl apply -f deploy/examples/                        # profile, pool, allocation, reservation
+kubectl get ptpool -n pt-serving                         # sizing and Ready condition
+```
+
+The controller needs Dynamo's `DynamoGraphDeployment` CRD (`nvidia.com/v1alpha1`) installed.
+For each `ModelPool` it:
+
+- sets `desiredReplicas` = floor + `failureDomainK` + `maintenanceSlots` + `hotSpares`, per role
+- sets a PodDisruptionBudget of `minAvailable` = floor + `failureDomainK` per role
+- refuses to touch children, and sets `Ready=False`, when the profile is missing, the
+  engine version doesn't match the profile, or a strict-dedicated pool enables PAYG backfill
+
 ## Test
 
 ```sh
-cargo test --workspace          # unit tests plus end-to-end gateway tests against the mock engine
+cargo test --workspace          # unit tests, end-to-end gateway tests, CRD drift and example checks
 cargo clippy --workspace --all-targets
 cargo fmt --all --check
 ```
 
 ## Not built yet
 
-These are follow-ups from the P0 plan in docs/11:
+Follow-ups from the roadmap in docs/11:
 
 - **Quota Coordinator** (ADR-003). Each gateway currently enforces the full entitlement
   locally, so run one gateway replica per reservation until leases exist.
@@ -75,4 +99,11 @@ These are follow-ups from the P0 plan in docs/11:
   refunds the difference.
 - **Redpanda publisher and metrics.** Usage goes to JSONL, which the ClickHouse schema can ingest.
 - **Entitlement snapshots** from the global control plane. Config is a local TOML file.
-- **Kubernetes CRDs and controllers**, and Dynamo router extensions (P1).
+- **Dynamo router extensions** (tenant WFQ, KV budgets) and the engine KV-budget adapter (P1).
+- **Controller gaps:** no leader election (run one replica), no drain workflow beyond
+  PDBs, and no Dynamo Planner floor integration. The controller owns `replicas` on the
+  DGD, so don't enable Planner autoscaling on PT pools yet.
+- **Dynamo DGD schema check.** `crates/pt-operator/src/render.rs` follows Dynamo's
+  `v1alpha1` examples. Verify service fields and worker flags against the Dynamo release
+  you deploy. The rendering hasn't been run against a live cluster.
+- **Operator image.** The Dockerfile hasn't been built here, because this machine has no Docker.

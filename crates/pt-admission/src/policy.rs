@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BoundaryPolicy {
@@ -17,6 +18,7 @@ pub struct BoundaryPolicy {
     pub spillover: bool,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BurstPolicy {
@@ -42,6 +44,7 @@ impl Default for BurstPolicy {
     }
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QueuePolicy {

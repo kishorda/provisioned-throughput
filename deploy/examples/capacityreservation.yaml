@@ -1,0 +1,28 @@
+# Read-only regional mirror of a global contract, written by the Entitlement Distributor.
+apiVersion: pt.example.com/v1
+kind: CapacityReservation
+metadata:
+  name: res-7f3a
+  namespace: pt-serving
+spec:
+  tenant: acme
+  model: meta-llama/Llama-4-Maverick-17B-128E-Instruct
+  cus: 82
+  tier: agentic
+  shape:
+    input_p95: 12000
+    input_max: 64000
+    output_p95: 800
+    context_ceiling: 128000
+    cache_hit_ratio: 0.6
+    burst_factor: 3.0
+  sku: regional
+  isolation: shared
+  termMonths: 3
+  termEnd: "2026-12-31"
+  boundaryPolicy:
+    spillover: true
+    burst:
+      max_credit_seconds: 60
+      max_rate_multiple: 2.0
+      continuation_reserve: 0.25

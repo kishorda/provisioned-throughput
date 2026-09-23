@@ -1,0 +1,27 @@
+# Produced by the Calibration Service. Coefficients and capacities are placeholders until
+# calibration runs.
+apiVersion: pt.example.com/v1
+kind: PerformanceProfile
+metadata:
+  name: llama-4-maverick.b200.trtllm-1.2.tp8
+spec:
+  model: meta-llama/Llama-4-Maverick-17B-128E-Instruct
+  gpuClass: B200
+  engine:
+    backend: trtllm
+    version: "1.2"
+  parallelism:
+    tp: 8
+    pp: 1
+    ep: 1
+  coefficients: { a: 1.00, b: 0.08, c: 3.10, d: 0.00021 }
+  decodeModifiers:
+    specDecode: 0.62
+    jsonSchema: 1.07
+  capacity:
+    interactive: 41000
+    agentic: 35500
+    standard: 58000
+  roleCapacity:
+    prefill: { interactive: 140000, agentic: 120000, standard: 190000 }
+    decode: { interactive: 24000, agentic: 21000, standard: 36000 }

@@ -1,0 +1,40 @@
+# One replica: there is no leader election yet, so don't scale this up.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pt-operator
+  namespace: pt-system
+  labels:
+    app.kubernetes.io/name: pt-operator
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pt-operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pt-operator
+    spec:
+      serviceAccountName: pt-operator
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: operator
+          # Build with deploy/operator/Dockerfile and push to your registry.
+          image: pt-operator:dev
+          env:
+            - name: RUST_LOG
+              value: info,pt_operator=debug
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
