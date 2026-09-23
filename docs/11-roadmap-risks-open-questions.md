@@ -39,8 +39,8 @@ The PM answered the open questions on 2026-09-23.
 | 3 | What is the SLA credit schedule? Is there a grace margin for out-of-shape traffic? | Credits are 10% / 20% / 30% / 50% of the monthly reservation fee at the 99.8% / 99.7% / 99.6% / 99.5% thresholds. **No grace margin:** anything beyond the declared shape is out-of-shape. | [09 §4](09-metering-observability-and-slas.md#4-sla-definition), [02 §4](02-capacity-unit-and-cost-model.md#4-workload-shape-declaration) |
 | 4 | What are the minimum reservation size and term lengths? | **Minimum 1 CU.** Terms are **1, 3, or 6 months**. | [02 §8](02-capacity-unit-and-cost-model.md#8-reservation-terms) |
 | 5 | Can customers resize mid-term? | **Increases only**, effective immediately (subject to feasibility) and billed for the remaining term. **No decreases mid-term.** A customer can reduce CUs only at renewal. | [02 §8](02-capacity-unit-and-cost-model.md#8-reservation-terms) |
-| 6 | Is strict-dedicated (no PAYG backfill) offered at launch? | **Yes**, at a premium, from GA (phase P1). | [05 §6](05-isolation-and-scheduling.md#6-pool-tiers-hybrid-isolation) |
+| 6 | Is strict-dedicated (no PAYG backfill) offered at launch? | **Yes**, from GA (phase P1), at **1.3×** the tier's CU price. | [05 §6](05-isolation-and-scheduling.md#6-pool-tiers-hybrid-isolation) |
 | 7 | Can customers set their own traffic priority beyond `continuation`? | **Not at launch.** `continuation` is the only intra-tenant priority. | [04 §5](04-request-lifecycle-and-admission.md#5-agentic-workloads) |
 | 8 | What are the per-tier CU price multipliers? | **Standard 1.0×** (base), **Interactive 1.25×**, **Agentic 1.5×**. | [02 §3](02-capacity-unit-and-cost-model.md#3-capacity-unit-cu-and-slo-tiers) |
 
-Still open for PM: the strict-dedicated premium.
+No pricing questions are open.
