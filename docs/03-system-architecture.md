@@ -72,7 +72,7 @@ The global plane is **off the request path**.
 
 | Component | Responsibility |
 |-----------|----------------|
-| **Reservation Service** | CRUD for tenants, reservations, deployments, and keys. Enforces term and commitment. Source of truth for entitlements. |
+| **Reservation Service** | CRUD for tenants, reservations, deployments, and keys. Enforces terms (1, 3, or 6 months; minimum 1 CU) and increase-only resizes mid-term. Source of truth for entitlements. |
 | **Quote API** | Sizing from a shape or trace ([02 §5](02-capacity-unit-and-cost-model.md#5-sizing--quote-api)). Calls the Planner for feasibility. |
 | **Capacity Planner** | Sale-time feasibility. Places reservations into regional pools with N+k headroom. Periodic rebalance ([06](06-capacity-planning-and-reliability.md)). |
 | **Profile Registry** | Versioned PerformanceProfiles; CU→replica conversion tables. |

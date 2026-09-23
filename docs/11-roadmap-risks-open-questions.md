@@ -1,11 +1,11 @@
-# 11 · Roadmap, Risks & Open Questions
+# 11 · Roadmap, Risks & Product Decisions
 
 ## 1. Phased delivery
 
 | Phase | Scope | Exit criteria |
 |-------|-------|---------------|
 | **P0 · Foundations** (≈ 1 quarter) | Calibration Service + profiles for 2 models × 2 GPU classes; WU cost model; PT Gateway with debt bucket and `reject`/`spillover`; Quota Coordinator; shared-provisioned pools on Dynamo (aggregated + chunked prefill); router priority classes; metering to ClickHouse; basic customer dashboard; **one region** | Internal dogfood tenants hold Interactive SLO at 100% entitlement with a PAYG flood |
-| **P1 · Isolation & agents** | Router WFQ by WU + pull-based dispatch; P/D disaggregation pools; per-tenant KV budgets + KVBM offload; `burst` and `queue` policies; session affinity; Quote API with trace replay; dedicated pools with PAYG backfill; capacity-aware drain controller | Interference suite ([05 §7](05-isolation-and-scheduling.md#7-validation-interference-test-suite)) passes; first external GA customers |
+| **P1 · Isolation & agents** | Router WFQ by WU + pull-based dispatch; P/D disaggregation pools; per-tenant KV budgets + KVBM offload; `burst` and `queue` policies; session affinity; Quote API with trace replay; dedicated pools with PAYG backfill plus the strict-dedicated (no backfill) option; mid-term CU increases; capacity-aware drain controller | Interference suite ([05 §7](05-isolation-and-scheduling.md#7-validation-interference-test-suite)) passes; first external GA customers |
 | **P2 · Global** | Multi-region SKUs with failover headroom; Entitlement Distributor share rebalancing; MILP rebalancer; hardware migration flow; CU re-rating; hardware-pinned SKU; SLA credits automation | Region-failover game day passes; first hardware-generation migration done with no SLO breach |
 
 ## 2. Team topology (suggested)
@@ -28,16 +28,18 @@
 | Hot headroom unused by PAYG in some regions | Margin erosion | Shift to warm spares where PAYG demand is thin; price Multi-region SKU accordingly |
 | Tokenisation at the gateway for huge prompts | Admission latency | Parallel tokenisation; accept client-supplied token counts for trusted tenants with post-hoc verification |
 
-## 4. Open questions for PM
+## 4. Product decisions
 
-1. **Pricing:** burst credit (free within cap, or discounted?), spillover (PAYG list price
-   or a discount?), and the tier price multipliers.
-2. **Re-rating cadence** and the share of efficiency gains passed through.
-3. **SLA credit schedule** and whether out-of-shape exclusion needs a grace margin (for
-   example, 10% over the declared max).
-4. **Minimum reservation size** and term lengths (monthly vs 1-year vs 3-year).
-5. **Resize semantics:** can customers increase CUs mid-term instantly (subject to
-   feasibility)? What notice is needed to decrease?
-6. **Strict-dedicated option** (no PAYG backfill): offer at launch or later?
-7. Should customers be able to **bring their own traffic priority** beyond `continuation`
-   (for example, paid vs free users in their app)?
+The PM answered the seven open questions on 2026-09-23.
+
+| # | Question | Decision | Where it's applied |
+|---|----------|----------|--------------------|
+| 1 | How are burst and spillover priced? | **Burst credit is free** within the configured cap. **Spillover is billed at PAYG list price.** | [04 §4](04-request-lifecycle-and-admission.md#4-boundary-policies) |
+| 2 | How often is the CU re-rated, and what share of gains passes through? | **Re-rating is infrequent**, with no fixed calendar cadence. **50% of realised efficiency gains** are passed to customers. | [02 §7](02-capacity-unit-and-cost-model.md#7-hardware-efficiency-gains-the-blogs-dilemma) |
+| 3 | What is the SLA credit schedule? Is there a grace margin for out-of-shape traffic? | Credits are 10% / 20% / 30% / 50% of the monthly reservation fee at the 99.8% / 99.7% / 99.6% / 99.5% thresholds. **No grace margin:** anything beyond the declared shape is out-of-shape. | [09 §4](09-metering-observability-and-slas.md#4-sla-definition), [02 §4](02-capacity-unit-and-cost-model.md#4-workload-shape-declaration) |
+| 4 | What are the minimum reservation size and term lengths? | **Minimum 1 CU.** Terms are **1, 3, or 6 months**. | [02 §8](02-capacity-unit-and-cost-model.md#8-reservation-terms) |
+| 5 | Can customers resize mid-term? | **Increases only**, effective immediately (subject to feasibility) and billed for the remaining term. **No decreases mid-term.** A customer can reduce CUs only at renewal. | [02 §8](02-capacity-unit-and-cost-model.md#8-reservation-terms) |
+| 6 | Is strict-dedicated (no PAYG backfill) offered at launch? | **Yes**, at a premium, from GA (phase P1). | [05 §6](05-isolation-and-scheduling.md#6-pool-tiers-hybrid-isolation) |
+| 7 | Can customers set their own traffic priority beyond `continuation`? | **Not at launch.** `continuation` is the only intra-tenant priority. | [04 §5](04-request-lifecycle-and-admission.md#5-agentic-workloads) |
+
+Still open for PM: the per-tier CU price multipliers and the strict-dedicated premium.

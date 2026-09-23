@@ -85,7 +85,7 @@ boundary_policy:
     deadline_ms: 2000
   spillover:
     enabled: true
-    to: payg              # billed at PAYG rates, class = spillover
+    to: payg              # billed at PAYG list price, class = spillover
   on_exhausted: reject    # after burst/queue/spillover are exhausted
 ```
 
@@ -93,8 +93,8 @@ boundary_policy:
 |------|-----------|-------------------|-----------|
 | `reject` | HTTP 429, `Retry-After` computed from bucket refill, `x-pt-reason: entitlement_exhausted` | none | Predictable |
 | `queue` | Held at the gateway in a deadline-aware queue. Rejected if the deadline would pass | provisioned (queue time counted in TTFT, excluded from SLA) | Latency not guaranteed for queued time |
-| `burst` | Draws from banked credit up to the rate multiple | `burst` | Best-effort SLO. Served with priority above PAYG |
-| `spillover` | Forwarded to the shared PAYG pool | `spillover` | No SLO. Billed as PAYG |
+| `burst` | Draws from banked credit up to the rate multiple | `burst` | Best-effort SLO. Served with priority above PAYG. **No extra charge** within the cap |
+| `spillover` | Forwarded to the shared PAYG pool | `spillover` | No SLO. Billed at **PAYG list price** |
 
 The policies chain: `burst → queue → spillover → reject`, in the order the customer
 enables them.
@@ -117,7 +117,8 @@ specific response:
 4. **Chain integrity → intra-tenant priority.** `x-pt-priority: continuation` marks
    mid-chain calls. When the bucket is tight, continuation calls draw burst credit first
    and new-session calls are queued or rejected first. A half-finished agent task is worse
-   than a delayed new one.
+   than a delayed new one. At launch, `continuation` is the only intra-tenant priority.
+   Customer-defined priority levels (for example, paid vs free users) are not supported.
 
 ## 6. Distributed enforcement
 

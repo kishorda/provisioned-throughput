@@ -12,7 +12,8 @@ uneconomic.
 All headroom (the `k` spares, hot spares, and unused reserved capacity on dedicated pools)
 serves **preemptible PAYG** traffic at the lowest priority. Provisioned traffic evicts it
 within 1 s, through router priority and engine preemption with KVBM offload. A
-"strict-dedicated" option without backfill is available at a premium.
+"strict-dedicated" option without backfill is available at a premium from launch.
+The dedicated capacity for that option is excluded from the backfill economics.
 
 ## Consequences
 - ✅ Headroom pays for itself. PT pricing can stay competitive.

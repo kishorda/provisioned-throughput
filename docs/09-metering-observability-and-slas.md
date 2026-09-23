@@ -76,8 +76,20 @@ The blog notes that latency differs by vantage point. We publish exactly one:
 - **Exclusions:** traffic above entitlement (burst, queued, spillover), out-of-shape
   requests, client-caused errors, the declared failover window for Multi-region SKUs, and
   customer-initiated changes (for example, a resize in progress).
-- **Attainment:** percentage of eligible windows meeting both TTFT and TPOT targets.
-  Service credits apply below 99.5% (N2). The credit schedule is a PM open question.
+- **Attainment:** percentage of eligible windows meeting both TTFT and TPOT targets. The
+  commitment is **99.8%** per month (N2).
+- **Service credits** are a percentage of that month's fee for the affected reservation:
+
+  | Monthly attainment | Credit |
+  |--------------------|--------|
+  | ≥ 99.8% | none |
+  | < 99.8% and ≥ 99.7% | 10% |
+  | < 99.7% and ≥ 99.6% | 20% |
+  | < 99.6% and ≥ 99.5% | 30% |
+  | < 99.5% | 50% |
+
+- **No grace margin for shape:** out-of-shape requests are excluded exactly as declared
+  ([02 §4](02-capacity-unit-and-cost-model.md#4-workload-shape-declaration)).
 - The SLA report is generated from the same ClickHouse data that customers query, so
   customers can reproduce it.
 

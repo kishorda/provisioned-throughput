@@ -14,7 +14,7 @@
    the blog's migration-ratio problem: the conversion happens per pool, using the
    calibrated cost model for that workload shape, not a single fleet-wide ratio.
 4. Old pools shrink as allocations drain, and are retired or repurposed for PAYG.
-5. Realised efficiency gains feed the semi-annual **CU re-rating** ([02 §7](02-capacity-unit-and-cost-model.md#7-hardware-efficiency-gains-the-blogs-dilemma)).
+5. Realised efficiency gains feed the next **CU re-rating**, which passes 50% of them to customers ([02 §7](02-capacity-unit-and-cost-model.md#7-hardware-efficiency-gains-the-blogs-dilemma)).
 
 ## 2. Hardware-pinned SKU
 

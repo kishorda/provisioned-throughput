@@ -51,7 +51,7 @@ The design rests on six decisions:
 | 08 | [Kubernetes & Dynamo integration](08-kubernetes-and-dynamo-integration.md) | Platform team |
 | 09 | [Metering, observability & SLAs](09-metering-observability-and-slas.md) | PM, billing, SRE |
 | 10 | [Hardware & model lifecycle](10-hardware-and-model-lifecycle.md) | Capacity, PM |
-| 11 | [Roadmap, risks, open questions](11-roadmap-risks-open-questions.md) | Leadership, PM |
+| 11 | [Roadmap, risks, product decisions](11-roadmap-risks-open-questions.md) | Leadership, PM |
 
 ## Architecture decision records
 

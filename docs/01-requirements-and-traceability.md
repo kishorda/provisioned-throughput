@@ -39,8 +39,9 @@ Every problem raised in the blog maps to at least one requirement and one design
 ## 3. Functional requirements (summary)
 
 - **FR1** Customers can get a quote (CUs needed) from a declared shape or a replayed trace.
-- **FR2** Customers can buy, resize, and renew reservations per model, tier, and region.
-  The platform rejects sales it cannot deliver.
+- **FR2** Customers can buy reservations per model, tier, and region (minimum 1 CU; 1-,
+  3-, or 6-month terms), increase them mid-term, and renew them. Decreases take effect only
+  at renewal. The platform rejects sales and increases it cannot deliver.
 - **FR3** Customers can create deployments (endpoints) bound to a reservation, with a boundary policy.
 - **FR4** The data plane serves an OpenAI-compatible API and enforces entitlement, tier, and policy.
 - **FR5** Every request produces a usage record: WU, token breakdown, class, and latency.
@@ -52,7 +53,7 @@ Every problem raised in the blog maps to at least one requirement and one design
 | ID | Requirement | Target |
 |----|-------------|--------|
 | N1 | Gateway admission overhead (tokenise + estimate + admit) | p99 < 2 ms for ≤ 32K-token prompts |
-| N2 | SLO attainment per reservation (in-shape, within entitlement) | ≥ 99.5% of 5-minute windows per month |
+| N2 | SLO attainment per reservation (in-shape, within entitlement) | ≥ 99.8% of 5-minute windows per month (SLA credits start below this, see [09 §4](09-metering-observability-and-slas.md#4-sla-definition)) |
 | N3 | Entitlement change propagation (resize or new reservation) | < 60 s to all gateways in region |
 | N4 | Regional independence | Region serves on last-known-good entitlements for ≥ 24 h without the global plane |
 | N5 | Metering durability | < 0.001% usage record loss; exactly-once billing aggregation |

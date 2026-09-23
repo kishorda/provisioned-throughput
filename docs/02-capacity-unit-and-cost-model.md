@@ -70,7 +70,8 @@ shape:
   long-context reservations go to disaggregated pools).
 - **The SLO covers in-shape traffic.** Out-of-shape requests (input > declared max, or
   context > ceiling) are still served and charged at actual WU. They are excluded from SLA
-  attainment and flagged in telemetry, so customers can see drift and resize.
+  attainment and flagged in telemetry, so customers can see drift and resize. There is
+  **no grace margin**: a request even slightly over a declared maximum is out-of-shape.
 - Drift detection: telemetry compares the observed shape with the declared shape weekly
   and recommends a new CU count or tier.
 
@@ -103,12 +104,27 @@ Customers do not have to learn WU to buy.
 
 - The **CU definition stays fixed**. A new GPU generation or a faster kernel raises
   WU/s-per-replica, so the provider needs fewer GPUs per CU.
-- **Re-rating policy:** twice a year, the CU price is re-rated downwards to share a
-  published fraction of realised efficiency gains with customers. Existing reservations get
-  the lower price at renewal. Customers are never stranded on old hardware, because
+- **Re-rating policy:** re-rating is infrequent and has no fixed calendar cadence. When
+  it happens, the CU price is re-rated downwards so that **50% of realised efficiency
+  gains** go to customers. Existing reservations get the lower price at renewal, which is at
+  most 6 months away ([§8](#8-reservation-terms)). Customers are never stranded on old hardware, because
   entitlement does not name hardware.
 - Customers who need a specific GPU (compliance, or determinism of numerics) buy a
   **hardware-pinned** SKU at a premium ([10 §2](10-hardware-and-model-lifecycle.md#2-hardware-pinned-sku)).
+
+## 8. Reservation terms
+
+| Term | Rule |
+|------|------|
+| Minimum size | 1 CU |
+| Term length | 1, 3, or 6 months |
+| Increase mid-term | Allowed and effective as soon as the Capacity Planner confirms feasibility (target < 60 s, N3). The added CUs are billed for the remaining term and end with the original term. |
+| Decrease mid-term | Not allowed. CUs can be reduced only at renewal. |
+| Renewal | At the then-current CU price, including any re-rating (§7) |
+
+Short terms keep planner commitments short and let re-rating reach customers quickly.
+They also put more weight on the Capacity Planner's lead-time forecasts, because demand
+can leave the platform every 1–6 months.
 
 ## Blog problems addressed
 P1, P2, P3, P4, P5, P6, P8. See [traceability](01-requirements-and-traceability.md#2-traceability-matrix).
