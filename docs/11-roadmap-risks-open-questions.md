@@ -30,7 +30,7 @@
 
 ## 4. Product decisions
 
-The PM answered the seven open questions on 2026-09-23.
+The PM answered the open questions on 2026-09-23.
 
 | # | Question | Decision | Where it's applied |
 |---|----------|----------|--------------------|
@@ -41,5 +41,6 @@ The PM answered the seven open questions on 2026-09-23.
 | 5 | Can customers resize mid-term? | **Increases only**, effective immediately (subject to feasibility) and billed for the remaining term. **No decreases mid-term.** A customer can reduce CUs only at renewal. | [02 §8](02-capacity-unit-and-cost-model.md#8-reservation-terms) |
 | 6 | Is strict-dedicated (no PAYG backfill) offered at launch? | **Yes**, at a premium, from GA (phase P1). | [05 §6](05-isolation-and-scheduling.md#6-pool-tiers-hybrid-isolation) |
 | 7 | Can customers set their own traffic priority beyond `continuation`? | **Not at launch.** `continuation` is the only intra-tenant priority. | [04 §5](04-request-lifecycle-and-admission.md#5-agentic-workloads) |
+| 8 | What are the per-tier CU price multipliers? | **Standard 1.0×** (base), **Interactive 1.25×**, **Agentic 1.5×**. | [02 §3](02-capacity-unit-and-cost-model.md#3-capacity-unit-cu-and-slo-tiers) |
 
-Still open for PM: the per-tier CU price multipliers and the strict-dedicated premium.
+Still open for PM: the strict-dedicated premium.

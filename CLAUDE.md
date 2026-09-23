@@ -47,6 +47,7 @@ These are recorded in `docs/11-roadmap-risks-open-questions.md` §4. Treat them 
 - Minimum reservation is 1 CU, with 1-, 3-, or 6-month terms. Increases are allowed mid-term for the remaining term. Decreases happen only at renewal.
 - Strict-dedicated (no backfill) is offered at launch.
 - There is no customer-defined priority beyond `continuation` at launch.
+- Tier price multipliers: Standard 1.0× (base), Interactive 1.25×, Agentic 1.5×.
 
 ## Open items
-Still open for PM: the per-tier CU price multipliers and the strict-dedicated premium. Top technical risks: Dynamo API churn and fork maintenance, and upstream acceptance of the engine KV-budget patch.
+Still open for PM: the strict-dedicated premium. Top technical risks: Dynamo API churn and fork maintenance, and upstream acceptance of the engine KV-budget patch.

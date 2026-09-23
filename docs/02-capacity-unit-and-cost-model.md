@@ -49,8 +49,17 @@ pool's measured *WU/s-per-replica-at-SLO* ([06 §2](06-capacity-planning-and-rel
 | **Standard** | ≤ 3 s | ≤ 80 ms | none | Summarisation, RAG backends |
 
 Latency targets are defined at the gateway ([09 §4](09-metering-observability-and-slas.md#4-sla-definition)).
-A tighter tier costs more WU/s-per-replica, because it forces smaller batches. The price
+A tighter tier forces smaller batches, so each replica delivers fewer WU/s. The price
 per CU therefore differs by tier, but the CU definition does not change.
+
+| Tier | CU price multiplier |
+|------|---------------------|
+| Standard | 1.0× (base price) |
+| Interactive | 1.25× |
+| Agentic | 1.5× |
+
+Once calibration has run, check the multipliers against each tier's WU/s-per-replica
+ratio, so every tier covers its GPU cost.
 
 ## 4. Workload shape declaration
 
