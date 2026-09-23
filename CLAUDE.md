@@ -4,7 +4,7 @@
 This is the architecture design and code for a **Provisioned Throughput (PT)** product for AI inference, written from a principal-architect perspective. It answers the problems raised in the PM's blog post:
 https://kishoraher.wordpress.com/2026/09/23/provisioned-throughput-for-ai-inference-why-just-reserve-some-capacity-is-harder-than-it-sounds/
 
-**Current state:** design docs are complete. The Rust workspace implements the **P0 admission path** (docs/04, run locally against a mock engine) and the **P1 CRDs plus the Regional Capacity Controller** (docs/06, docs/08). The controller has only been unit-tested: there's no cluster, Docker, or kubectl on this machine. There's no Quota Coordinator or Dynamo router extension yet. `README.md` lists what's missing. It's a git repo with no remote configured. The GitHub repo `kishorda/provisioned-throughput` doesn't exist yet, and there's no `gh` CLI, so the user must create it before pushing over SSH.
+**Current state:** design docs are complete. The Rust workspace implements the **P0 admission path** (docs/04, run locally against a mock engine) and the **P1 CRDs plus the Regional Capacity Controller** (docs/06, docs/08). The controller has only been unit-tested: there's no cluster, Docker, or kubectl on this machine. There's no Quota Coordinator or Dynamo router extension yet. `README.md` lists what's missing. The remote is `origin` = `git@github.com:kishorda/provisioned-throughput.git` (SSH). HTTPS has no credentials on this machine, and there's no `gh` CLI.
 
 ## Fixed decisions (don't re-litigate without the user)
 - **Sellable unit:** an abstract **Capacity Unit (CU)** = a fixed rate of **Work Units (WU)** per second at a named SLO tier (Interactive / Agentic / Standard).
