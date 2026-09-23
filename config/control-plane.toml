@@ -1,0 +1,58 @@
+# Local development configuration for pt-control-plane.
+# Tenants, the model catalog, and capacity come from other services in production.
+# Prices and capacities are placeholders.
+
+[server]
+listen = "127.0.0.1:8090"
+endpoint_template = "https://{region}.pt.example.com/v1"
+lifecycle_interval_secs = 60
+
+[pricing]
+currency = "USD"
+base_cu_price_per_month_cents = 150000  # one Standard CU for one month
+
+[[tenants]]
+id = "acme"
+admin_api_key = "sk-admin-acme-dev"
+
+[[tenants]]
+id = "globex"
+admin_api_key = "sk-admin-globex-dev"
+
+[[models]]
+id = "llama-4-maverick"
+display_name = "Llama 4 Maverick"
+max_context = 131072
+tiers = ["interactive", "agentic", "standard"]
+
+[[models]]
+id = "qwen3-32b"
+display_name = "Qwen3 32B"
+max_context = 32768
+tiers = ["interactive", "standard"]
+
+# Sellable CUs per region and model. eu-central has no disaggregated pools for Maverick,
+# so it serves shorter contexts.
+[[capacity]]
+region = "eu-west"
+model = "llama-4-maverick"
+cus = 200
+max_context = 131072
+
+[[capacity]]
+region = "eu-central"
+model = "llama-4-maverick"
+cus = 100
+max_context = 32768
+
+[[capacity]]
+region = "us-east"
+model = "llama-4-maverick"
+cus = 300
+max_context = 131072
+
+[[capacity]]
+region = "us-east"
+model = "qwen3-32b"
+cus = 100
+max_context = 32768

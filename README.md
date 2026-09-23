@@ -10,6 +10,8 @@ named latency tier.
     against a debt-based bucket with boundary policies, streams from the engine, settles on
     the engine's actual usage, and writes a usage record for every request.
   - The P1 custom resources and the Regional Capacity Controller (docs/06, docs/08).
+  - The control-plane API that lets customers create, update, and delete Provisioned
+    Throughput for a model (docs/12).
 
 ## Crates
 
@@ -20,6 +22,7 @@ named latency tier.
 | `pt-gateway` | OpenAI-compatible gateway (axum): auth, estimate, admit, proxy/stream, settle, usage JSONL, `/v1/pt/status` |
 | `pt-mock-engine` | Stand-in for a Dynamo frontend: OpenAI chat API with configurable TTFT/TPOT and simulated prefix caching |
 | `pt-crds` | Custom resources (docs/08 §2): `PerformanceProfile`, `ModelPool`, `PoolAllocation`, `CapacityReservation`, and the `crdgen` binary |
+| `pt-control-plane` | Customer REST API (docs/12): create, get, list, update, and delete Provisioned Throughput; commercial rules; capacity checks; renewal lifecycle; in-memory store plus a CockroachDB migration |
 | `pt-operator` | Regional Capacity Controller: sizes each `ModelPool` from its allocations (docs/06 §2), applies a `DynamoGraphDeployment` and per-role PodDisruptionBudgets, and reports status |
 
 ## Run locally
@@ -57,6 +60,29 @@ Mock engine settings: `MOCK_ADDR`, `MOCK_NAME`, `MOCK_TTFT_MS` (default 50),
 | `x-pt-class` | response | `provisioned`, `burst`, or `spillover` |
 | `x-pt-wu-estimate`, `x-pt-queue-ms`, `x-request-id` | response | Admission details |
 | `Retry-After`, `x-pt-reason`, `x-pt-entitlement-remaining` | 429 response | Why the request was rejected and when to retry |
+
+## Control-plane API
+
+```sh
+target/debug/pt-control-plane config/control-plane.toml &   # :8090, in-memory state
+
+curl -s -X POST http://127.0.0.1:8090/v1/provisioned-throughput \
+  -H 'Authorization: Bearer sk-admin-acme-dev' -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: order-1' \
+  -d '{"name":"agents-prod","model":"llama-4-maverick","tier":"agentic",
+       "regions":[{"region":"eu-west","cus":4}],"term_months":3,
+       "shape":{"input_p95":8000,"input_max":16000,"output_p95":500,"context_ceiling":32768}}'
+# 201 with the resource, an ETag, and a one-time api_key
+
+curl -s -X PATCH http://127.0.0.1:8090/v1/provisioned-throughput/<id> \
+  -H 'Authorization: Bearer sk-admin-acme-dev' -H 'If-Match: "1"' \
+  -d '{"regions":[{"region":"eu-west","cus":6}]}'      # increase: applies now, prorated
+
+curl -s -X DELETE http://127.0.0.1:8090/v1/provisioned-throughput/<id> \
+  -H 'Authorization: Bearer sk-admin-acme-dev'         # 202: ends at term_end
+```
+
+See [docs/12](docs/12-control-plane-api.md) for all rules and error codes.
 
 ## Kubernetes
 
@@ -98,7 +124,10 @@ Follow-ups from the roadmap in docs/11:
 - **Prefix-cache index at the gateway.** Estimates assume no cache hits; settlement
   refunds the difference.
 - **Redpanda publisher and metrics.** Usage goes to JSONL, which the ClickHouse schema can ingest.
-- **Entitlement snapshots** from the global control plane. Config is a local TOML file.
+- **Entitlement snapshots** from the global control plane to the gateway. The gateway still reads a local TOML file.
+- **Control-plane persistence.** The API keeps state in memory. The CockroachDB schema is in
+  `crates/pt-control-plane/migrations/`, but there's no SQL store yet. The capacity planner
+  is also in-memory and counts CUs per region and model, regardless of tier.
 - **Dynamo router extensions** (tenant WFQ, KV budgets) and the engine KV-budget adapter (P1).
 - **Controller gaps:** no leader election (run one replica), no drain workflow beyond
   PDBs, and no Dynamo Planner floor integration. The controller owns `replicas` on the

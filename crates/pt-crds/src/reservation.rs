@@ -3,7 +3,7 @@
 
 use kube::CustomResource;
 use pt_admission::BoundaryPolicy;
-use pt_core::{PoolIsolation, Shape, Tier};
+use pt_core::{PoolIsolation, Shape, TermMonths, Tier};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -52,49 +52,4 @@ pub enum Sku {
     Regional,
     MultiRegion,
     HardwarePinned,
-}
-
-/// Allowed term lengths. Serialised as the integer 1, 3, or 6.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "u8", into = "u8")]
-pub enum TermMonths {
-    One,
-    Three,
-    Six,
-}
-
-impl TryFrom<u8> for TermMonths {
-    type Error = String;
-    fn try_from(v: u8) -> Result<Self, String> {
-        match v {
-            1 => Ok(Self::One),
-            3 => Ok(Self::Three),
-            6 => Ok(Self::Six),
-            other => Err(format!("termMonths must be 1, 3, or 6, not {other}")),
-        }
-    }
-}
-
-impl From<TermMonths> for u8 {
-    fn from(t: TermMonths) -> u8 {
-        match t {
-            TermMonths::One => 1,
-            TermMonths::Three => 3,
-            TermMonths::Six => 6,
-        }
-    }
-}
-
-impl JsonSchema for TermMonths {
-    fn inline_schema() -> bool {
-        true
-    }
-
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "TermMonths".into()
-    }
-
-    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({ "type": "integer", "enum": [1, 3, 6] })
-    }
 }
