@@ -1,0 +1,11 @@
+[package]
+name = "pt-admission"
+description = "WU admission control: debt-based bucket, burst credit, boundary policies"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pt-core.workspace = true
+serde.workspace = true

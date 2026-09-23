@@ -1,0 +1,42 @@
+# Local development configuration for pt-gateway.
+# In production, reservations and deployments come from the global control plane's
+# entitlement snapshot. Coefficients and capacities are placeholders until calibration runs.
+
+[server]
+listen = "127.0.0.1:8080"
+engine_url = "http://127.0.0.1:9000"       # provisioned pool (Dynamo frontend or pt-mock-engine)
+payg_engine_url = "http://127.0.0.1:9001"  # PAYG pool for spillover
+usage_log = "usage.jsonl"                  # omit to write usage records to stdout
+wu_per_cu = 1000.0                         # WU/s delivered by one Capacity Unit
+
+[[profiles]]
+name = "llama-4-maverick.b200.trtllm-1.2.tp8"
+coefficients = { a = 1.00, b = 0.08, c = 3.10, d = 0.00021 }
+capacity_wu_per_s = { interactive = 41000.0, agentic = 35500.0, standard = 58000.0 }
+
+[[reservations]]
+id = "res-acme-agents"
+tenant = "acme"
+model = "llama-4-maverick"
+cus = 2
+tier = "agentic"
+profile = "llama-4-maverick.b200.trtllm-1.2.tp8"
+shape = { input_p95 = 12000, input_max = 64000, output_p95 = 800, context_ceiling = 128000, cache_hit_ratio = 0.6, burst_factor = 3.0 }
+
+[[deployments]]
+id = "dep-acme-agents-prod"
+reservation = "res-acme-agents"
+api_key = "sk-acme-dev"
+
+# Tried in order when the provisioned bucket is empty: burst → queue → spillover → reject.
+[deployments.boundary_policy]
+spillover = true
+
+[deployments.boundary_policy.burst]
+max_credit_seconds = 60.0
+max_rate_multiple = 2.0
+continuation_reserve = 0.25
+
+[deployments.boundary_policy.queue]
+deadline_ms = 2000
+max_depth_wu_seconds = 5.0

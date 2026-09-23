@@ -1,0 +1,53 @@
+//! Provisioned Throughput gateway (docs/03 §2.2, docs/04).
+
+pub mod chat;
+pub mod config;
+pub mod sse;
+pub mod state;
+pub mod usage;
+
+use std::time::Instant;
+
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use serde_json::json;
+
+pub use config::GatewayConfig;
+pub use state::AppState;
+
+pub fn router(app: AppState) -> Router {
+    Router::new()
+        .route("/v1/chat/completions", post(chat::chat_completions))
+        .route("/v1/pt/status", get(status))
+        .route("/healthz", get(|| async { "ok" }))
+        .with_state(app)
+}
+
+/// `GET /v1/pt/status`: the caller's deployment and its current entitlement state.
+async fn status(State(app): State<AppState>, headers: HeaderMap) -> Response {
+    let Some(dep) = chat::bearer_token(&headers).and_then(|k| app.deployment_for_key(k)) else {
+        return chat::api_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid_api_key",
+            "Invalid or missing API key.",
+        );
+    };
+    let res = &dep.reservation;
+    let s = res.limiter.status(Instant::now());
+    Json(json!({
+        "deployment": dep.id,
+        "reservation": res.id,
+        "model": res.model,
+        "tier": res.tier,
+        "cus": res.cus,
+        "entitlement_wu_per_s": s.entitlement_wu_s,
+        "bucket_wu": s.level_wu,
+        "burst_credit_wu": s.burst_credit_wu,
+        "queued_wu": s.queued_wu,
+        "boundary_policy": res.limiter.policy(),
+    }))
+    .into_response()
+}

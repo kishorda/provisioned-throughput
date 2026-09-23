@@ -1,10 +1,10 @@
 # CLAUDE.md
 
 ## What this project is
-This is the architecture design for a **Provisioned Throughput (PT)** product for AI inference, written from a principal-architect perspective. It answers the problems raised in the PM's blog post:
+This is the architecture design and code for a **Provisioned Throughput (PT)** product for AI inference, written from a principal-architect perspective. It answers the problems raised in the PM's blog post:
 https://kishoraher.wordpress.com/2026/09/23/provisioned-throughput-for-ai-inference-why-just-reserve-some-capacity-is-harder-than-it-sounds/
 
-**Current state:** documentation only. There is no code yet. It's a git repo with no remote configured. Don't scaffold code unless asked.
+**Current state:** design docs are complete. The code implements the **P0 admission path** (docs/04) as a Rust workspace, run locally against a mock engine. There is no Kubernetes, Dynamo, or Quota Coordinator code yet; `README.md` lists what's missing. It's a git repo with no remote configured. The GitHub repo `kishorda/provisioned-throughput` doesn't exist yet, and there's no `gh` CLI, so the user must create it before pushing over SSH.
 
 ## Fixed decisions (don't re-litigate without the user)
 - **Sellable unit:** an abstract **Capacity Unit (CU)** = a fixed rate of **Work Units (WU)** per second at a named SLO tier (Interactive / Agentic / Standard).
@@ -16,6 +16,13 @@ https://kishoraher.wordpress.com/2026/09/23/provisioned-throughput-for-ai-infere
 
 ## Layout
 ```
+Cargo.toml                      # workspace
+crates/
+  pt-core/                      # WU cost model, PerformanceProfile, tiers + pricing, Shape, token counting, UsageRecord
+  pt-admission/                 # DebtBucket (ADR-002), BurstBank, ReservationLimiter (burst → queue → spillover → reject), OutputEstimator
+  pt-gateway/                   # axum gateway: chat.rs (admission path), sse.rs, state.rs, config.rs, usage.rs; tests/gateway.rs (e2e)
+  pt-mock-engine/               # OpenAI-compatible mock with TTFT/TPOT and simulated prefix cache
+config/gateway.toml             # example local config (stands in for the entitlement snapshot)
 docs/
   README.md                     # index, executive summary, glossary, ADR table
   01-requirements-and-traceability.md   # blog problems P1–P20 → requirements → sections; NFRs N1–N10
@@ -26,6 +33,13 @@ docs/
 Published summary page (private Artifact): https://claude.ai/artifact/HMSSEEU8fb8tWSrGE9NmSH
 Its source HTML lived in a session scratchpad, not in this repo. To update it, republish with that URL after reading it.
 
+## Conventions for code
+- Keep admission logic pure and synchronous in `pt-admission`, taking `now: Instant` explicitly so tests are deterministic. The gateway owns async and I/O.
+- Settlement and usage emission happen once, in `Settlement::drop` (`crates/pt-gateway/src/chat.rs`), so every exit path is covered, including client disconnects.
+- Engines are reached over plain HTTP (`reqwest` with default features off). Don't add crates that need cmake or TLS C libraries: this machine has no cmake.
+- The machine has 4 cores and about 3 GB of RAM. Build with `CARGO_BUILD_JOBS=2` if the linker runs out of memory.
+- Pricing values in code (`pt_core::tier`) must match the product decisions below.
+
 ## Conventions for editing docs
 - Headings are numbered `## N. Title`. Cross-links use GitHub-style anchors (for example `05-isolation-and-scheduling.md#4-level-3--engine`). If you rename a heading, fix the links that point to it.
 - Each design doc starts with a `> Decision record(s):` line linking its ADRs, and ends with a **"Blog problems addressed"** line listing P-numbers.
@@ -35,6 +49,8 @@ Its source HTML lived in a session scratchpad, not in this repo. To update it, r
 - Spelling is British (tokenise, behaviour, utilisation). Numeric targets (tier latencies, coefficients, percentages) are placeholders until calibration runs. Keep them labelled as such.
 
 ## Verification
+- **Code:** `cargo test --workspace` (unit tests plus end-to-end gateway tests against in-process mock engines), `cargo clippy --workspace --all-targets` (expect no warnings), `cargo fmt --all --check`.
+- **Smoke run:** start two `pt-mock-engine`s (`MOCK_ADDR=127.0.0.1:9000` and `:9001`) and `pt-gateway config/gateway.toml`, then use the curl commands in `README.md`. Run it from the scratchpad, because `usage_log` is relative to the working directory.
 - **Links and anchors:** extract every relative `](path#anchor)` link from `docs/**/*.md`, and check that the target file exists and that the anchor matches a GitHub slug of a heading (outside code fences). A small inline Python script was used for this. Expect 0 broken links.
 - **Mermaid:** extract the ```mermaid blocks and render each one with
   `npx -y @mermaid-js/mermaid-cli -p pp.json -i d.mmd -o d.svg`, where `pp.json` is `{"args":["--no-sandbox"]}`. Chromium's sandbox is unavailable on this machine (Ubuntu AppArmor userns restriction). Put temporary files in the session scratchpad, not in the repo.
