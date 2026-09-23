@@ -13,7 +13,7 @@ All headroom (the `k` spares, hot spares, and unused reserved capacity on dedica
 serves **preemptible PAYG** traffic at the lowest priority. Provisioned traffic evicts it
 within 1 s, through router priority and engine preemption with KVBM offload. A
 "strict-dedicated" option without backfill is available from launch at 1.3× the
-tier's CU price.
+base (Standard) CU price, regardless of tier.
 The dedicated capacity for that option is excluded from the backfill economics.
 
 ## Consequences
