@@ -103,7 +103,7 @@ context ceiling > 32K):
 | Tier | Who | Isolation | Utilisation lever |
 |------|-----|-----------|-------------------|
 | **Shared-provisioned** | Reservations < 1 replica-set of WU/s | Scheduling (L1–L3) | Statistical multiplexing; PAYG backfill |
-| **Dedicated / semi-dedicated** | Reservations ≥ 1 replica-set, or compliance needs | Dedicated workers; the router never mixes other *provisioned* tenants in | Idle capacity backfilled with preemptible PAYG. A **strict-dedicated** option with no backfill is offered from launch at **1.3×** the base (Standard) CU price, regardless of tier |
+| **Dedicated / semi-dedicated** | Reservations ≥ 1 replica-set, or compliance needs | Dedicated workers; the router never mixes other *provisioned* tenants in | Idle capacity backfilled with preemptible PAYG. A **strict-dedicated** option with no backfill is offered from launch with a **surcharge of 0.3× the base (Standard) CU price** on top of the tier price: Standard 1.3×, Interactive 1.55×, Agentic 1.8× |
 | **PAYG** | On-demand | None beyond fairness | Dynamo Planner autoscaling |
 | **Spare** | Hot / warm spares | n/a | Serve PAYG until claimed ([06](06-capacity-planning-and-reliability.md)) |
 

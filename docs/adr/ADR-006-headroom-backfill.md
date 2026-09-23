@@ -12,8 +12,9 @@ uneconomic.
 All headroom (the `k` spares, hot spares, and unused reserved capacity on dedicated pools)
 serves **preemptible PAYG** traffic at the lowest priority. Provisioned traffic evicts it
 within 1 s, through router priority and engine preemption with KVBM offload. A
-"strict-dedicated" option without backfill is available from launch at 1.3× the
-base (Standard) CU price, regardless of tier.
+"strict-dedicated" option without backfill is available from launch with a surcharge of 0.3× the
+base (Standard) CU price on top of the tier price. The surcharge covers the PAYG
+backfill revenue those GPUs give up.
 The dedicated capacity for that option is excluded from the backfill economics.
 
 ## Consequences

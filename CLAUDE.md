@@ -45,7 +45,7 @@ These are recorded in `docs/11-roadmap-risks-open-questions.md` §4. Treat them 
 - CU re-rating is infrequent (no fixed cadence) and passes 50% of efficiency gains to customers.
 - SLA commitment is 99.8% attainment. Credits are 10% / 20% / 30% / 50% below 99.8 / 99.7 / 99.6 / 99.5. There is no out-of-shape grace margin.
 - Minimum reservation is 1 CU, with 1-, 3-, or 6-month terms. Increases are allowed mid-term for the remaining term. Decreases happen only at renewal.
-- Strict-dedicated (no backfill) is offered at launch at 1.3× the base (Standard) CU price, regardless of tier.
+- Strict-dedicated (no backfill) is offered at launch at a surcharge of 0.3× the base (Standard) CU price on top of the tier price (Standard 1.3×, Interactive 1.55×, Agentic 1.8×).
 - There is no customer-defined priority beyond `continuation` at launch.
 - Tier price multipliers: Standard 1.0× (base), Interactive 1.25×, Agentic 1.5×.
 
