@@ -20,6 +20,12 @@ cache_path = "entitlements-eu-central.json"
 wait_secs = 30
 heartbeat_interval_ms = 5000
 engine_health_path = "/healthz"
+# TLS to the control plane (ADR-022). Required for a non-loopback control_plane_url
+# unless allow_insecure_transport = true.
+# [entitlements.tls]
+# ca_cert = "/etc/pt/cp-ca.pem"
+# client_cert = "/etc/pt/gateway.pem"
+# client_key = "/etc/pt/gateway.key"
 
 [usage_export]
 control_plane_url = "http://127.0.0.1:8090"

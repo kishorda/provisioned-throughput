@@ -15,3 +15,8 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
+# Optional: an HTTPS client for talking to the control plane (ADR-022).
+reqwest = { workspace = true, optional = true, features = ["rustls-tls-webpki-roots"] }
+
+[features]
+client = ["dep:reqwest"]

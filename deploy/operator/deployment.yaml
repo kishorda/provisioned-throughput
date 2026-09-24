@@ -43,6 +43,13 @@ spec:
             - name: PT_SNAPSHOT_PUBLIC_KEY
               valueFrom:
                 secretKeyRef: { name: pt-region, key: snapshot-public-key }
+            # TLS to the control plane (ADR-022). With a private CA and mutual TLS:
+            # - name: PT_CONTROL_PLANE_CA
+            #   value: /etc/pt/tls/ca.pem
+            # - name: PT_CONTROL_PLANE_CLIENT_CERT
+            #   value: /etc/pt/tls/tls.crt
+            # - name: PT_CONTROL_PLANE_CLIENT_KEY
+            #   value: /etc/pt/tls/tls.key
             - name: PT_SNAPSHOT_CACHE
               value: /var/cache/pt/entitlements.json
           resources:

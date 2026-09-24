@@ -12,6 +12,9 @@
 //! key and sends its id in [`KEY_ID_HEADER`]. Verifiers trust a set of public keys, so a new
 //! key can be trusted before it's used and an old one removed after.
 
+#[cfg(feature = "client")]
+pub mod client_tls;
+
 use ed25519_dalek::{Signer, Verifier};
 use pt_admission::BoundaryPolicy;
 use pt_core::{Shape, Tier};

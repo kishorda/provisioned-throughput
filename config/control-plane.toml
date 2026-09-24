@@ -7,6 +7,12 @@ listen = "127.0.0.1:8090"
 endpoint_template = "https://{region}.pt.example.com/v1"
 lifecycle_interval_secs = 60
 
+# HTTPS (ADR-022). With client_ca, every connection needs a client certificate from it.
+# [server.tls]
+# cert = "/etc/pt/cp.pem"
+# key = "/etc/pt/cp.key"
+# client_ca = "/etc/pt/gateways-ca.pem"
+
 [pricing]
 currency = "USD"
 base_cu_price_per_month_cents = 150000  # one Standard CU for one month

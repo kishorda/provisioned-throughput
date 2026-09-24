@@ -101,6 +101,7 @@ async fn gateway_usage_reaches_customer_reports() {
             wait_secs: 5,
             heartbeat_interval_ms: 0,
             engine_health_path: "/healthz".into(),
+            tls: Default::default(),
         }),
         quota: None,
         usage_export: Some(UsageExportConfig {
@@ -109,11 +110,12 @@ async fn gateway_usage_reaches_customer_reports() {
             batch_size: 100,
             flush_interval_ms: 50,
             buffer: 1_000,
+            tls: Default::default(),
         }),
         reservations: vec![],
         deployments: vec![],
     };
-    let sink = HttpSink::start(gw_config.usage_export.clone().unwrap());
+    let sink = HttpSink::start(gw_config.usage_export.clone().unwrap()).unwrap();
     let app = AppState::new(&gw_config, sink.clone()).unwrap();
     tokio::spawn(
         SnapshotClient::new(gw_config.entitlements.clone().unwrap())

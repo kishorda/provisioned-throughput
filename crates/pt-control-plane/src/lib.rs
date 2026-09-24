@@ -18,6 +18,7 @@ pub mod service;
 pub mod sql;
 pub mod store;
 pub mod telemetry;
+pub mod tls;
 pub mod validate;
 
 use std::sync::Arc;

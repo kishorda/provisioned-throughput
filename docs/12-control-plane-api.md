@@ -225,6 +225,12 @@ sequenceDiagram
   as already seen. Gateways apply only newer versions for their own region.
 - **Trust.** The control plane signs the exact body with Ed25519, and gateways hold only
   public keys. Pull tokens are per region, and a token for another region gets 403.
+- **Transport** ([ADR-022](adr/ADR-022-control-plane-tls.md)). With `[server.tls]`, the
+  control plane serves HTTPS, and with `client_ca` it requires client certificates. Gateways
+  use `[entitlements.tls]` and `[usage_export.tls]` (`ca_cert`, `client_cert`,
+  `client_key`), and the capacity controller uses `PT_CONTROL_PLANE_CA` and
+  `PT_CONTROL_PLANE_CLIENT_CERT`/`_KEY`. Plain `http://` to a non-loopback control plane is
+  refused at startup unless `allow_insecure_transport = true`.
 - **Key rotation** ([ADR-020](adr/ADR-020-signing-key-rotation.md)). Each snapshot names its
   key in `x-pt-key-id`: the first 16 hex characters of the SHA-256 of the public key.
   Verifiers trust a set of keys: gateways use `public_key` plus `extra_public_keys`, and the

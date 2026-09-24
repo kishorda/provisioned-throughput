@@ -96,6 +96,7 @@ fn gateway_config(
             wait_secs: 5,
             heartbeat_interval_ms: 0,
             engine_health_path: "/healthz".into(),
+            tls: Default::default(),
         }),
         quota: None,
         usage_export: None,

@@ -71,6 +71,10 @@ pub struct SnapshotSource {
     /// an active failover.
     pub cache_path: Option<PathBuf>,
     pub wait_secs: u64,
+    /// TLS to the control plane (ADR-022): `PT_CONTROL_PLANE_CA`,
+    /// `PT_CONTROL_PLANE_CLIENT_CERT`, `PT_CONTROL_PLANE_CLIENT_KEY`, and
+    /// `PT_ALLOW_INSECURE_TRANSPORT=true`.
+    pub tls: pt_entitlement::client_tls::ControlPlaneTls,
 }
 
 impl SnapshotSource {
@@ -85,6 +89,13 @@ impl SnapshotSource {
             public_key: var("PT_SNAPSHOT_PUBLIC_KEY")?,
             cache_path: var("PT_SNAPSHOT_CACHE").map(PathBuf::from),
             wait_secs: 30,
+            tls: pt_entitlement::client_tls::ControlPlaneTls {
+                ca_cert: var("PT_CONTROL_PLANE_CA"),
+                client_cert: var("PT_CONTROL_PLANE_CLIENT_CERT"),
+                client_key: var("PT_CONTROL_PLANE_CLIENT_KEY"),
+                allow_insecure_transport: var("PT_ALLOW_INSECURE_TRANSPORT")
+                    .is_some_and(|v| v == "true"),
+            },
         })
     }
 }
@@ -101,6 +112,8 @@ pub enum FollowError {
     Verify(#[from] pt_entitlement::Error),
     #[error("snapshot is for region {0}")]
     WrongRegion(String),
+    #[error("transport: {0}")]
+    Transport(String),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -128,7 +141,14 @@ impl SnapshotFollower {
                 .map(str::trim)
                 .filter(|k| !k.is_empty()),
         )?;
-        let http = reqwest::Client::builder()
+        source
+            .tls
+            .check(&source.control_plane_url)
+            .map_err(FollowError::Transport)?;
+        let http = source
+            .tls
+            .client_builder()
+            .map_err(FollowError::Transport)?
             .timeout(Duration::from_secs(source.wait_secs + 10))
             .build()?;
         let (tx, rx) = watch::channel(None);
@@ -298,6 +318,29 @@ mod tests {
             burst_factor: 1.0,
             dedicated_workers: vec![],
         }
+    }
+
+    #[test]
+    fn plain_http_to_a_remote_control_plane_is_refused() {
+        let source = |url: &str, allow| SnapshotSource {
+            control_plane_url: url.into(),
+            region: "eu-west".into(),
+            token: "t".into(),
+            public_key: "b51da0aa7183df2b9a9ac31f26e8f856fd8b818d1118cdb87c9253afe13bb164".into(),
+            cache_path: None,
+            wait_secs: 1,
+            tls: pt_entitlement::client_tls::ControlPlaneTls {
+                allow_insecure_transport: allow,
+                ..Default::default()
+            },
+        };
+        assert!(matches!(
+            SnapshotFollower::new(source("http://cp.pt.example.com", false)),
+            Err(FollowError::Transport(_))
+        ));
+        assert!(SnapshotFollower::new(source("http://cp.pt.example.com", true)).is_ok());
+        assert!(SnapshotFollower::new(source("https://cp.pt.example.com", false)).is_ok());
+        assert!(SnapshotFollower::new(source("http://127.0.0.1:8090", false)).is_ok());
     }
 
     #[test]

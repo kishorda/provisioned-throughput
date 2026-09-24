@@ -42,6 +42,8 @@ pub enum SyncError {
     Apply(#[from] ApplyError),
     #[error("cache: {0}")]
     Cache(String),
+    #[error("transport: {0}")]
+    Transport(String),
 }
 
 pub struct SnapshotClient {
@@ -53,7 +55,14 @@ pub struct SnapshotClient {
 impl SnapshotClient {
     pub fn new(config: EntitlementSourceConfig) -> Result<Self, SyncError> {
         let verifier = SnapshotVerifier::from_hex_list(config.trusted_keys())?;
-        let http = reqwest::Client::builder()
+        config
+            .tls
+            .check(&config.control_plane_url)
+            .map_err(SyncError::Transport)?;
+        let http = config
+            .tls
+            .client_builder()
+            .map_err(SyncError::Transport)?
             .timeout(Duration::from_secs(config.wait_secs + 10))
             .build()?;
         Ok(Self {

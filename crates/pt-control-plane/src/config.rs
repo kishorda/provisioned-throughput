@@ -278,6 +278,10 @@ pub struct ServerConfig {
     /// How often to activate, renew, and end reservations.
     #[serde(default = "default_lifecycle_interval_secs")]
     pub lifecycle_interval_secs: u64,
+    /// Serve HTTPS (ADR-022). Without it, the API is plain HTTP, for local development or
+    /// behind a TLS-terminating proxy.
+    #[serde(default)]
+    pub tls: Option<crate::tls::ServerTlsConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

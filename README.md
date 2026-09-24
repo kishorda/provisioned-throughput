@@ -266,9 +266,10 @@ Follow-ups from the roadmap in docs/11:
 - **Control-plane scale-out.** State is durable in SQL (ADR-017), but the capacity planner
   and region health are per-process, so run one control-plane instance. The planner counts
   CUs per region and model, regardless of tier.
-- **TLS from gateways to the control plane.** Database connections use verified TLS
-  (ADR-021), but snapshots, heartbeats, and usage from gateways are plain HTTP. Snapshots
-  are signed; terminate TLS at the control plane's ingress for the rest.
+- **Separate listeners.** With `[server.tls] client_ca`, the customer API also requires
+  client certificates, because it shares the listener with internal traffic (ADR-022).
+  Front the customer API with its own ingress. Gateway → Quota Coordinator is plain HTTP
+  within a region.
 - **Dynamo router extensions** (tenant WFQ, KV budgets) and the engine KV-budget adapter (P1).
 - **Controller gaps:** no leader election (run one replica), no drain workflow beyond
   PDBs, and no Dynamo Planner floor integration. The controller owns `replicas` on the

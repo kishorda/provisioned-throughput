@@ -80,6 +80,7 @@ The design rests on six decisions:
 | [019](adr/ADR-019-clickhouse-usage-store.md) | Usage records in ClickHouse, behind a fallible store |
 | [020](adr/ADR-020-signing-key-rotation.md) | Rotate snapshot signing keys with key ids and trusted sets (refines 007) |
 | [021](adr/ADR-021-database-tls.md) | Verified TLS to the databases by default (amends 017, 019) |
+| [022](adr/ADR-022-control-plane-tls.md) | The control plane serves HTTPS, with optional mutual TLS |
 
 ## Glossary
 

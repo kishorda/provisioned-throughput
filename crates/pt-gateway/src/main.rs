@@ -26,7 +26,7 @@ async fn main() -> anyhow::Result<()> {
         ));
     }
     if let Some(export) = config.usage_export.clone() {
-        sinks.push(pt_gateway::usage::HttpSink::start(export));
+        sinks.push(pt_gateway::usage::HttpSink::start(export).map_err(anyhow::Error::msg)?);
     }
     if sinks.is_empty() {
         sinks.push(Arc::new(JsonlSink::stdout()));
@@ -50,7 +50,8 @@ async fn main() -> anyhow::Result<()> {
                 .as_ref()
                 .and_then(|q| q.gateway_id.clone())
                 .unwrap_or_else(|| format!("gw-{}", uuid::Uuid::new_v4().simple()));
-            let heartbeat = pt_gateway::health::HeartbeatClient::new(source.clone(), id)?;
+            let heartbeat = pt_gateway::health::HeartbeatClient::new(source.clone(), id)
+                .map_err(anyhow::Error::msg)?;
             tokio::spawn(heartbeat.run(app.clone()));
         }
         tokio::spawn(client.run(app.clone()));

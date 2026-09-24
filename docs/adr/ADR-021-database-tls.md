@@ -38,7 +38,4 @@ builds with only a C compiler.
 - ⚠️ Certificates are read at startup. Rotating them means a restart. Pooled
   PostgreSQL connections pick up new files as they reconnect, but the ClickHouse client
   doesn't.
-- ⚠️ Gateway-to-control-plane traffic (snapshots, heartbeats, usage) is still plain HTTP
-  within the deployment. Snapshots are signed (ADR-020), but usage and heartbeats aren't
-  encrypted. Terminate TLS at the control plane's ingress, or add it to the gateway client
-  next.
+- Gateway-to-control-plane traffic uses TLS too: see [ADR-022](ADR-022-control-plane-tls.md).

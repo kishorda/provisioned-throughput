@@ -59,6 +59,7 @@ fn gateway_config(cp: &str, engine: &str, public_key: String) -> GatewayConfig {
             wait_secs: 5,
             heartbeat_interval_ms: 50,
             engine_health_path: "/healthz".into(),
+            tls: Default::default(),
         }),
         quota: None,
         usage_export: None,

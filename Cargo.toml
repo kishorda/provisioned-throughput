@@ -41,6 +41,12 @@ k8s-openapi = { version = "0.28", features = ["latest"] }
 kube = { version = "4.2", default-features = false }
 # Plain HTTP only: engines are reached inside the cluster. Avoids TLS C build deps.
 reqwest = { version = "0.12", default-features = false, features = ["stream", "json"] }
+# TLS: rustls with the ring provider only; the default features would pull in aws-lc
+# (cmake) (ADR-021, ADR-022).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pki-types = { version = "1", features = ["std"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
 serde = { version = "1", features = ["derive"] }
 # Control-plane store over the Postgres protocol (CockroachDB or PostgreSQL). TLS uses
 # rustls with the ring provider, which builds without cmake (ADR-021).

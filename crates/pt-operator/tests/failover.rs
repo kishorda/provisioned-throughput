@@ -69,6 +69,7 @@ async fn follower_turns_a_region_failure_into_pool_demand() {
         public_key: svc.signer().public_key_hex(),
         cache_path: Some(cache.clone()),
         wait_secs: 1,
+        tls: Default::default(),
     };
     let (follower, rx) = SnapshotFollower::new(source.clone()).unwrap();
     assert!(follower.poll_once(false).await.unwrap());

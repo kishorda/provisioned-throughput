@@ -22,6 +22,12 @@ wait_secs = 30
 # reports serving only if it has entitlements and the engine answers this path.
 heartbeat_interval_ms = 5000
 engine_health_path = "/healthz"
+# TLS to the control plane (ADR-022). Required for a non-loopback control_plane_url
+# unless allow_insecure_transport = true.
+# [entitlements.tls]
+# ca_cert = "/etc/pt/cp-ca.pem"
+# client_cert = "/etc/pt/gateway.pem"
+# client_key = "/etc/pt/gateway.key"
 
 # Push usage records to the control plane's telemetry API (customer usage and SLA reports).
 [usage_export]

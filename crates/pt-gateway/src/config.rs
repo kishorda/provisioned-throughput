@@ -11,6 +11,7 @@ use std::path::Path;
 
 use pt_admission::BoundaryPolicy;
 use pt_core::{PerformanceProfile, Shape, Tier};
+use pt_entitlement::client_tls::ControlPlaneTls;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -66,6 +67,9 @@ pub struct EntitlementSourceConfig {
     /// has entitlements and the engine answers 2xx here.
     #[serde(default = "default_engine_health_path")]
     pub engine_health_path: String,
+    /// TLS to the control plane, for snapshots and heartbeats (ADR-022).
+    #[serde(default)]
+    pub tls: ControlPlaneTls,
 }
 
 fn default_wait_secs() -> u64 {
@@ -93,6 +97,9 @@ pub struct UsageExportConfig {
     /// counted) beyond this.
     #[serde(default = "default_buffer")]
     pub buffer: usize,
+    /// TLS to the control plane (ADR-022).
+    #[serde(default)]
+    pub tls: ControlPlaneTls,
 }
 
 fn default_batch_size() -> usize {
@@ -253,6 +260,9 @@ impl GatewayConfig {
             if e.wait_secs > 60 {
                 return invalid("entitlements.wait_secs can be at most 60".into());
             }
+            e.tls
+                .check(&e.control_plane_url)
+                .map_err(ConfigError::Invalid)?;
         }
         if let Some(u) = &self.usage_export {
             if u.batch_size == 0 || u.batch_size > 5_000 {
@@ -261,6 +271,9 @@ impl GatewayConfig {
             if u.buffer < u.batch_size {
                 return invalid("usage_export.buffer must be at least batch_size".into());
             }
+            u.tls
+                .check(&u.control_plane_url)
+                .map_err(ConfigError::Invalid)?;
         }
         if let Some(q) = &self.quota {
             if q.assumed_gateways < 1 {

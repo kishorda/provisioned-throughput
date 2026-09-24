@@ -160,11 +160,27 @@ async fn serve<S: Store>(
     let listener = tokio::net::TcpListener::bind(&listen)
         .await
         .with_context(|| format!("binding {listen}"))?;
-    tracing::info!(%listen, store = store_kind, "control plane listening");
-    axum::serve(listener, routes)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await?;
+    let shutdown = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    match &svc.config.server.tls {
+        Some(tls) => {
+            let config = pt_control_plane::tls::server_config(tls)
+                .map_err(anyhow::Error::msg)
+                .context("loading [server.tls]")?;
+            let mtls = tls.client_ca.is_some();
+            tracing::info!(%listen, store = store_kind, tls = true, client_certificates = mtls, "control plane listening");
+            let listener = pt_control_plane::tls::TlsListener::new(listener, config)?;
+            axum::serve(listener, routes)
+                .with_graceful_shutdown(shutdown)
+                .await?;
+        }
+        None => {
+            tracing::info!(%listen, store = store_kind, tls = false, "control plane listening");
+            axum::serve(listener, routes)
+                .with_graceful_shutdown(shutdown)
+                .await?;
+        }
+    }
     Ok(())
 }

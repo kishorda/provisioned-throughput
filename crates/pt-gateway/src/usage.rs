@@ -107,13 +107,22 @@ pub struct HttpSink {
 
 impl HttpSink {
     /// Start the sender. Must be called inside a Tokio runtime.
-    pub fn start(config: UsageExportConfig) -> Arc<Self> {
+    /// Start exporting. Fails if the TLS settings are invalid or break the transport policy
+    /// (ADR-022).
+    pub fn start(config: UsageExportConfig) -> Result<Arc<Self>, String> {
+        config.tls.check(&config.control_plane_url)?;
+        let http = config
+            .tls
+            .client_builder()?
+            .timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|e| e.to_string())?;
         let (tx, rx) = mpsc::channel(config.buffer);
-        tokio::spawn(send_loop(rx, config));
-        Arc::new(Self {
+        tokio::spawn(send_loop(rx, config, http));
+        Ok(Arc::new(Self {
             tx,
             dropped: AtomicU64::new(0),
-        })
+        }))
     }
 
     pub fn dropped(&self) -> u64 {
@@ -135,15 +144,15 @@ impl UsageSink for HttpSink {
     }
 }
 
-async fn send_loop(mut rx: mpsc::Receiver<UsageRecord>, config: UsageExportConfig) {
+async fn send_loop(
+    mut rx: mpsc::Receiver<UsageRecord>,
+    config: UsageExportConfig,
+    http: reqwest::Client,
+) {
     let url = format!(
         "{}/internal/v1/usage",
         config.control_plane_url.trim_end_matches('/')
     );
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .expect("http client");
     let flush = Duration::from_millis(config.flush_interval_ms);
     while let Some(first) = rx.recv().await {
         let mut batch = vec![first];

@@ -9,7 +9,7 @@ rust-version.workspace = true
 [dependencies]
 pt-core = { workspace = true, features = ["schema"] }
 pt-crds.workspace = true
-pt-entitlement.workspace = true
+pt-entitlement = { workspace = true, features = ["client"] }
 anyhow.workspace = true
 futures.workspace = true
 k8s-openapi.workspace = true

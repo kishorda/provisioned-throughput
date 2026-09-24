@@ -52,6 +52,7 @@ fn source(cp: &str, keys: &[&str], cache: &str) -> EntitlementSourceConfig {
         wait_secs: 1,
         heartbeat_interval_ms: 0,
         engine_health_path: "/healthz".into(),
+        tls: Default::default(),
     }
 }
 

@@ -22,10 +22,14 @@ pub struct HeartbeatClient {
 }
 
 impl HeartbeatClient {
-    pub fn new(config: EntitlementSourceConfig, gateway_id: String) -> reqwest::Result<Self> {
-        let http = reqwest::Client::builder()
+    pub fn new(config: EntitlementSourceConfig, gateway_id: String) -> Result<Self, String> {
+        config.tls.check(&config.control_plane_url)?;
+        let http = config
+            .tls
+            .client_builder()?
             .timeout(Duration::from_secs(2))
-            .build()?;
+            .build()
+            .map_err(|e| e.to_string())?;
         Ok(Self {
             config,
             gateway_id,
