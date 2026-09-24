@@ -1,7 +1,7 @@
 //! End to end: a region fails, and its pair's gateway takes on the failover entitlement.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use jiff::{SignedDuration, Timestamp};
@@ -101,6 +101,9 @@ async fn paired_region_takes_over_then_hands_back_gradually() {
     let clock = ManualClock::new(Timestamp::now());
     let svc = in_memory(config, clock.clone());
     let cp = serve(cp_api::router(svc.clone())).await;
+    // The engine records each request's x-pt-failover header.
+    let seen = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
+    let record = seen.clone();
     let engine = serve(
         MockEngine::new(MockConfig {
             name: "eu-central".into(),
@@ -108,9 +111,35 @@ async fn paired_region_takes_over_then_hands_back_gradually() {
             tpot: Duration::from_millis(1),
             default_output_tokens: 4,
         })
-        .router(),
+        .router()
+        .layer(axum::middleware::from_fn(
+            move |req: axum::extract::Request, next: axum::middleware::Next| {
+                let record = record.clone();
+                async move {
+                    if req.uri().path() == "/v1/chat/completions" {
+                        let h = req.headers().get("x-pt-failover");
+                        record
+                            .lock()
+                            .unwrap()
+                            .push(h.and_then(|v| v.to_str().ok()).map(str::to_owned));
+                    }
+                    next.run(req).await
+                }
+            },
+        )),
     )
     .await;
+    let chat = |gw: String, key: String| async move {
+        let r = reqwest::Client::new()
+            .post(format!("{gw}/v1/chat/completions"))
+            .bearer_auth(key)
+            .json(&serde_json::json!({ "model": MODEL, "max_tokens": 4, "messages": [{ "role": "user", "content": "hi" }] }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        r.bytes().await.unwrap();
+    };
 
     let key = svc
         .create(
@@ -179,6 +208,8 @@ async fn paired_region_takes_over_then_hands_back_gradually() {
     assert_eq!(s["cus"], 1);
     assert_eq!(s["failover_cus"], 0.0);
     assert_eq!(s["entitlement_wu_per_s"], WU_PER_CU);
+    chat(gw.clone(), key.clone()).await;
+    assert_eq!(seen.lock().unwrap().pop(), Some(None), "no failover marker");
 
     // eu-west fails 10 minutes ago: eu-central admits its 3 CUs as well.
     let now = Timestamp::now();
@@ -198,6 +229,9 @@ async fn paired_region_takes_over_then_hands_back_gradually() {
     let s = status(&gw, &key).await;
     assert_eq!(s["entitlement_wu_per_s"], 4.0 * WU_PER_CU);
     assert_eq!(s["local_share_wu_per_s"], 4.0 * WU_PER_CU);
+    // Provisioned traffic now tells the router to fence and preempt PAYG on hot spares.
+    chat(gw.clone(), key.clone()).await;
+    assert_eq!(seen.lock().unwrap().pop(), Some(Some("active".into())));
 
     // Recovered 5 minutes ago: half way down the 10-minute ramp.
     svc.resolve_incident(

@@ -20,7 +20,7 @@ named latency tier.
 | `pt-core` | Shared types: WU cost model and `PerformanceProfile`, tiers and CU pricing, workload shape, token counting, usage records |
 | `pt-admission` | Debt-based WU bucket (ADR-002), burst bank, boundary-policy chain (burst → queue → spillover → reject), `continuation` reserve, output-length estimator |
 | `pt-gateway` | OpenAI-compatible gateway (axum): auth, estimate, admit, proxy/stream, settle, usage JSONL, `/v1/pt/status`. Loads entitlements from signed control-plane snapshots or a static file |
-| `pt-router` | Tenant-aware router tier (docs/13): priority classes, WFQ by WU, pull-based dispatch on worker slots and KV, dedicated placement, per-reservation KV budgets, prefix and session affinity |
+| `pt-router` | Tenant-aware router tier (docs/13): priority classes, WFQ by WU, pull-based dispatch on worker slots and KV, dedicated placement, per-reservation KV budgets, prefix and session affinity, hot spares with PAYG preemption during failover |
 | `pt-quota` | Regional Quota Coordinator: leases that split each reservation's entitlement across gateway replicas without overselling (ADR-012) |
 | `pt-telemetry` | Customer usage, latency, session, and monthly SLA reports built from gateway usage records (docs/09 §5), served by the control plane |
 | `pt-entitlement` | Snapshot format shared by the control plane and gateways, Ed25519 signing and verification, API-key hashing |
@@ -189,6 +189,12 @@ Responses carry `x-pt-router-worker` and `x-pt-router-queue-ms`. If the router c
 serve a request it returns `x-pt-reason`: `router_queue_timeout`,
 `router_request_too_large`, or `router_no_worker`.
 
+Workers marked `hot_spare` serve PAYG until a region failover needs them. Gateways mark
+provisioned requests that use a failover entitlement with `x-pt-failover`. While that
+marker keeps arriving, the router keeps new PAYG off hot spares. If provisioned work
+waits 250 ms, it aborts running PAYG, which then gets `x-pt-reason: preempted` (503,
+`Retry-After: 1`) or a final SSE error event (docs/13 §2, ADR-015).
+
 ## Kubernetes
 
 ```sh
@@ -231,8 +237,9 @@ Follow-ups from the roadmap in docs/11:
   refunds the difference.
 - **Redpanda/ClickHouse.** Usage goes to JSONL and/or the control plane's in-memory telemetry store (35-day retention).
 - **Region failover gaps.** Steering is an API; no GeoDNS/anycast controller consumes it.
-  The capacity controller doesn't preempt PAYG on hot spares or load warm spares when an
-  incident opens. Failover activation needs the control plane. Failover headroom is
+  Warm spares aren't loaded when an incident opens, and router `hot_spare` flags are
+  configured, not rendered by the capacity controller. Preempted PAYG isn't metered.
+  Failover activation needs the control plane. Failover headroom is
   reserved but not priced (open PM question, docs/11 §4).
 - **Signing-key rotation.** Gateways trust a single snapshot public key.
 - **Control-plane persistence.** The API keeps state in memory. The CockroachDB schema is in

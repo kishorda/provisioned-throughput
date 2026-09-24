@@ -7,12 +7,15 @@ block_size = 16             # tokens per KV block
 default_max_tokens = 256    # assumed output length when a request doesn't set max_tokens
 queue_timeout_ms = 30000
 payg_guard_every = 50       # PAYG goes first after 50 dispatches without one, if waiting
+failover_hold_ms = 30000    # an x-pt-failover request keeps the failover fence up this long
+preempt_grace_ms = 250      # in a failover, provisioned work waiting this long preempts PAYG
 
 [weights]
 overlap = 1.0               # prefer workers that already hold the prompt's prefix
 load = 1.0                  # prefer less-loaded workers
 session = 0.5               # prefer the worker that served this x-pt-session-id
 kv_overcommit = 1.2         # a reservation may hold kv_share × blocks × 1.2 per worker
+spare = 0.25                # PAYG prefers hot spares, provisioned prefers the floor
 
 [[workers]]
 id = "w0"
@@ -20,11 +23,13 @@ url = "http://127.0.0.1:9000"
 slots = 8
 kv_blocks = 4096
 
+# A hot spare (docs/06 §3): serves PAYG until a failover needs it for provisioned traffic.
 [[workers]]
 id = "w1"
 url = "http://127.0.0.1:9002"
 slots = 8
 kv_blocks = 4096
+hot_spare = true
 
 # Mirrors PoolAllocation CRDs. Reservations without an entry get the gateway's x-pt-weight.
 [[allocations]]

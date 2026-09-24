@@ -196,6 +196,11 @@ pub async fn chat_completions(
     if let Some(s) = &settlement.session_id {
         upstream = upstream.header("x-pt-session-id", s);
     }
+    // The reservation is absorbing a failed region's share: the router fences PAYG off
+    // hot spares and may preempt it for this traffic (docs/07 §4).
+    if class == TrafficClass::Provisioned && res.failover_cus() > 0.0 {
+        upstream = upstream.header("x-pt-failover", "active");
+    }
 
     let resp = match upstream.send().await {
         Ok(r) => r,

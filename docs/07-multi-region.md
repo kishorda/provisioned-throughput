@@ -1,6 +1,6 @@
 # 07 · Multi-Region Design
 
-> Decision records: [ADR-007](adr/ADR-007-regional-static-stability.md), [ADR-014](adr/ADR-014-automatic-region-failover.md)
+> Decision records: [ADR-007](adr/ADR-007-regional-static-stability.md), [ADR-014](adr/ADR-014-automatic-region-failover.md), [ADR-015](adr/ADR-015-failover-payg-preemption.md)
 
 ## 1. Principles
 
@@ -106,9 +106,12 @@ sequenceDiagram
    failure. Each gateway in the target region raises the reservation's entitlement to its
    own CUs plus the failover CUs. The Quota Coordinator shares the larger entitlement
    between replicas as usual.
-4. **Claim headroom.** The headroom is already reserved (§2). *Not built:* the Regional
-   Capacity Controller preempting PAYG on hot spares and loading warm spares when an
-   incident opens.
+4. **Claim headroom.** The headroom is already reserved (§2). Hot spares serve PAYG
+   until now. Provisioned requests that use a failover entitlement carry
+   `x-pt-failover`, so the router fences new PAYG off hot spares. If provisioned work
+   still waits 250 ms, the router aborts running PAYG, preferring hot spares
+   ([13 §2](13-tenant-aware-routing.md#2-algorithms), ADR-015). *Not built:* loading
+   warm spares when an incident opens.
 5. **SLA.** The first `failover_window_minutes` (5) of the incident are excluded for
    Multi-region reservations. The whole incident is excluded in the failed region for
    Regional ones ([09 §5](09-metering-observability-and-slas.md#5-implementation)).

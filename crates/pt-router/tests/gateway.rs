@@ -36,12 +36,15 @@ async fn gateway_classes_reach_the_router() {
         default_max_tokens: 64,
         queue_timeout_ms: 5_000,
         payg_guard_every: 50,
+        failover_hold_ms: 30_000,
+        preempt_grace_ms: 250,
         weights: None,
         workers: vec![WorkerConfig {
             id: "w0".into(),
             url: worker,
             slots: 4,
             kv_blocks: 1_000,
+            hot_spare: false,
         }],
         allocations: vec![],
     };

@@ -32,6 +32,8 @@ fn config(workers: &[(&str, u32, u32)], allocations: Vec<AllocationConfig>) -> R
         default_max_tokens: 64,
         queue_timeout_ms: 10_000,
         payg_guard_every: 0,
+        failover_hold_ms: 30_000,
+        preempt_grace_ms: 250,
         weights: None,
         workers: workers
             .iter()
@@ -41,6 +43,7 @@ fn config(workers: &[(&str, u32, u32)], allocations: Vec<AllocationConfig>) -> R
                 url: url.to_string(),
                 slots: *slots,
                 kv_blocks: *kv,
+                hot_spare: false,
             })
             .collect(),
         allocations,
@@ -396,4 +399,153 @@ async fn timeouts_disconnects_and_oversized_requests_leak_nothing() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert_eq!(status(&router).await["queued"]["provisioned"], 0);
+}
+
+/// A streaming PAYG request that runs until done or preempted. Returns its SSE body.
+async fn stream_payg(router: String, tokens: u64) -> String {
+    reqwest::Client::new()
+        .post(format!("{router}/v1/chat/completions"))
+        .header("x-pt-reservation", "payg")
+        .header("x-pt-class", "payg")
+        .json(&json!({
+            "model": "m", "stream": true, "max_tokens": tokens,
+            "messages": [{ "role": "user", "content": "hi" }],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn failover_preempts_payg_on_hot_spares() {
+    let (floor, _) = worker(10, 200).await;
+    let (spare, _) = worker(10, 200).await;
+    let mut c = config(&[(&floor, 1, 1_000), (&spare, 1, 1_000)], vec![]);
+    c.workers[1].hot_spare = true;
+    let router = spawn_router(c).await;
+
+    // Two long PAYG streams fill the spare, then the floor.
+    let p1 = tokio::spawn(stream_payg(router.clone(), 200));
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let p2 = tokio::spawn(stream_payg(router.clone(), 200));
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let s = status(&router).await;
+    assert_eq!(s["workers"][1]["slots_used"], 1, "{s}");
+    assert_eq!(s["workers"][0]["slots_used"], 1);
+
+    // Without a failover, provisioned work just waits.
+    let t = Instant::now();
+    let r = send(
+        &router,
+        &Req {
+            max_tokens: 2,
+            ..Default::default()
+        },
+    )
+    .timeout(Duration::from_millis(600))
+    .send()
+    .await;
+    assert!(r.is_err(), "no preemption outside a failover");
+    assert_eq!(status(&router).await["preempted"], 0);
+    assert!(t.elapsed() >= Duration::from_millis(600));
+
+    // A failover request preempts the spare's PAYG after the grace period.
+    let t = Instant::now();
+    let resp = send(
+        &router,
+        &Req {
+            max_tokens: 2,
+            ..Default::default()
+        },
+    )
+    .header("x-pt-failover", "active")
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers()["x-pt-router-worker"],
+        "w1",
+        "served on the spare"
+    );
+    resp.bytes().await.unwrap();
+    let waited = t.elapsed();
+    assert!(
+        waited >= Duration::from_millis(250) && waited < Duration::from_millis(900),
+        "{waited:?}"
+    );
+    let first = p1.await.unwrap();
+    assert!(
+        first.contains("\"code\":\"preempted\""),
+        "SSE error event: {first}"
+    );
+    let s = status(&router).await;
+    assert_eq!(s["preempted"], 1);
+    assert_eq!(s["failover_active"], true);
+
+    // The fence keeps new PAYG off the free spare while the failover lasts.
+    let r = reqwest::Client::new()
+        .post(format!("{router}/v1/chat/completions"))
+        .header("x-pt-class", "payg")
+        .json(&json!({ "model": "m", "max_tokens": 1, "messages": [{ "role": "user", "content": "hi" }] }))
+        .timeout(Duration::from_millis(300))
+        .send()
+        .await;
+    assert!(r.is_err(), "PAYG waits for the floor, not the spare");
+    let s = status(&router).await;
+    assert_eq!(s["workers"][1]["slots_used"], 0, "{s}");
+
+    // The floor's PAYG finishes normally, and nothing leaks.
+    let second = p2.await.unwrap();
+    assert!(second.contains("[DONE]") && !second.contains("preempted"));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let s = status(&router).await;
+        if s["workers"][0]["slots_used"] == 0 && s["workers"][1]["slots_used"] == 0 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "capacity leaked: {s}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn preempted_before_the_response_starts_gets_503() {
+    // A non-streaming PAYG request is aborted while the worker is still generating.
+    let (w, _) = worker(10, 300).await;
+    let mut c = config(&[(&w, 1, 1_000)], vec![]);
+    c.workers[0].hot_spare = true;
+    let router = spawn_router(c).await;
+    let payg = {
+        let router = router.clone();
+        tokio::spawn(async move {
+            reqwest::Client::new()
+                .post(format!("{router}/v1/chat/completions"))
+                .header("x-pt-class", "payg")
+                .json(&json!({ "model": "m", "max_tokens": 300, "messages": [{ "role": "user", "content": "hi" }] }))
+                .send()
+                .await
+                .unwrap()
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let prov = send(
+        &router,
+        &Req {
+            max_tokens: 2,
+            ..Default::default()
+        },
+    )
+    .header("x-pt-failover", "1")
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(prov.status(), 200);
+    let payg = payg.await.unwrap();
+    assert_eq!(payg.status(), 503);
+    assert_eq!(payg.headers()["x-pt-reason"], "preempted");
+    assert_eq!(payg.headers()["retry-after"], "1");
 }

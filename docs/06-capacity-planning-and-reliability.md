@@ -42,7 +42,9 @@ executes gradually.
 | **Warm spare** | Pod scheduled, weights on node-local NVMe / host RAM, GPU free | < 2 min | GPU can run short preemptible batch jobs |
 | **Cold** | Node in the cluster, nothing loaded | < 15 min | Any preemptible use |
 
-The `k(p)` headroom is kept **hot**, because it must absorb failures instantly. The
+The `k(p)` headroom is kept **hot**, because it must absorb failures instantly. During a
+region failover, the router reclaims hot spares from PAYG by fencing and then preempting
+it ([13 §2](13-tenant-aware-routing.md#2-algorithms), [ADR-015](adr/ADR-015-failover-payg-preemption.md)). The
 maintenance slot and burst allowance can be warm. PAYG demand is the economic justification
 for hot headroom: it pays for GPUs that provisioned customers need only during failures.
 

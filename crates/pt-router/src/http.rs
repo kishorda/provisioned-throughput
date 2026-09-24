@@ -2,17 +2,25 @@
 //!
 //! ```text
 //! POST /v1/chat/completions   queue → dispatch to a worker → stream back → free capacity
-//! GET  /v1/router/status      queues, dispatch counts, per-worker load and KV by reservation
+//! GET  /v1/router/status      queues, dispatch counts, preemptions, per-worker load and KV
 //! ```
 //!
 //! It reads the gateway's `x-pt-reservation`, `x-pt-class`, `x-pt-wu-estimate`,
-//! `x-pt-weight`, and `x-pt-session-id` headers. Requests without them are treated as PAYG.
+//! `x-pt-weight`, `x-pt-session-id`, and `x-pt-failover` headers. Requests without them are
+//! treated as PAYG.
+//!
+//! **Failover.** A request marked `x-pt-failover` (it uses a failover entitlement) raises
+//! the fence for `failover_hold_ms`: new PAYG stays off hot spares, and provisioned work
+//! waiting longer than `preempt_grace_ms` aborts running PAYG. A preempted PAYG request
+//! gets 503 `preempted` if its response hasn't started, or a final SSE error event if it
+//! is streaming. Dropping the upstream response cancels the work on the worker.
 //!
 //! Capacity accounting must survive every exit: normal completion, worker errors, client
 //! disconnects while queued or streaming, and timeouts that race a dispatch. The dispatch
 //! message ([`Go`]) owns a [`Release`] guard, so capacity is freed whenever the assignment
 //! is dropped, used or not.
 
+use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -37,20 +45,24 @@ struct Go {
     url: String,
     worker_id: String,
     release: Release,
+    /// Fires if the request is preempted.
+    abort: oneshot::Receiver<()>,
 }
 
 /// Frees a worker's slot and KV blocks when dropped, unless disarmed.
 struct Release {
     shared: Arc<Shared>,
-    worker: usize,
-    placement: Placement,
+    id: u64,
     armed: bool,
 }
 
 impl Drop for Release {
     fn drop(&mut self) {
         if self.armed {
-            self.shared.lock().release(self.worker, &self.placement);
+            let mut s = self.shared.lock();
+            s.aborts.remove(&self.id);
+            s.dispatcher.release(self.id);
+            drop(s);
             self.shared.pump();
         }
     }
@@ -66,70 +78,115 @@ struct QueueGuard {
 impl Drop for QueueGuard {
     fn drop(&mut self) {
         if self.armed {
-            self.shared.lock().cancel(self.id);
+            self.shared.lock().dispatcher.cancel(self.id);
         }
     }
 }
 
 pub struct Shared {
-    dispatcher: Mutex<Dispatcher<oneshot::Sender<Go>>>,
+    state: Mutex<Inner>,
     http: reqwest::Client,
     block_size: u64,
     default_max_tokens: u64,
     queue_timeout: Duration,
+    failover_hold: Duration,
+    preempt_grace: Duration,
+}
+
+struct Inner {
+    dispatcher: Dispatcher<oneshot::Sender<Go>>,
+    /// Abort handles for dispatched requests, by id.
+    aborts: HashMap<u64, oneshot::Sender<()>>,
 }
 
 impl Shared {
     pub fn new(config: &RouterConfig) -> Arc<Self> {
         Arc::new(Self {
-            dispatcher: Mutex::new(Dispatcher::new(
-                config.workers(),
-                config.allocations(),
-                config.weights(),
-                config.payg_guard_every,
-            )),
+            state: Mutex::new(Inner {
+                dispatcher: Dispatcher::new(
+                    config.workers(),
+                    config.allocations(),
+                    config.weights(),
+                    config.payg_guard_every,
+                ),
+                aborts: HashMap::new(),
+            }),
             http: reqwest::Client::new(),
             block_size: config.block_size,
             default_max_tokens: config.default_max_tokens,
             queue_timeout: Duration::from_millis(config.queue_timeout_ms),
+            failover_hold: Duration::from_millis(config.failover_hold_ms),
+            preempt_grace: Duration::from_millis(config.preempt_grace_ms),
         })
     }
 
-    fn lock(&self) -> MutexGuard<'_, Dispatcher<oneshot::Sender<Go>>> {
-        self.dispatcher.lock().unwrap_or_else(|e| e.into_inner())
+    fn lock(&self) -> MutexGuard<'_, Inner> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Hand out every request that can go now.
+    /// Hand out every request that can go now, then preempt PAYG for provisioned work that
+    /// has waited too long during a failover.
     fn pump(self: &Arc<Self>) {
-        let mut d = self.lock();
+        let now = Instant::now();
+        let mut s = self.lock();
         loop {
-            let sent = d.dispatch();
+            let sent = s.dispatcher.dispatch(now);
             if sent.is_empty() {
-                return;
+                break;
             }
             for a in sent {
-                let w = d.worker(a.worker);
+                let w = s.dispatcher.worker(a.worker);
+                let (abort_tx, abort) = oneshot::channel();
                 let go = Go {
                     url: w.url.clone(),
                     worker_id: w.id.clone(),
                     release: Release {
                         shared: Arc::clone(self),
-                        worker: a.worker,
-                        placement: a.placement.clone(),
+                        id: a.id,
                         armed: true,
                     },
+                    abort,
                 };
-                if let Err(mut go) = a.payload.send(go) {
-                    // The client already left. We hold the lock, so release directly.
-                    go.release.armed = false;
-                    d.release(a.worker, &a.placement);
+                match a.payload.send(go) {
+                    Ok(()) => {
+                        s.aborts.insert(a.id, abort_tx);
+                    }
+                    Err(mut go) => {
+                        // The client already left. We hold the lock, so release directly.
+                        go.release.armed = false;
+                        s.dispatcher.release(a.id);
+                    }
                 }
+            }
+        }
+        for id in s.dispatcher.preempt(now, self.preempt_grace) {
+            if let Some(abort) = s.aborts.remove(&id) {
+                tracing::info!(id, "preempting PAYG for provisioned work");
+                let _ = abort.send(());
             }
         }
     }
 }
 
+/// Re-run dispatch periodically, so preemption happens once the grace period passes even
+/// if no request arrives or finishes. Stops when the router is dropped.
+fn spawn_ticker(shared: &Arc<Shared>) {
+    let weak = Arc::downgrade(shared);
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_millis(50));
+        loop {
+            tick.tick().await;
+            match weak.upgrade() {
+                Some(s) => s.pump(),
+                None => return,
+            }
+        }
+    });
+}
+
+/// The HTTP app. Must be called inside a Tokio runtime (it starts the dispatch ticker).
 pub fn router(shared: Arc<Shared>) -> Router {
+    spawn_ticker(&shared);
     Router::new()
         .route("/v1/chat/completions", post(chat))
         .route("/v1/router/status", get(status))
@@ -224,7 +281,14 @@ async fn chat(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: Bytes
 
     let (tx, mut rx) = oneshot::channel();
     let deadline = received + shared.queue_timeout;
-    let enqueued = shared.lock().enqueue(placement, wu, weight, deadline, tx);
+    let enqueued = {
+        let mut s = shared.lock();
+        if headers.contains_key("x-pt-failover") {
+            s.dispatcher.note_failover(received + shared.failover_hold);
+        }
+        s.dispatcher
+            .enqueue(placement, wu, weight, received, deadline, tx)
+    };
     let id = match enqueued {
         Ok(id) => id,
         Err(NoWorker::TooLarge) => {
@@ -255,7 +319,7 @@ async fn chat(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: Bytes
             // Cancel under the lock so it can't be dispatched from now on, then drop any
             // dispatch that raced the timeout; its guard frees the capacity.
             guard.armed = false;
-            shared.lock().cancel(id);
+            shared.lock().dispatcher.cancel(id);
             drop(rx.try_recv());
             return error(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -270,6 +334,7 @@ async fn chat(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: Bytes
         url,
         worker_id,
         release,
+        mut abort,
     } = go;
 
     let mut upstream = shared
@@ -283,7 +348,11 @@ async fn chat(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: Bytes
             upstream = upstream.header(name, value);
         }
     }
-    let resp = match upstream.send().await {
+    let sent = tokio::select! {
+        r = upstream.send() => r,
+        _ = &mut abort => return preempted(),
+    };
+    let resp = match sent {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = %e, worker = %worker_id, "worker request failed");
@@ -311,18 +380,54 @@ async fn chat(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: Bytes
     }
     out_headers.insert("x-pt-router-queue-ms", HeaderValue::from(queued_ms));
 
+    let sse = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("text/event-stream"));
+
     // The release guard lives with the body stream, so capacity frees when the response
-    // finishes or the client disconnects.
+    // finishes, the client disconnects, or the request is preempted.
     let stream = futures::stream::unfold(
-        (resp.bytes_stream(), Some(release)),
-        |(mut s, g)| async move {
-            let chunk = s.next().await?;
-            Some((chunk.map_err(std::io::Error::other), (s, g)))
+        Some((resp.bytes_stream(), release, abort)),
+        move |state| async move {
+            let (mut s, g, mut abort) = state?;
+            tokio::select! {
+                chunk = s.next() => {
+                    let chunk = chunk?;
+                    Some((chunk.map_err(std::io::Error::other), Some((s, g, abort))))
+                }
+                _ = &mut abort => {
+                    // Dropping the upstream stream and guard cancels the work and frees it.
+                    drop((s, g));
+                    let end = if sse {
+                        Ok(Bytes::from_static(PREEMPTED_EVENT.as_bytes()))
+                    } else {
+                        Err(std::io::Error::other("preempted"))
+                    };
+                    Some((end, None))
+                }
+            }
         },
     );
     (status, out_headers, Body::from_stream(stream)).into_response()
 }
 
+/// Final event for a preempted streaming response.
+const PREEMPTED_EVENT: &str = "data: {\"error\":{\"type\":\"router_error\",\"code\":\"preempted\",\"message\":\"Preempted to serve provisioned traffic. Retry.\"}}\n\n";
+
+fn preempted() -> Response {
+    let mut r = error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "preempted",
+        "Preempted to serve provisioned traffic. Retry.",
+    );
+    r.headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    r
+}
+
 async fn status(State(shared): State<Arc<Shared>>) -> Json<Value> {
-    Json(serde_json::to_value(shared.lock().status()).unwrap_or(Value::Null))
+    let status = shared.lock().dispatcher.status(Instant::now());
+    Json(serde_json::to_value(status).unwrap_or(Value::Null))
 }

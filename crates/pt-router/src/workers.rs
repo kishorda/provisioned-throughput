@@ -4,6 +4,10 @@
 //! blocks, so engine queues stay shallow and ordering stays with the scheduler. Among
 //! workers that can take it, the router applies placement and per-tenant KV budgets, then
 //! scores by prefix-cache overlap, session affinity, and load.
+//!
+//! Hot spares (docs/06 §3) serve PAYG until provisioned traffic needs them. PAYG prefers
+//! them and provisioned traffic prefers the floor. During a region failover the router
+//! fences new PAYG off hot spares and may preempt running PAYG ([`preemption_victim`]).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -46,6 +50,8 @@ pub struct Worker {
     pub kv_used: u32,
     /// KV blocks held per reservation.
     pub kv_by_reservation: HashMap<String, u32>,
+    /// Failure-domain headroom kept loaded: serves PAYG until provisioned traffic needs it.
+    pub hot_spare: bool,
 }
 
 impl Worker {
@@ -58,7 +64,13 @@ impl Worker {
             slots_used: 0,
             kv_used: 0,
             kv_by_reservation: HashMap::new(),
+            hot_spare: false,
         }
+    }
+
+    pub fn with_hot_spare(mut self, hot_spare: bool) -> Self {
+        self.hot_spare = hot_spare;
+        self
     }
 
     fn has_credit(&self, blocks: u32) -> bool {
@@ -122,6 +134,8 @@ pub struct Weights {
     pub session: f64,
     /// KV budget overcommit: a reservation may hold up to share × blocks × this.
     pub kv_overcommit: f64,
+    /// Cost of the wrong kind of worker: PAYG on the floor, or provisioned on a hot spare.
+    pub spare: f64,
 }
 
 impl Default for Weights {
@@ -131,6 +145,7 @@ impl Default for Weights {
             load: 1.0,
             session: 0.5,
             kv_overcommit: 1.2,
+            spare: 0.25,
         }
     }
 }
@@ -198,7 +213,29 @@ pub fn feasible(
     Ok(())
 }
 
-/// Pick a worker for `p`, or say why none can take it now.
+/// Whether `p`'s reservation may place `p.kv_blocks` more on worker `w`.
+fn within_budget(
+    w: &Worker,
+    allocations: &HashMap<String, Allocation>,
+    weights: &Weights,
+    p: &Placement,
+) -> bool {
+    let Some(share) = allocations.get(&p.reservation).and_then(|a| a.kv_share) else {
+        return true;
+    };
+    let budget = (share * f64::from(w.kv_blocks) * weights.kv_overcommit).floor() as u32;
+    let held = w
+        .kv_by_reservation
+        .get(&p.reservation)
+        .copied()
+        .unwrap_or(0);
+    // Nothing held here yet: always allowed, so one request larger than the budget can
+    // still run alone.
+    held == 0 || held + p.kv_blocks <= budget
+}
+
+/// Pick a worker for `p`, or say why none can take it now. With `fence` set (a region
+/// failover is active), PAYG isn't placed on hot spares.
 pub fn select(
     workers: &[Worker],
     allocations: &HashMap<String, Allocation>,
@@ -206,35 +243,23 @@ pub fn select(
     sessions: &HashMap<String, usize>,
     weights: &Weights,
     p: &Placement,
+    fence: bool,
 ) -> Result<usize, NoWorker> {
     feasible(workers, allocations, p)?;
-    let alloc = allocations.get(&p.reservation);
     let eligible = eligible(workers, allocations, p);
-
-    let within_budget = |i: usize| -> bool {
-        let Some(share) = alloc.and_then(|a| a.kv_share) else {
-            return true;
-        };
-        let w = &workers[i];
-        let budget = (share * f64::from(w.kv_blocks) * weights.kv_overcommit).floor() as u32;
-        let held = w
-            .kv_by_reservation
-            .get(&p.reservation)
-            .copied()
-            .unwrap_or(0);
-        // Nothing held here yet: always allowed, so one request larger than the budget can
-        // still run alone.
-        held == 0 || held + p.kv_blocks <= budget
-    };
+    let backfill = matches!(p.class, TrafficClass::Payg | TrafficClass::Spillover);
 
     let mut best: Option<(usize, f64)> = None;
     let mut blocked_by_budget = false;
     for &i in &eligible {
         let w = &workers[i];
+        if fence && p.class == TrafficClass::Payg && w.hot_spare {
+            continue;
+        }
         if !w.has_credit(p.kv_blocks) {
             continue;
         }
-        if !within_budget(i) {
+        if !within_budget(w, allocations, weights, p) {
             blocked_by_budget = true;
             continue;
         }
@@ -247,7 +272,9 @@ pub fn select(
             Some(s) if sessions.get(s) == Some(&i) => 1.0,
             _ => 0.0,
         };
-        let cost = weights.load * w.load() - weights.overlap * overlap - weights.session * session;
+        let misplaced = if backfill != w.hot_spare { 1.0 } else { 0.0 };
+        let cost = weights.load * w.load() - weights.overlap * overlap - weights.session * session
+            + weights.spare * misplaced;
         if best.is_none_or(|(_, c)| cost < c) {
             best = Some((i, cost));
         }
@@ -257,6 +284,69 @@ pub fn select(
         None if blocked_by_budget => Err(NoWorker::KvBudget),
         None => Err(NoWorker::Busy),
     }
+}
+
+/// A request running on a worker, as preemption sees it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Running {
+    pub id: u64,
+    pub worker: usize,
+    pub class: TrafficClass,
+    pub kv_blocks: u32,
+    /// Monotonic start order: larger started later.
+    pub started: u64,
+    /// Already chosen for preemption; its capacity is about to free.
+    pub preempting: bool,
+}
+
+/// Which running PAYG request to preempt so that `p` can be placed, if any.
+///
+/// Returns `None` when `p` isn't blocked by load, or when requests already being preempted
+/// will free enough room. Otherwise it picks, among workers eligible for `p`, a running
+/// PAYG request whose slot and KV blocks let `p` fit: on a hot spare if possible, then the
+/// youngest, so the least generated work is lost.
+pub fn preemption_victim(
+    workers: &[Worker],
+    allocations: &HashMap<String, Allocation>,
+    weights: &Weights,
+    running: &[Running],
+    p: &Placement,
+) -> Option<u64> {
+    let eligible = eligible(workers, allocations, p);
+    // Room on worker `i` once the listed requests are gone.
+    let fits_without = |i: usize, freed: &[&Running]| {
+        let w = &workers[i];
+        let slots = w.slots_used.saturating_sub(freed.len() as u32);
+        let kv = w
+            .kv_used
+            .saturating_sub(freed.iter().map(|r| r.kv_blocks).sum::<u32>());
+        slots < w.slots
+            && kv + p.kv_blocks <= w.kv_blocks
+            && within_budget(w, allocations, weights, p)
+    };
+    let pending = |i: usize| -> Vec<&Running> {
+        running
+            .iter()
+            .filter(|r| r.worker == i && r.preempting)
+            .collect()
+    };
+    if eligible.iter().any(|&i| fits_without(i, &pending(i))) {
+        return None;
+    }
+    eligible
+        .iter()
+        .flat_map(|&i| {
+            running
+                .iter()
+                .filter(move |r| r.worker == i && r.class == TrafficClass::Payg && !r.preempting)
+        })
+        .filter(|r| {
+            let mut freed = pending(r.worker);
+            freed.push(r);
+            fits_without(r.worker, &freed)
+        })
+        .max_by_key(|r| (workers[r.worker].hot_spare, r.started))
+        .map(|r| r.id)
 }
 
 #[cfg(test)]
@@ -286,7 +376,7 @@ mod tests {
         idx: &PrefixIndex,
         p: &Placement,
     ) -> Result<usize, NoWorker> {
-        select(w, a, idx, &HashMap::new(), &Weights::default(), p)
+        select(w, a, idx, &HashMap::new(), &Weights::default(), p, false)
     }
 
     #[test]
@@ -327,6 +417,7 @@ mod tests {
             &sessions,
             &Weights::default(),
             &p,
+            false,
         );
         assert_eq!(got, Ok(2));
     }
@@ -442,6 +533,94 @@ mod tests {
             &place("other", TrafficClass::Provisioned, 10)
         )
         .is_ok());
+    }
+
+    #[test]
+    fn payg_prefers_hot_spares_and_is_fenced_off_them_in_failover() {
+        let w = vec![
+            Worker::new("floor", "http://x", 2, 100),
+            Worker::new("spare", "http://x", 2, 100).with_hot_spare(true),
+        ];
+        let none = HashMap::new();
+        let idx = PrefixIndex::new(10);
+        let payg = place("p", TrafficClass::Payg, 1);
+        let prov = place("r", TrafficClass::Provisioned, 1);
+        assert_eq!(sel(&w, &none, &idx, &payg), Ok(1));
+        assert_eq!(sel(&w, &none, &idx, &prov), Ok(0));
+        let fenced = |p: &Placement, w: &[Worker]| {
+            select(
+                w,
+                &none,
+                &idx,
+                &HashMap::new(),
+                &Weights::default(),
+                p,
+                true,
+            )
+        };
+        assert_eq!(fenced(&payg, &w), Ok(0), "fenced off the spare");
+        let mut full = w.clone();
+        full[0].slots_used = 2;
+        assert_eq!(fenced(&payg, &full), Err(NoWorker::Busy));
+        assert_eq!(fenced(&prov, &full), Ok(1), "provisioned may use the spare");
+        let spill = place("r", TrafficClass::Spillover, 1);
+        assert_eq!(fenced(&spill, &full), Ok(1), "only PAYG is fenced");
+    }
+
+    fn run(id: u64, worker: usize, class: TrafficClass, started: u64) -> Running {
+        Running {
+            id,
+            worker,
+            class,
+            kv_blocks: 10,
+            started,
+            preempting: false,
+        }
+    }
+
+    #[test]
+    fn preemption_picks_youngest_payg_on_a_spare() {
+        let mut w = vec![
+            Worker::new("floor", "http://x", 2, 100),
+            Worker::new("spare", "http://x", 2, 100).with_hot_spare(true),
+        ];
+        for x in &mut w {
+            x.slots_used = 2;
+            x.kv_used = 20;
+        }
+        let none = HashMap::new();
+        let wt = Weights::default();
+        let prov = place("r", TrafficClass::Provisioned, 10);
+        let mut running = vec![
+            run(1, 0, TrafficClass::Payg, 1),
+            run(2, 0, TrafficClass::Provisioned, 2),
+            run(3, 1, TrafficClass::Payg, 3),
+            run(4, 1, TrafficClass::Payg, 4),
+        ];
+        // On the spare first, and the youngest there.
+        assert_eq!(preemption_victim(&w, &none, &wt, &running, &prov), Some(4));
+        // Once one is being preempted, no more are needed for one waiting request.
+        running[3].preempting = true;
+        assert_eq!(preemption_victim(&w, &none, &wt, &running, &prov), None);
+        // Without spares' PAYG, the floor's PAYG goes.
+        let floor_only = vec![
+            run(1, 0, TrafficClass::Payg, 1),
+            run(2, 0, TrafficClass::Provisioned, 2),
+        ];
+        assert_eq!(
+            preemption_victim(&w, &none, &wt, &floor_only, &prov),
+            Some(1)
+        );
+        // None when a worker already has room.
+        w[0].slots_used = 1;
+        assert_eq!(preemption_victim(&w, &none, &wt, &running, &prov), None);
+        // Provisioned and spillover work is never a victim.
+        w[0].slots_used = 2;
+        let only_prov = vec![
+            run(2, 0, TrafficClass::Provisioned, 2),
+            run(6, 1, TrafficClass::Spillover, 3),
+        ];
+        assert_eq!(preemption_victim(&w, &none, &wt, &only_prov, &prov), None);
     }
 
     #[test]

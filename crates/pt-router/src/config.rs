@@ -24,6 +24,13 @@ pub struct RouterConfig {
     /// PAYG goes first after this many dispatches without one, if any is queued.
     #[serde(default = "default_payg_guard_every")]
     pub payg_guard_every: u64,
+    /// A request marked `x-pt-failover` keeps the failover fence up for this long.
+    #[serde(default = "default_failover_hold_ms")]
+    pub failover_hold_ms: u64,
+    /// During a failover, provisioned work that has waited this long with every eligible
+    /// worker busy preempts running PAYG.
+    #[serde(default = "default_preempt_grace_ms")]
+    pub preempt_grace_ms: u64,
     #[serde(default)]
     pub weights: Option<WeightsConfig>,
     pub workers: Vec<WorkerConfig>,
@@ -38,6 +45,8 @@ pub struct WeightsConfig {
     pub load: f64,
     pub session: f64,
     pub kv_overcommit: f64,
+    #[serde(default = "default_spare_weight")]
+    pub spare: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -49,6 +58,10 @@ pub struct WorkerConfig {
     pub slots: u32,
     /// KV cache capacity in blocks.
     pub kv_blocks: u32,
+    /// Hot spare (docs/06 §3): serves PAYG until provisioned traffic needs it. In
+    /// production these are the pool's `headroom.hotSpares` replicas.
+    #[serde(default)]
+    pub hot_spare: bool,
 }
 
 /// Mirrors a `PoolAllocation` (docs/08 §2).
@@ -74,6 +87,15 @@ fn default_queue_timeout_ms() -> u64 {
 }
 fn default_payg_guard_every() -> u64 {
     50
+}
+fn default_failover_hold_ms() -> u64 {
+    30_000
+}
+fn default_preempt_grace_ms() -> u64 {
+    250
+}
+fn default_spare_weight() -> f64 {
+    0.25
 }
 
 impl RouterConfig {
@@ -129,7 +151,10 @@ impl RouterConfig {
     pub fn workers(&self) -> Vec<Worker> {
         self.workers
             .iter()
-            .map(|w| Worker::new(&w.id, w.url.trim_end_matches('/'), w.slots, w.kv_blocks))
+            .map(|w| {
+                Worker::new(&w.id, w.url.trim_end_matches('/'), w.slots, w.kv_blocks)
+                    .with_hot_spare(w.hot_spare)
+            })
             .collect()
     }
 
@@ -156,6 +181,7 @@ impl RouterConfig {
                 load: w.load,
                 session: w.session,
                 kv_overcommit: w.kv_overcommit,
+                spare: w.spare,
             },
             None => Weights::default(),
         }

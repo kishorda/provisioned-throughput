@@ -1,6 +1,6 @@
 # 13 · Tenant-Aware Routing
 
-> Decision records: [ADR-013](adr/ADR-013-tenant-scheduling-tier.md), [ADR-004](adr/ADR-004-three-level-fairness.md)
+> Decision records: [ADR-013](adr/ADR-013-tenant-scheduling-tier.md), [ADR-004](adr/ADR-004-three-level-fairness.md), [ADR-015](adr/ADR-015-failover-payg-preemption.md)
 
 ## 1. What it does
 
@@ -51,7 +51,8 @@ flowchart LR
 | Feasibility | A request larger than every eligible worker's KV capacity is rejected at once (400 `router_request_too_large`), not queued forever |
 | Credit | `slots_used < slots` and `kv_used + blocks ≤ kv_blocks` |
 | KV budget | `held + blocks ≤ kv_share × kv_blocks × 1.2` per worker, unless the reservation holds nothing there (one oversized request may run alone) |
-| Score | `load × (slot and KV utilisation) − overlap × (prefix tokens held ÷ prompt tokens) − session × (same session's worker)`. Lowest cost wins |
+| Failover fence | While a failover is active, PAYG isn't placed on hot spares. Spillover and provisioned traffic can use them |
+| Score | `load × (slot and KV utilisation) − overlap × (prefix tokens held ÷ prompt tokens) − session × (same session's worker) + spare × (PAYG or spillover on the floor, or provisioned or burst on a hot spare)`. Lowest cost wins |
 
 The KV footprint is `(prompt tokens + max_tokens) ÷ block_size`. Prefix overlap comes from
 the router's own index of which worker served which message prefixes, like Dynamo's
@@ -59,7 +60,30 @@ approximate KV routing mode.
 
 **Capacity accounting** (`http.rs`). A dispatched request owns a release guard, so
 capacity is freed on every exit: completion, worker error, client disconnect while
-queued or streaming, and a queue timeout that races a dispatch.
+queued or streaming, a queue timeout that races a dispatch, and preemption.
+
+**Hot spares and failover preemption** (`dispatch.rs`, `workers.rs`, ADR-015). Workers
+marked `hot_spare` are the pool's loaded failure-domain headroom (docs/06 §3). In normal
+times PAYG prefers them and provisioned traffic prefers the floor, so spares earn money
+without delaying provisioned work.
+- **Failover signal.** The gateway marks provisioned requests with `x-pt-failover` while
+  their reservation uses a failover entitlement (docs/07 §4). Each marked request keeps
+  the router's failover state active for `failover_hold_ms` (30 s).
+- **Fence.** While failover is active, new PAYG stays off hot spares.
+- **Preempt.** While failover is active, a provisioned queue head that has waited
+  `preempt_grace_ms` (250 ms) with every eligible worker busy names one running PAYG
+  request to abort. The victim must free enough room for the head. The router prefers one
+  on a hot spare, and then the youngest, so the least generated work is lost. A victim is
+  named once, and its capacity counts as already freed, so one waiting request never
+  aborts more than it needs. A 50 ms ticker re-runs dispatch, so the grace period applies
+  even when no request arrives or finishes.
+- **What the PAYG client sees.** 503 `preempted` with `Retry-After: 1` if its response
+  hadn't started. If it was streaming, it gets a final SSE event
+  `{"error":{"code":"preempted"}}`. The router drops the upstream response, which cancels
+  the work on the worker, and the release guard frees the capacity.
+- Only `payg` is preempted. Spillover is a PT customer's overflow and is never aborted.
+- `/v1/router/status` reports `failover_active` and `preempted`, and flags each worker's
+  `hot_spare`.
 
 ## 3. Mapping onto Dynamo
 
@@ -122,8 +146,13 @@ impl WorkerFilter for PtPlacementFilter {
 
 ## 5. Not built
 
-- Preempting running PAYG work when provisioned traffic arrives. That's engine-level
-  (docs/05 §4), and the router only orders new dispatches.
+- Iteration-level preemption inside the engine (docs/05 §4). The router preempts only
+  by aborting whole PAYG requests, and only during a failover.
+- Rendering hot spares as separately addressable workers. The capacity controller sizes
+  `headroom.hotSpares` into the pool's replicas, but the router's `hot_spare` flags come
+  from `config/router.toml`. In the tier deployment, each hot spare needs its own frontend
+  (or DGD service) registered as a router worker. With selection plugins, the fence
+  becomes a `WorkerFilter` on a spare label.
 - The engine KV-budget adapter (docs/05 §4). The router enforces budgets at placement
   only.
 - Credits and prefix state from real Dynamo metrics and KV events. Workers and
@@ -132,4 +161,4 @@ impl WorkerFilter for PtPlacementFilter {
   one per pool until state is shared.
 
 ## Blog problems addressed
-P13–P17 (noisy neighbours, isolation, priority). See [traceability](01-requirements-and-traceability.md#2-traceability-matrix).
+P13–P17 (noisy neighbours, isolation, priority, and provisioned traffic preempting PAYG), P9 (hot spares during region failover). See [traceability](01-requirements-and-traceability.md#2-traceability-matrix).
