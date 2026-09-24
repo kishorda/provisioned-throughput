@@ -228,3 +228,159 @@ async fn model_catalog() {
     assert_eq!(models[0]["regions"].as_array().unwrap().len(), 3);
     assert_eq!(models[1]["tiers"], json!(["interactive", "standard"]));
 }
+
+const EU_WEST_TOKEN: &str = "region-token-eu-west-dev";
+
+async fn spawn_with_svc() -> (
+    String,
+    std::sync::Arc<
+        pt_control_plane::Service<
+            pt_control_plane::store::MemoryStore,
+            pt_control_plane::planner::MemoryPlanner,
+            ManualClock,
+        >,
+    >,
+) {
+    let svc = in_memory(config(), ManualClock::new(t0()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let app = api::router(svc.clone());
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    (url, svc)
+}
+
+async fn fetch_snapshot(
+    base: &str,
+    etag: Option<&str>,
+    wait: u64,
+) -> (u16, Option<pt_entitlement::Snapshot>, String) {
+    let mut req = client()
+        .get(format!(
+            "{base}/internal/v1/entitlements/eu-west?wait={wait}"
+        ))
+        .bearer_auth(EU_WEST_TOKEN);
+    if let Some(e) = etag {
+        req = req.header("if-none-match", e);
+    }
+    let r = req.send().await.unwrap();
+    let status = r.status().as_u16();
+    let tag = h(&r, "etag").to_string();
+    if status != 200 {
+        return (status, None, tag);
+    }
+    let sig = h(&r, pt_entitlement::SIGNATURE_HEADER).to_string();
+    let body = r.bytes().await.unwrap();
+    let public = pt_entitlement::SnapshotSigner::from_hex(&config().entitlements.signing_key)
+        .unwrap()
+        .public_key_hex();
+    let snap = pt_entitlement::SnapshotVerifier::from_hex(&public)
+        .unwrap()
+        .verify(&body, &sig)
+        .expect("signature verifies");
+    (status, Some(snap), tag)
+}
+
+#[tokio::test]
+async fn entitlement_snapshots_are_signed_and_long_poll() {
+    let (base, svc) = spawn_with_svc().await;
+
+    let (status, snap, tag) = fetch_snapshot(&base, None, 0).await;
+    assert_eq!(status, 200);
+    let snap = snap.unwrap();
+    assert_eq!(snap.region, "eu-west");
+    assert!(snap.reservations.is_empty());
+    assert_eq!(tag, format!("\"{}\"", snap.version));
+
+    // Unchanged: 304 immediately without a wait.
+    assert_eq!(fetch_snapshot(&base, Some(&tag), 0).await.0, 304);
+
+    // A long poll returns as soon as something changes.
+    let waiter = tokio::spawn({
+        let base = base.clone();
+        let tag = tag.clone();
+        async move { fetch_snapshot(&base, Some(&tag), 30).await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let out = svc
+        .create(
+            ACME,
+            None,
+            request("agents", &[("eu-west", 4), ("us-east", 2)]),
+        )
+        .await
+        .unwrap();
+    let (status, snap, _) = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+        .await
+        .expect("long poll woke up")
+        .unwrap();
+    assert_eq!(status, 200);
+    let snap = snap.unwrap();
+    assert!(snap.version > 0);
+    assert_eq!(snap.reservations.len(), 1);
+    let r = &snap.reservations[0];
+    assert_eq!(r.id, out.resource.id);
+    assert_eq!(r.cus, 4, "only this region's share");
+    assert_eq!(r.profile, "llama-4-maverick.b200.trtllm-1.2.tp8");
+    let d = &snap.deployments[0];
+    assert_eq!(d.id, out.resource.deployment_id);
+    assert_eq!(
+        d.api_key_sha256,
+        pt_entitlement::sha256_hex(out.api_key.unwrap().as_bytes())
+    );
+}
+
+#[tokio::test]
+async fn snapshots_include_only_serving_reservations() {
+    let (base, svc) = spawn_with_svc().await;
+    let mut later = request("later", &[("eu-west", 1)]);
+    later.start_at = Some(t0() + jiff::SignedDuration::from_hours(24));
+    svc.create(ACME, None, later).await.unwrap();
+    let other_region = svc
+        .create(ACME, None, request("us", &[("us-east", 1)]))
+        .await
+        .unwrap();
+    let cancelling = svc
+        .create(ACME, None, request("cancelling", &[("eu-west", 1)]))
+        .await
+        .unwrap();
+    svc.delete(ACME, &cancelling.resource.id, None)
+        .await
+        .unwrap();
+
+    let snap = fetch_snapshot(&base, None, 0).await.1.unwrap();
+    let ids: Vec<_> = snap.reservations.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [cancelling.resource.id.as_str()],
+        "scheduled and us-east-only are excluded"
+    );
+    assert_ne!(other_region.resource.id, cancelling.resource.id);
+}
+
+#[tokio::test]
+async fn snapshot_endpoint_requires_the_regions_token() {
+    let (base, _) = spawn_with_svc().await;
+    let url = format!("{base}/internal/v1/entitlements/eu-west");
+    assert_eq!(client().get(&url).send().await.unwrap().status(), 401);
+    assert_eq!(
+        client()
+            .get(&url)
+            .bearer_auth(ACME_KEY)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401,
+        "tenant keys don't work"
+    );
+    assert_eq!(
+        client()
+            .get(&url)
+            .bearer_auth("region-token-us-east-dev")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+}

@@ -74,6 +74,11 @@ impl DebtBucket {
         Duration::from_secs_f64(secs)
     }
 
+    /// Set the level directly, clamped to capacity. Used when resizing a bucket.
+    pub fn set_level(&mut self, level: f64) {
+        self.level = level.min(self.capacity);
+    }
+
     pub fn debit(&mut self, wu: f64) {
         self.level -= wu;
     }

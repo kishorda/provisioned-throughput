@@ -128,12 +128,56 @@ local runs. The CockroachDB schema is in
 unique index for live names, a lifecycle index on `(state, term_end)`, an append-only
 events table, and idempotency keys that expire after 7 days.
 
-## 6. Not yet built
+## 6. Entitlement snapshots
+
+This is the Entitlement Distributor from [03 §2.1](03-system-architecture.md#21-global-control-plane),
+and it follows [ADR-007](adr/ADR-007-regional-static-stability.md). The shared format is in
+`crates/pt-entitlement` and the gateway side is `crates/pt-gateway/src/sync.rs`.
+
+```mermaid
+sequenceDiagram
+  participant CP as Control plane
+  participant GW as Regional gateway
+  participant C as Disk cache
+  GW->>C: on start, load last-known-good snapshot and verify it
+  loop long-poll
+    GW->>CP: GET /internal/v1/entitlements/{region}, If-None-Match version, wait 30s
+    alt entitlements changed
+      CP-->>GW: 200 snapshot with ETag and x-pt-signature
+      GW->>GW: verify Ed25519, check region and newer version, swap view
+      GW->>C: write snapshot and signature
+    else no change within the wait
+      CP-->>GW: 304
+    end
+  end
+```
+
+- **Content.** The snapshot has every `active` or `pending_cancellation` resource with a
+  share in the region: the region's CUs, tier, shape, the pool's profile name, and each
+  deployment's API-key SHA-256 and boundary policy. Scheduled, ended, and cancelled
+  resources are left out, so keys start working at `term_start` and stop at `term_end`.
+- **Versioning.** Every committed change (API or lifecycle) bumps a version. The version
+  starts from the clock in milliseconds, so it keeps increasing across restarts. The
+  version is read before the data, so a change made during generation is never labelled
+  as already seen. Gateways apply only newer versions for their own region.
+- **Trust.** The control plane signs the exact body with Ed25519, and gateways hold only
+  the public key. Pull tokens are per region, and a token for another region gets 403.
+- **Gateway apply.** A new view is swapped in atomically. Each reservation's limiter is
+  reconfigured in place, so the bucket level, debt, burst credit, and in-flight
+  settlements carry over. Deployments keep their output estimators. Reservations whose
+  profile the gateway doesn't know are skipped and logged.
+- **Static stability.** A gateway serves its cached snapshot through control-plane
+  outages and restarts. `GET /internal/v1/entitlements` on the gateway reports the
+  version and `generated_at`, so staleness can be alerted on.
+- **Latency.** A change reaches a connected gateway in one long-poll round trip.
+  Measured locally, a create was served in under 0.3 s (target N3: under 60 s).
+
+## 7. Not yet built
 
 - SQL store (CockroachDB) and a remote Capacity Planner client. The in-memory planner
   counts CUs per region and model, regardless of tier.
-- Pushing entitlements to regions. The Entitlement Distributor ([03 §2.1](03-system-architecture.md#21-global-control-plane))
-  should turn live resources into gateway snapshots.
+- Rotating the snapshot signing key. Gateways trust one public key, so rotation needs
+  support for more than one key.
 - Rotating inference keys, and more than one deployment per reservation.
 - Invoicing. Events record amounts, but nothing turns them into invoices yet.
 

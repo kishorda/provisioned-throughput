@@ -7,9 +7,12 @@
 //! GET    /v1/provisioned-throughput/{id}
 //! PATCH  /v1/provisioned-throughput/{id}       If-Match supported
 //! DELETE /v1/provisioned-throughput/{id}       If-Match supported
+//!
+//! GET    /internal/v1/entitlements/{region}    region token; If-None-Match + ?wait= long-poll
 //! ```
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
@@ -41,6 +44,10 @@ pub fn router<S: Store, P: CapacityPlanner, C: Clock>(svc: Svc<S, P, C>) -> Rout
             get(get_one::<S, P, C>)
                 .patch(update::<S, P, C>)
                 .delete(delete::<S, P, C>),
+        )
+        .route(
+            "/internal/v1/entitlements/{region}",
+            get(entitlements::<S, P, C>),
         )
         .route("/healthz", get(|| async { "ok" }))
         .with_state(svc)
@@ -237,6 +244,99 @@ async fn create<S: Store, P: CapacityPlanner, C: Clock>(
         Json(body),
     )
         .into_response())
+}
+
+/// Longest a snapshot long-poll may wait.
+const MAX_WAIT_SECS: u64 = 60;
+
+#[derive(Deserialize)]
+struct WaitQuery {
+    #[serde(default)]
+    wait: u64,
+}
+
+/// `GET /internal/v1/entitlements/{region}`: the signed snapshot for a region (ADR-007).
+///
+/// With `If-None-Match: "<version>"` and `?wait=<secs>`, the request waits until the
+/// entitlements change or the wait ends, then returns 304 if nothing changed.
+async fn entitlements<S: Store, P: CapacityPlanner, C: Clock>(
+    State(svc): State<Svc<S, P, C>>,
+    headers: HeaderMap,
+    Path(region): Path<String>,
+    Query(q): Query<WaitQuery>,
+) -> Result<Response, ApiError> {
+    let token_region = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .and_then(|t| svc.config.region_for_token(t.trim()))
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::UNAUTHORIZED,
+                "invalid_region_token",
+                "Invalid or missing region token.",
+            )
+        })?;
+    if token_region != region {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "wrong_region",
+            format!("This token is for {token_region}, not {region}."),
+        ));
+    }
+
+    let known = if_none_match(&headers);
+    let mut rx = svc.subscribe();
+    let current = *rx.borrow_and_update();
+    if known == Some(current) {
+        let wait = Duration::from_secs(q.wait.min(MAX_WAIT_SECS));
+        if !wait.is_zero() {
+            let _ = tokio::time::timeout(wait, rx.changed()).await;
+        }
+        let now = *rx.borrow();
+        if known == Some(now) {
+            let tag = HeaderValue::from_str(&format!("\"{now}\"")).expect("valid etag");
+            return Ok((StatusCode::NOT_MODIFIED, [(header::ETAG, tag)]).into_response());
+        }
+    }
+
+    let snapshot = svc.snapshot(&region).await.ok_or_else(|| {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            "unknown_region",
+            format!("Unknown region {region}."),
+        )
+    })?;
+    let (body, signature) = svc.signer().sign(&snapshot);
+    let tag = HeaderValue::from_str(&format!("\"{}\"", snapshot.version)).expect("valid etag");
+    Ok((
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            ),
+            (header::ETAG, tag),
+            (
+                header::HeaderName::from_static(pt_entitlement::SIGNATURE_HEADER),
+                HeaderValue::from_str(&signature).expect("hex signature"),
+            ),
+        ],
+        body,
+    )
+        .into_response())
+}
+
+fn if_none_match(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| {
+            v.trim()
+                .trim_start_matches("W/")
+                .trim_matches('"')
+                .parse()
+                .ok()
+        })
 }
 
 #[derive(Deserialize)]

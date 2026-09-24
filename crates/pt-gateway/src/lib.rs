@@ -4,6 +4,7 @@ pub mod chat;
 pub mod config;
 pub mod sse;
 pub mod state;
+pub mod sync;
 pub mod usage;
 
 use std::time::Instant;
@@ -22,8 +23,29 @@ pub fn router(app: AppState) -> Router {
     Router::new()
         .route("/v1/chat/completions", post(chat::chat_completions))
         .route("/v1/pt/status", get(status))
+        .route("/internal/v1/entitlements", get(entitlements))
         .route("/healthz", get(|| async { "ok" }))
         .with_state(app)
+}
+
+/// `GET /internal/v1/entitlements`: which entitlements this gateway is serving, and how
+/// old they are. For operators and health checks; exposes no tenant data.
+async fn entitlements(State(app): State<AppState>) -> Json<serde_json::Value> {
+    let e = app.entitlements();
+    let (source, region) = match &e.source {
+        state::EntitlementSource::Static => ("static", None),
+        state::EntitlementSource::Snapshot { region } => ("snapshot", Some(region.clone())),
+        state::EntitlementSource::Pending { region } => ("pending", Some(region.clone())),
+    };
+    Json(json!({
+        "source": source,
+        "region": region,
+        "version": e.version,
+        "generated_at": e.generated_at,
+        "applied_secs_ago": e.applied_at.elapsed().as_secs(),
+        "reservations": e.reservation_count(),
+        "deployments": e.deployment_count(),
+    }))
 }
 
 /// `GET /v1/pt/status`: the caller's deployment and its current entitlement state.

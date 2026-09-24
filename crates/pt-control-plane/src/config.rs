@@ -18,6 +18,25 @@ pub struct ControlPlaneConfig {
     pub tenants: Vec<TenantConfig>,
     pub models: Vec<ModelConfig>,
     pub capacity: Vec<CapacityConfig>,
+    pub entitlements: EntitlementsConfig,
+    /// Regions whose gateways pull entitlement snapshots.
+    pub regions: Vec<RegionConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EntitlementsConfig {
+    /// Ed25519 seed (32 bytes, hex) that signs snapshots. Generate one with
+    /// `pt-control-plane keygen`. From a secret store in production.
+    pub signing_key: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegionConfig {
+    pub name: String,
+    /// Bearer token the region's gateways use to pull snapshots.
+    pub token: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -73,6 +92,8 @@ pub struct CapacityConfig {
     /// Longest context the region's pools for this model can serve. Pools without
     /// disaggregation typically serve less than the model's maximum.
     pub max_context: u64,
+    /// `PerformanceProfile` of the region's pool, passed to gateways in snapshots.
+    pub profile: String,
 }
 
 fn default_endpoint_template() -> String {
@@ -143,6 +164,27 @@ impl ControlPlaneConfig {
                 ));
             }
         }
+        let mut region_names = HashSet::new();
+        let mut tokens = HashSet::new();
+        for r in &self.regions {
+            if !region_names.insert(r.name.as_str()) {
+                return invalid(format!("duplicate region {}", r.name));
+            }
+            if !tokens.insert(r.token.as_str()) {
+                return invalid(format!("region {} reuses another region's token", r.name));
+            }
+        }
+        for c in &self.capacity {
+            if !region_names.contains(c.region.as_str()) {
+                return invalid(format!(
+                    "capacity in {} but no [[regions]] entry for it",
+                    c.region
+                ));
+            }
+        }
+        if pt_entitlement::SnapshotSigner::from_hex(&self.entitlements.signing_key).is_err() {
+            return invalid("entitlements.signing_key must be 32 bytes of hex".into());
+        }
         if !self.server.endpoint_template.contains("{region}") {
             return invalid("server.endpoint_template must contain {region}".into());
         }
@@ -158,6 +200,20 @@ impl ControlPlaneConfig {
             .iter()
             .find(|t| t.admin_api_key == key)
             .map(|t| t.id.as_str())
+    }
+
+    /// The region a snapshot token belongs to.
+    pub fn region_for_token(&self, token: &str) -> Option<&str> {
+        self.regions
+            .iter()
+            .find(|r| r.token == token)
+            .map(|r| r.name.as_str())
+    }
+
+    pub fn capacity_for(&self, region: &str, model: &str) -> Option<&CapacityConfig> {
+        self.capacity
+            .iter()
+            .find(|c| c.region == region && c.model == model)
     }
 
     pub fn regions_for(&self, model: &str) -> Vec<&str> {

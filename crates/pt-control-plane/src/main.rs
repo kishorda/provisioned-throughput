@@ -1,5 +1,7 @@
 //! Run the control-plane API: `pt-control-plane [config.toml]`
 //! (default `config/control-plane.toml`). State is in memory and lost on restart.
+//!
+//! `pt-control-plane keygen` prints a new snapshot signing key and its public key.
 
 use std::time::Duration;
 
@@ -15,9 +17,14 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "config/control-plane.toml".into());
+    let arg = std::env::args().nth(1);
+    if arg.as_deref() == Some("keygen") {
+        let (seed, public) = pt_entitlement::SnapshotSigner::generate();
+        println!("signing_key = \"{seed}\"   # control plane [entitlements]");
+        println!("public_key  = \"{public}\"   # gateway [entitlements]");
+        return Ok(());
+    }
+    let path = arg.unwrap_or_else(|| "config/control-plane.toml".into());
     let config = ControlPlaneConfig::load(&path)?;
     let listen = config.server.listen.clone();
     let interval = Duration::from_secs(config.server.lifecycle_interval_secs);

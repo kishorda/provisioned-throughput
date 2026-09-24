@@ -11,7 +11,9 @@
 
 use jiff::{SignedDuration, Span, Timestamp};
 use pt_core::Shape;
-use sha2::{Digest, Sha256};
+pub use pt_entitlement::sha256_hex;
+use pt_entitlement::{DeploymentEntitlement, ReservationEntitlement, Snapshot, SnapshotSigner};
+use tokio::sync::watch;
 
 use crate::clock::Clock;
 use crate::config::ControlPlaneConfig;
@@ -86,16 +88,98 @@ pub struct Service<S, P, C> {
     pub planner: P,
     pub clock: C,
     pub config: ControlPlaneConfig,
+    signer: SnapshotSigner,
+    /// Entitlement version: bumped on every change, watched by snapshot long-polls.
+    changes: watch::Sender<u64>,
 }
 
 impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
+    /// `config` must have passed [`ControlPlaneConfig::validate`].
     pub fn new(store: S, planner: P, clock: C, config: ControlPlaneConfig) -> Self {
+        let signer = SnapshotSigner::from_hex(&config.entitlements.signing_key)
+            .expect("validated signing key");
+        // Start from the clock in milliseconds, so versions keep increasing across restarts.
+        let (changes, _) = watch::channel(clock.now().as_millisecond().max(1) as u64);
         Self {
             store,
             planner,
             clock,
             config,
+            signer,
+            changes,
         }
+    }
+
+    pub fn signer(&self) -> &SnapshotSigner {
+        &self.signer
+    }
+
+    /// Current entitlement version.
+    pub fn entitlement_version(&self) -> u64 {
+        *self.changes.borrow()
+    }
+
+    /// Watch for entitlement changes.
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.changes.subscribe()
+    }
+
+    fn bump(&self) {
+        let now_ms = self.clock.now().as_millisecond().max(0) as u64;
+        self.changes.send_modify(|v| *v = (*v + 1).max(now_ms));
+    }
+
+    /// Entitlements for `region`: every reservation serving there (active or pending
+    /// cancellation), with the region's CU share. `None` for an unknown region.
+    pub async fn snapshot(&self, region: &str) -> Option<Snapshot> {
+        if !self.config.regions.iter().any(|r| r.name == region) {
+            return None;
+        }
+        // Read the version before the data. A change in between is labelled with the older
+        // version, so the gateway fetches again and never misses it.
+        let version = self.entitlement_version();
+        let mut live: Vec<_> = self
+            .store
+            .list_live()
+            .await
+            .into_iter()
+            .filter(|pt| matches!(pt.state, State::Active | State::PendingCancellation))
+            .collect();
+        live.sort_by(|a, b| a.id.cmp(&b.id));
+
+        let mut reservations = Vec::new();
+        let mut deployments = Vec::new();
+        for pt in live {
+            let Some(share) = pt.regions.iter().find(|r| r.region == region) else {
+                continue;
+            };
+            let Some(capacity) = self.config.capacity_for(region, &pt.model) else {
+                tracing::error!(id = %pt.id, %region, "no capacity entry for a live reservation");
+                continue;
+            };
+            reservations.push(ReservationEntitlement {
+                id: pt.id.clone(),
+                tenant: pt.tenant.clone(),
+                model: pt.model.clone(),
+                cus: share.cus,
+                tier: pt.tier,
+                profile: capacity.profile.clone(),
+                shape: pt.shape,
+            });
+            deployments.push(DeploymentEntitlement {
+                id: pt.deployment_id.clone(),
+                reservation: pt.id.clone(),
+                api_key_sha256: pt.api_key_sha256.clone(),
+                boundary_policy: pt.boundary_policy.clone(),
+            });
+        }
+        Some(Snapshot {
+            region: region.to_string(),
+            version,
+            generated_at: self.clock.now().to_string(),
+            reservations,
+            deployments,
+        })
     }
 
     pub async fn create(
@@ -217,6 +301,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                 tracing::warn!(error = %e, id = %pt.id, "idempotency key raced with another request");
             }
         }
+        self.bump();
         tracing::info!(id = %pt.id, %tenant, model = %pt.model, cus, "provisioned throughput created");
         Ok(CreateOutcome {
             resource: pt,
@@ -301,7 +386,10 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         pt.version += 1;
         pt.updated_at = now;
         match self.store.update(pt.clone(), expected).await {
-            Ok(()) => Ok(pt),
+            Ok(()) => {
+                self.bump();
+                Ok(pt)
+            }
             Err(e) => {
                 self.undo(&pt.model, &pt.shape, ops).await;
                 Err(match e {
@@ -513,6 +601,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         if effect == DeleteEffect::CancelledNow {
             self.planner.release(&pt.model, &pt.regions).await;
         }
+        self.bump();
         tracing::info!(id = %pt.id, %tenant, ?effect, "provisioned throughput deleted");
         Ok((pt, effect))
     }
@@ -564,6 +653,8 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                 // A customer update won the race. Undo and pick it up on the next run.
                 self.undo(&model, &shape, ops).await;
                 report.conflicts += 1;
+            } else {
+                self.bump();
             }
         }
         report
@@ -723,13 +814,6 @@ pub fn add_months(t: Timestamp, months: u8) -> Timestamp {
         .checked_add(Span::new().months(i64::from(months)))
         .expect("term end within supported range")
         .timestamp()
-}
-
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
 }
 
 #[cfg(test)]

@@ -11,6 +11,24 @@ lifecycle_interval_secs = 60
 currency = "USD"
 base_cu_price_per_month_cents = 150000  # one Standard CU for one month
 
+# Signs entitlement snapshots. A development key only: production reads it from a
+# secret store. The matching public key goes in each gateway's [entitlements] section.
+[entitlements]
+signing_key = "653d2967965c4705b7cd3703484ef9835995b0db06894437a355824aaf48a8fe"
+
+# Regions whose gateways pull snapshots, and their pull tokens (development values).
+[[regions]]
+name = "eu-west"
+token = "region-token-eu-west-dev"
+
+[[regions]]
+name = "eu-central"
+token = "region-token-eu-central-dev"
+
+[[regions]]
+name = "us-east"
+token = "region-token-us-east-dev"
+
 [[tenants]]
 id = "acme"
 admin_api_key = "sk-admin-acme-dev"
@@ -38,21 +56,25 @@ region = "eu-west"
 model = "llama-4-maverick"
 cus = 200
 max_context = 131072
+profile = "llama-4-maverick.b200.trtllm-1.2.tp8"
 
 [[capacity]]
 region = "eu-central"
 model = "llama-4-maverick"
 cus = 100
 max_context = 32768
+profile = "llama-4-maverick.h200.vllm-0.11.tp8"
 
 [[capacity]]
 region = "us-east"
 model = "llama-4-maverick"
 cus = 300
 max_context = 131072
+profile = "llama-4-maverick.b200.trtllm-1.2.tp8"
 
 [[capacity]]
 region = "us-east"
 model = "qwen3-32b"
 cus = 100
 max_context = 32768
+profile = "qwen3-32b.h200.vllm-0.11.tp2"

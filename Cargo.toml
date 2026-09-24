@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/pt-core",
+    "crates/pt-entitlement",
     "crates/pt-admission",
     "crates/pt-gateway",
     "crates/pt-mock-engine",
@@ -21,10 +22,13 @@ pt-core = { path = "crates/pt-core" }
 pt-admission = { path = "crates/pt-admission" }
 pt-mock-engine = { path = "crates/pt-mock-engine" }
 pt-crds = { path = "crates/pt-crds" }
+pt-entitlement = { path = "crates/pt-entitlement" }
+pt-control-plane = { path = "crates/pt-control-plane" }
 
 anyhow = "1"
 axum = "0.8"
 bytes = "1"
+ed25519-dalek = "3"
 futures = "0.3"
 jiff = { version = "0.2", features = ["serde"] }
 k8s-openapi = { version = "0.28", features = ["latest"] }

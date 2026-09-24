@@ -19,7 +19,8 @@ named latency tier.
 |-------|--------------|
 | `pt-core` | Shared types: WU cost model and `PerformanceProfile`, tiers and CU pricing, workload shape, token counting, usage records |
 | `pt-admission` | Debt-based WU bucket (ADR-002), burst bank, boundary-policy chain (burst → queue → spillover → reject), `continuation` reserve, output-length estimator |
-| `pt-gateway` | OpenAI-compatible gateway (axum): auth, estimate, admit, proxy/stream, settle, usage JSONL, `/v1/pt/status` |
+| `pt-gateway` | OpenAI-compatible gateway (axum): auth, estimate, admit, proxy/stream, settle, usage JSONL, `/v1/pt/status`. Loads entitlements from signed control-plane snapshots or a static file |
+| `pt-entitlement` | Snapshot format shared by the control plane and gateways, Ed25519 signing and verification, API-key hashing |
 | `pt-mock-engine` | Stand-in for a Dynamo frontend: OpenAI chat API with configurable TTFT/TPOT and simulated prefix caching |
 | `pt-crds` | Custom resources (docs/08 §2): `PerformanceProfile`, `ModelPool`, `PoolAllocation`, `CapacityReservation`, and the `crdgen` binary |
 | `pt-control-plane` | Customer REST API (docs/12): create, get, list, update, and delete Provisioned Throughput; commercial rules; capacity checks; renewal lifecycle; in-memory store plus a CockroachDB migration |
@@ -84,6 +85,25 @@ curl -s -X DELETE http://127.0.0.1:8090/v1/provisioned-throughput/<id> \
 
 See [docs/12](docs/12-control-plane-api.md) for all rules and error codes.
 
+## Control plane → gateway
+
+Gateways configured with `[entitlements]` pull signed snapshots of their region from the
+control plane and serve whatever the API has created (docs/12 §6):
+
+```sh
+target/debug/pt-control-plane config/control-plane.toml &        # :8090
+MOCK_ADDR=127.0.0.1:9000 target/debug/pt-mock-engine &
+MOCK_ADDR=127.0.0.1:9001 MOCK_NAME=payg target/debug/pt-mock-engine &
+target/debug/pt-gateway config/gateway-eu-west.toml &           # :8081, syncs eu-west
+
+# Create through the control plane; use the returned api_key at the gateway.
+curl -s 127.0.0.1:8081/internal/v1/entitlements                 # version, generated_at, counts
+```
+
+The gateway caches the last snapshot in `entitlements-eu-west.json`, and keeps serving from
+it if the control plane is down. `pt-control-plane keygen` makes a new signing key pair. The
+keys in `config/` are for development only.
+
 ## Kubernetes
 
 ```sh
@@ -124,7 +144,7 @@ Follow-ups from the roadmap in docs/11:
 - **Prefix-cache index at the gateway.** Estimates assume no cache hits; settlement
   refunds the difference.
 - **Redpanda publisher and metrics.** Usage goes to JSONL, which the ClickHouse schema can ingest.
-- **Entitlement snapshots** from the global control plane to the gateway. The gateway still reads a local TOML file.
+- **Signing-key rotation.** Gateways trust a single snapshot public key.
 - **Control-plane persistence.** The API keeps state in memory. The CockroachDB schema is in
   `crates/pt-control-plane/migrations/`, but there's no SQL store yet. The capacity planner
   is also in-memory and counts CUs per region and model, regardless of tier.

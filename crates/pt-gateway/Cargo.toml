@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 pt-core.workspace = true
 pt-admission.workspace = true
+pt-entitlement.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 bytes.workspace = true
@@ -25,3 +26,5 @@ uuid.workspace = true
 
 [dev-dependencies]
 pt-mock-engine.workspace = true
+pt-control-plane.workspace = true
+jiff.workspace = true

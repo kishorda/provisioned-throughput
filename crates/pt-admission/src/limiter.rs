@@ -86,6 +86,8 @@ pub struct LimiterStatus {
 
 #[derive(Debug)]
 struct State {
+    config: LimiterConfig,
+    policy: BoundaryPolicy,
     provisioned: DebtBucket,
     burst: Option<BurstBank>,
     queued_wu: f64,
@@ -101,11 +103,10 @@ impl State {
     }
 }
 
-/// Admission state for one reservation on one gateway. Cheap to clone; clones share state.
+/// Admission state for one reservation on one gateway. Cheap to clone; clones share state,
+/// including changes made by [`ReservationLimiter::reconfigure`].
 #[derive(Debug, Clone)]
 pub struct ReservationLimiter {
-    config: LimiterConfig,
-    policy: BoundaryPolicy,
     state: Arc<Mutex<State>>,
 }
 
@@ -125,9 +126,9 @@ impl ReservationLimiter {
         );
         let burst = policy.burst.as_ref().map(|p| BurstBank::new(rate, p, now));
         Self {
-            config,
-            policy,
             state: Arc::new(Mutex::new(State {
+                config,
+                policy,
                 provisioned,
                 burst,
                 queued_wu: 0.0,
@@ -135,8 +136,43 @@ impl ReservationLimiter {
         }
     }
 
-    pub fn policy(&self) -> &BoundaryPolicy {
-        &self.policy
+    pub fn policy(&self) -> BoundaryPolicy {
+        lock(&self.state).policy.clone()
+    }
+
+    pub fn config(&self) -> LimiterConfig {
+        lock(&self.state).config
+    }
+
+    /// Change the entitlement or policy in place, for example when an entitlement snapshot
+    /// resizes the reservation. The current bucket level (including debt) and burst credit
+    /// carry over, clamped to the new limits, so a resize never hands out a fresh full bucket.
+    /// In-flight requests settle against the same state.
+    pub fn reconfigure(&self, config: LimiterConfig, policy: BoundaryPolicy, now: Instant) {
+        let mut st = lock(&self.state);
+        if st.config == config && st.policy == policy {
+            return;
+        }
+        st.refill(now);
+        let rate = config.entitlement_wu_s;
+        let level = st.provisioned.level(now);
+        let mut provisioned = DebtBucket::new(
+            rate,
+            rate * config.capacity_s,
+            rate * config.max_debt_s,
+            now,
+        );
+        provisioned.set_level(level);
+        let credit = st.burst.as_ref().map_or(0.0, BurstBank::credit);
+        let burst = policy.burst.as_ref().map(|p| {
+            let mut b = BurstBank::new(rate, p, now);
+            b.accrue(credit);
+            b
+        });
+        st.provisioned = provisioned;
+        st.burst = burst;
+        st.config = config;
+        st.policy = policy;
     }
 
     /// Try to admit. Pass back the [`QueueSlot`] from a previous `Queue` decision, if any.
@@ -164,10 +200,11 @@ impl ReservationLimiter {
         let retry_after = st.provisioned.time_until_admit(wu);
         let mut reason = RejectReason::EntitlementExhausted;
 
-        if let Some(q) = &self.policy.queue {
+        let st = &mut *st;
+        if let Some(q) = &st.policy.queue {
             let deadline = req.received_at + Duration::from_millis(q.deadline_ms);
             let remaining = deadline.saturating_duration_since(now);
-            let max_depth = q.max_depth_wu_seconds * self.config.entitlement_wu_s;
+            let max_depth = q.max_depth_wu_seconds * st.config.entitlement_wu_s;
             if retry_after > remaining {
                 reason = RejectReason::QueueDeadline;
             } else if st.queued_wu + wu > max_depth {
@@ -186,7 +223,7 @@ impl ReservationLimiter {
             }
         }
 
-        if self.policy.spillover {
+        if st.policy.spillover {
             return admitted(TrafficClass::Spillover, wu, queued_for);
         }
 
@@ -217,7 +254,7 @@ impl ReservationLimiter {
         let mut st = lock(&self.state);
         st.refill(now);
         LimiterStatus {
-            entitlement_wu_s: self.config.entitlement_wu_s,
+            entitlement_wu_s: st.config.entitlement_wu_s,
             level_wu: st.provisioned.level(now),
             burst_credit_wu: st.burst.as_ref().map(BurstBank::credit),
             queued_wu: st.queued_wu,
@@ -413,6 +450,38 @@ mod tests {
         assert_eq!(l.status(t0).queued_wu, 50.0);
         drop(d);
         assert_eq!(l.status(t0).queued_wu, 0.0);
+    }
+
+    #[test]
+    fn reconfigure_keeps_level_and_credit_under_new_limits() {
+        let t0 = Instant::now();
+        let policy = BoundaryPolicy {
+            burst: Some(BurstPolicy::default()),
+            ..Default::default()
+        };
+        let l = ReservationLimiter::new(LimiterConfig::new(100.0), policy.clone(), t0);
+        let clone = l.clone();
+        let t = at(t0, 10.0); // bank 1,000 WU of burst credit
+        exhaust(&l, t); // level −150
+
+        // Double the entitlement: the debt carries over, the refill rate doubles.
+        l.reconfigure(LimiterConfig::new(200.0), policy.clone(), t);
+        let s = clone.status(t);
+        assert_eq!(s.entitlement_wu_s, 200.0);
+        assert!((s.level_wu + 150.0).abs() < 1e-9);
+        assert!((s.burst_credit_wu.unwrap() - 1_000.0).abs() < 1e-9);
+        assert!((clone.status(at(t0, 11.0)).level_wu - 50.0).abs() < 1e-9);
+
+        // Shrink below the current level: clamped to the new capacity.
+        l.reconfigure(
+            LimiterConfig::new(20.0),
+            BoundaryPolicy::default(),
+            at(t0, 20.0),
+        );
+        let s = l.status(at(t0, 20.0));
+        assert_eq!(s.level_wu, 20.0);
+        assert_eq!(s.burst_credit_wu, None);
+        assert_eq!(l.policy(), BoundaryPolicy::default());
     }
 
     #[test]

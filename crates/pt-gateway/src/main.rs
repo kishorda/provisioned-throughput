@@ -25,13 +25,26 @@ async fn main() -> anyhow::Result<()> {
     };
     let app = AppState::new(&config, sink)?;
 
+    if let Some(source) = config.entitlements.clone() {
+        let client = pt_gateway::sync::SnapshotClient::new(source)?;
+        // Serve last-known-good entitlements immediately, then keep them fresh.
+        match client.load_cache(&app) {
+            Ok(Some(v)) => tracing::info!(version = v, "serving cached entitlements"),
+            Ok(None) => {
+                tracing::warn!("no cached entitlements; serving nothing until the first snapshot")
+            }
+            Err(e) => tracing::warn!(error = %e, "ignoring entitlement cache"),
+        }
+        tokio::spawn(client.run(app.clone()));
+    }
+
     let listener = tokio::net::TcpListener::bind(&config.server.listen)
         .await
         .with_context(|| format!("binding {}", config.server.listen))?;
     tracing::info!(
         listen = %config.server.listen,
         engine = %config.server.engine_url,
-        deployments = config.deployments.len(),
+        entitlements = if config.entitlements.is_some() { "snapshot" } else { "static" },
         "gateway listening"
     );
     axum::serve(listener, router(app))

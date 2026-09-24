@@ -1,0 +1,24 @@
+# pt-gateway for eu-west, with entitlements synced from the control plane.
+# Compare config/gateway.toml, which lists reservations statically.
+
+[server]
+listen = "127.0.0.1:8081"
+engine_url = "http://127.0.0.1:9000"
+payg_engine_url = "http://127.0.0.1:9001"
+usage_log = "usage-eu-west.jsonl"
+wu_per_cu = 1000.0
+
+[entitlements]
+control_plane_url = "http://127.0.0.1:8090"
+region = "eu-west"
+token = "region-token-eu-west-dev"
+# Public half of the development signing key in config/control-plane.toml.
+public_key = "b51da0aa7183df2b9a9ac31f26e8f856fd8b818d1118cdb87c9253afe13bb164"
+cache_path = "entitlements-eu-west.json"
+wait_secs = 30
+
+# Profiles for this region's pools. Snapshots name the profile per reservation.
+[[profiles]]
+name = "llama-4-maverick.b200.trtllm-1.2.tp8"
+coefficients = { a = 1.00, b = 0.08, c = 3.10, d = 0.00021 }
+capacity_wu_per_s = { interactive = 41000.0, agentic = 35500.0, standard = 58000.0 }

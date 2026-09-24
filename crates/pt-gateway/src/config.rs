@@ -1,8 +1,10 @@
 //! Gateway configuration.
 //!
-//! In production, reservations and deployments come from the entitlement snapshot pushed by
-//! the global control plane (docs/03 §2). For P0 they're read from a TOML file with the same
-//! shape.
+//! Reservations and deployments come from one of two sources:
+//! - `[entitlements]`: signed snapshots pulled from the control plane (docs/03 §2.1, ADR-007);
+//! - static `[[reservations]]` and `[[deployments]]` in this file, for local development.
+//!
+//! Performance profiles are always local: they describe this region's pools.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -16,8 +18,47 @@ use serde::Deserialize;
 pub struct GatewayConfig {
     pub server: ServerConfig,
     pub profiles: Vec<PerformanceProfile>,
+    #[serde(default)]
+    pub entitlements: Option<EntitlementSourceConfig>,
+    #[serde(default)]
     pub reservations: Vec<ReservationConfig>,
+    #[serde(default)]
     pub deployments: Vec<DeploymentConfig>,
+}
+
+/// Where to pull entitlement snapshots from.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EntitlementSourceConfig {
+    /// Control-plane base URL, for example `http://127.0.0.1:8090`.
+    pub control_plane_url: String,
+    /// This gateway's region. Snapshots for any other region are rejected.
+    pub region: String,
+    /// Region pull token.
+    pub token: String,
+    /// Control plane's Ed25519 public key (hex). Unsigned or mis-signed snapshots are rejected.
+    pub public_key: String,
+    /// Last-known-good snapshot, so the gateway serves through control-plane outages and
+    /// restarts. Strongly recommended.
+    #[serde(default)]
+    pub cache_path: Option<String>,
+    /// Long-poll duration.
+    #[serde(default = "default_wait_secs")]
+    pub wait_secs: u64,
+}
+
+fn default_wait_secs() -> u64 {
+    30
+}
+
+impl EntitlementSourceConfig {
+    pub fn snapshot_url(&self) -> String {
+        format!(
+            "{}/internal/v1/entitlements/{}",
+            self.control_plane_url.trim_end_matches('/'),
+            self.region
+        )
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -95,6 +136,20 @@ impl GatewayConfig {
         let invalid = |msg: String| Err(ConfigError::Invalid(msg));
         if self.server.wu_per_cu <= 0.0 {
             return invalid("server.wu_per_cu must be positive".into());
+        }
+        if let Some(e) = &self.entitlements {
+            if !self.reservations.is_empty() || !self.deployments.is_empty() {
+                return invalid(
+                    "use either [entitlements] or static [[reservations]]/[[deployments]], not both"
+                        .into(),
+                );
+            }
+            if pt_entitlement::SnapshotVerifier::from_hex(&e.public_key).is_err() {
+                return invalid("entitlements.public_key must be a 32-byte hex Ed25519 key".into());
+            }
+            if e.wait_secs > 60 {
+                return invalid("entitlements.wait_secs can be at most 60".into());
+            }
         }
         let profiles: HashSet<_> = self.profiles.iter().map(|p| p.name.as_str()).collect();
         let mut reservations = HashSet::new();
