@@ -87,6 +87,18 @@ curl -s -X DELETE http://127.0.0.1:8090/v1/provisioned-throughput/<id> \
 
 See [docs/12](docs/12-control-plane-api.md) for all rules and error codes.
 
+Quotes size a reservation before buying, or recommend a resize from real usage (docs/02 §5):
+
+```sh
+curl -s -X POST http://127.0.0.1:8090/v1/quotes -H 'Authorization: Bearer sk-admin-acme-dev' \
+  -d '{"model":"llama-4-maverick","requests_per_minute":600,
+       "shape":{"input_p95":4000,"input_max":16000,"output_p95":400,"context_ceiling":32768,
+                "cache_hit_ratio":0.5,"burst_factor":2}}'
+# per region and tier: recommended and peak CUs, "1 CU ≈ … TPM", price, SLO, feasibility
+curl -s -X POST http://127.0.0.1:8090/v1/quotes -H 'Authorization: Bearer sk-admin-acme-dev' \
+  -d '{"from_reservation":"<id>","lookback_days":7}'     # resize recommendation
+```
+
 Usage and SLA reports, from gateways configured with `[usage_export]` (docs/09 §5):
 
 ```sh

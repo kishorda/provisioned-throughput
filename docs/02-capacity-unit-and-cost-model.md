@@ -96,6 +96,28 @@ Customers do not have to learn WU to buy.
 - Replay mode runs the trace through the calibrated cost model, and optionally through a
   shadow benchmark on the target pool for large deals.
 
+> **Implementation** (`crates/pt-control-plane/src/quote.rs`, `POST /v1/quotes`). There are
+> three sources: `shape` plus `requests_per_minute`, a `trace`, or `from_reservation`. The
+> last uses an existing reservation's recent usage from telemetry, rejected requests
+> included, which makes the quote a resize recommendation. Each request is priced with the
+> region pool's profile and the tier's TPOT target, which sets the KV term.
+>
+> ```text
+> sustained = busiest hour's WU/s      peak = busiest 10 s's WU/s   (shape: sustained × burst_factor)
+> recommended CUs = ceil(sustained ÷ (WU/s per CU × 0.8))           peak CUs = ceil(peak ÷ WU/s per CU)
+> ```
+>
+> For each region and tier, a quote returns:
+> - demand, and the recommended and peak CUs;
+> - "1 CU ≈ N requests/min, X input TPM, Y output TPM" for this workload;
+> - the monthly price and the SLO targets;
+> - feasibility (available CUs and whether the region's pools serve the context length);
+> - a burst or spillover policy when peaks exceed the recommendation.
+>
+> For traces and history, it also returns an observed shape and the cheapest feasible
+> option, or the resize action. The shadow benchmark isn't built. Profiles come from
+> `[[profiles]]` in the control-plane config, standing in for the Profile Registry.
+
 ## 6. Calibration Service
 
 - For each (model, GPU class, engine version, parallelism) it runs a benchmark matrix with

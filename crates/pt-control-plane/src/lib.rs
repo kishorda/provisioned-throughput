@@ -9,6 +9,8 @@ pub mod config;
 pub mod model;
 pub mod planner;
 pub mod pricing;
+pub mod quote;
+pub mod quote_api;
 pub mod service;
 pub mod store;
 pub mod telemetry;
@@ -23,12 +25,14 @@ use clock::Clock;
 use planner::MemoryPlanner;
 use store::MemoryStore;
 
-/// The full control-plane HTTP app: the customer API, entitlement snapshots, and telemetry.
+/// The full control-plane HTTP app: the customer API, quotes, entitlement snapshots, and
+/// telemetry.
 pub fn app<S: store::Store, P: planner::CapacityPlanner, C: Clock>(
     svc: Arc<Service<S, P, C>>,
 ) -> (axum::Router, Arc<telemetry::CpTelemetry<S, P, C>>) {
     let (telemetry_routes, tel) = telemetry::telemetry(svc.clone());
-    (api::router(svc).merge(telemetry_routes), tel)
+    let quotes = quote_api::router(svc.clone(), tel.clone());
+    (api::router(svc).merge(telemetry_routes).merge(quotes), tel)
 }
 
 /// A service backed by the in-memory store and planner.

@@ -51,6 +51,9 @@ pub trait CapacityPlanner: Send + Sync + 'static {
         regions: &[RegionShare],
         shape: &Shape,
     ) -> impl Future<Output = Result<(), PlanError>> + Send;
+
+    /// Unreserved CUs of `model` in `region`, or `None` if it isn't offered there.
+    fn available_cus(&self, region: &str, model: &str) -> impl Future<Output = Option<u32>> + Send;
 }
 
 #[derive(Debug)]
@@ -163,5 +166,9 @@ impl CapacityPlanner for MemoryPlanner {
     ) -> Result<(), PlanError> {
         let pools = self.pools.lock().unwrap_or_else(|e| e.into_inner());
         Self::check(&pools, model, regions, shape, false)
+    }
+
+    async fn available_cus(&self, region: &str, model: &str) -> Option<u32> {
+        self.available(region, model)
     }
 }

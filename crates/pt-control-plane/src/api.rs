@@ -132,7 +132,10 @@ impl From<ServiceError> for ApiError {
     }
 }
 
-fn tenant<S, P, C>(svc: &Service<S, P, C>, headers: &HeaderMap) -> Result<String, ApiError> {
+pub(crate) fn tenant<S, P, C>(
+    svc: &Service<S, P, C>,
+    headers: &HeaderMap,
+) -> Result<String, ApiError> {
     headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -149,7 +152,7 @@ fn tenant<S, P, C>(svc: &Service<S, P, C>, headers: &HeaderMap) -> Result<String
 }
 
 /// Parse a JSON body with an error in the API's format rather than axum's plain text.
-fn parse<T: DeserializeOwned>(body: &Bytes) -> Result<T, ApiError> {
+pub(crate) fn parse<T: DeserializeOwned>(body: &Bytes) -> Result<T, ApiError> {
     serde_json::from_slice(body).map_err(|e| {
         ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,

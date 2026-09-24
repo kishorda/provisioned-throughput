@@ -25,6 +25,8 @@ separate from the inference keys that the gateway accepts.
 | `GET` | `/v1/provisioned-throughput/{id}` | 200 | Returns an `ETag` |
 | `PATCH` | `/v1/provisioned-throughput/{id}` | 200 | Supports `If-Match`. Only the fields sent change |
 | `DELETE` | `/v1/provisioned-throughput/{id}` | 202 mid-term, or 200 | Supports `If-Match` |
+| `POST` | `/v1/quotes` | 200 | CUs needed for a shape, trace, or existing reservation. See [02 §5](02-capacity-unit-and-cost-model.md#5-sizing--quote-api) |
+| `GET` | `/v1/provisioned-throughput/{id}/usage`, `/sla`, `/sessions/{session_id}` | 200 | Telemetry. See [09 §5](09-metering-observability-and-slas.md#5-implementation) |
 
 Create request:
 

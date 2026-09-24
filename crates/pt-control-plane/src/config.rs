@@ -18,6 +18,9 @@ pub struct ControlPlaneConfig {
     pub tenants: Vec<TenantConfig>,
     pub models: Vec<ModelConfig>,
     pub capacity: Vec<CapacityConfig>,
+    /// Calibrated cost profiles, as published by the Profile Registry (docs/03 §2.1). Every
+    /// capacity entry names one. Quotes price requests with them.
+    pub profiles: Vec<pt_core::PerformanceProfile>,
     pub entitlements: EntitlementsConfig,
     #[serde(default)]
     pub telemetry: TelemetryConfig,
@@ -204,6 +207,12 @@ impl ControlPlaneConfig {
             }
         }
         for c in &self.capacity {
+            if self.profile(&c.profile).is_none() {
+                return invalid(format!(
+                    "capacity for {} in {} uses unknown profile {}",
+                    c.model, c.region, c.profile
+                ));
+            }
             if !region_names.contains(c.region.as_str()) {
                 return invalid(format!(
                     "capacity in {} but no [[regions]] entry for it",
@@ -242,6 +251,10 @@ impl ControlPlaneConfig {
             .iter()
             .find(|r| r.token == token)
             .map(|r| r.name.as_str())
+    }
+
+    pub fn profile(&self, name: &str) -> Option<&pt_core::PerformanceProfile> {
+        self.profiles.iter().find(|p| p.name == name)
     }
 
     pub fn capacity_for(&self, region: &str, model: &str) -> Option<&CapacityConfig> {

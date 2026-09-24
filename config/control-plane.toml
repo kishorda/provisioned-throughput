@@ -83,3 +83,21 @@ model = "qwen3-32b"
 cus = 100
 max_context = 32768
 profile = "qwen3-32b.h200.vllm-0.11.tp2"
+
+# Calibrated cost profiles (stand-in for the Profile Registry). Coefficients are
+# placeholders until calibration runs. WU is normalised across hardware, so the same model
+# costs the same WU on B200 and H200; the hardware difference shows up in replica capacity.
+[[profiles]]
+name = "llama-4-maverick.b200.trtllm-1.2.tp8"
+coefficients = { a = 1.00, b = 0.08, c = 3.10, d = 0.00021 }
+capacity_wu_per_s = { interactive = 41000.0, agentic = 35500.0, standard = 58000.0 }
+
+[[profiles]]
+name = "llama-4-maverick.h200.vllm-0.11.tp8"
+coefficients = { a = 1.00, b = 0.08, c = 3.10, d = 0.00021 }
+capacity_wu_per_s = { interactive = 24000.0, agentic = 21000.0, standard = 34000.0 }
+
+[[profiles]]
+name = "qwen3-32b.h200.vllm-0.11.tp2"
+coefficients = { a = 0.30, b = 0.03, c = 0.90, d = 0.00005 }
+capacity_wu_per_s = { interactive = 30000.0, agentic = 26000.0, standard = 42000.0 }
