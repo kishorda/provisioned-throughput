@@ -9,6 +9,7 @@ members = [
     "crates/pt-crds",
     "crates/pt-operator",
     "crates/pt-control-plane",
+    "crates/pt-quota",
 ]
 
 [workspace.package]
@@ -24,6 +25,7 @@ pt-mock-engine = { path = "crates/pt-mock-engine" }
 pt-crds = { path = "crates/pt-crds" }
 pt-entitlement = { path = "crates/pt-entitlement" }
 pt-control-plane = { path = "crates/pt-control-plane" }
+pt-quota = { path = "crates/pt-quota" }
 
 anyhow = "1"
 axum = "0.8"

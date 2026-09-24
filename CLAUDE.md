@@ -4,13 +4,13 @@
 This is the architecture design and code for a **Provisioned Throughput (PT)** product for AI inference, written from a principal-architect perspective. It answers the problems raised in the PM's blog post:
 https://kishoraher.wordpress.com/2026/09/23/provisioned-throughput-for-ai-inference-why-just-reserve-some-capacity-is-harder-than-it-sounds/
 
-**Current state:** design docs are complete. The Rust workspace implements the **P0 admission path** (docs/04, run locally against a mock engine) the **P1 CRDs plus the Regional Capacity Controller** (docs/06, docs/08), and the **control-plane customer API** (docs/12, in-memory store), which gateways follow through **signed entitlement snapshots** (docs/12 §6). The controller has only been unit-tested: there's no cluster, Docker, or kubectl on this machine. There's no Quota Coordinator or Dynamo router extension yet. `README.md` lists what's missing. The remote is `origin` = `git@github.com:kishorda/provisioned-throughput.git` (SSH). HTTPS has no credentials on this machine, and there's no `gh` CLI.
+**Current state:** design docs are complete. The Rust workspace implements the **P0 admission path** (docs/04, run locally against a mock engine) the **P1 CRDs plus the Regional Capacity Controller** (docs/06, docs/08), and the **control-plane customer API** (docs/12, in-memory store), which gateways follow through **signed entitlement snapshots** (docs/12 §6), and the **Quota Coordinator** that shares entitlements across gateway replicas (ADR-012). The controller has only been unit-tested: there's no cluster, Docker, or kubectl on this machine. There's no Dynamo router extension yet. `README.md` lists what's missing. The remote is `origin` = `git@github.com:kishorda/provisioned-throughput.git` (SSH). HTTPS has no credentials on this machine, and there's no `gh` CLI.
 
 ## Fixed decisions (don't re-litigate without the user)
 - **Sellable unit:** an abstract **Capacity Unit (CU)** = a fixed rate of **Work Units (WU)** per second at a named SLO tier (Interactive / Agentic / Standard).
   WU = `a·uncached_prefill + b·cached_prefill + c·decode·m_decode + d·KV_token_seconds`. Coefficients come from a per-(model, GPU, engine version, parallelism) `PerformanceProfile`.
 - **Footprint:** multi-cluster and **multi-region** from v1. The global control plane is off the request path, and regional data planes are statically stable.
-- **Stack:** Kubernetes + **NVIDIA Dynamo** (KV router, disaggregated prefill/decode, KVBM, NIXL, Planner, operator, Grove), plus KAI Scheduler. **Rust** for the gateway (Pingora or hyper + tower), Quota Coordinator (tonic + openraft), router extensions, kube-rs controllers, planner (good_lp + HiGHS), and metering.
+- **Stack:** Kubernetes + **NVIDIA Dynamo** (KV router, disaggregated prefill/decode, KVBM, NIXL, Planner, operator, Grove), plus KAI Scheduler. **Rust** for the gateway (Pingora or hyper + tower), Quota Coordinator (single instance, HTTP/JSON for now: ADR-012), router extensions, kube-rs controllers, planner (good_lp + HiGHS), and metering.
 - **Traffic classes (strict priority):** `provisioned > burst > spillover > payg`. Headroom is backfilled with preemptible PAYG.
 - **SLA:** measured at the regional PT Gateway, as p95 per 5-minute window per deployment, counting in-shape provisioned traffic only.
 
@@ -19,6 +19,7 @@ https://kishoraher.wordpress.com/2026/09/23/provisioned-throughput-for-ai-infere
 Cargo.toml                      # workspace
 crates/
   pt-core/                      # WU cost model, PerformanceProfile, tiers + pricing, Shape, TermMonths, token counting, UsageRecord
+  pt-quota/                     # Quota Coordinator: allocator.rs (pure max-min split), coordinator.rs (leases, never-oversell rule), wire.rs (shared with gateway), api.rs
   pt-entitlement/               # Snapshot format, Ed25519 SnapshotSigner/Verifier, sha256_hex for API keys
   pt-admission/                 # DebtBucket (ADR-002), BurstBank, ReservationLimiter (burst → queue → spillover → reject), OutputEstimator
   pt-gateway/                   # axum gateway: chat.rs (admission path), sse.rs, state.rs (swappable entitlements), sync.rs (snapshot long-poll + cache), config.rs, usage.rs; tests/gateway.rs, tests/entitlements.rs (control plane → gateway e2e)
@@ -28,7 +29,8 @@ crates/
   pt-control-plane/             # customer API: service.rs (rules), api.rs (HTTP), store.rs + planner.rs (traits, in-memory), migrations/ (CockroachDB)
 config/gateway.toml             # example local config (stands in for the entitlement snapshot)
 config/control-plane.toml       # tenants, model catalog, regional capacity + profiles, region pull tokens, dev signing key; loaded by tests
-config/gateway-eu-west.toml     # gateway that syncs eu-west snapshots (public key matches the dev signing key)
+config/gateway-eu-west.toml     # gateway that syncs eu-west snapshots and uses the quota coordinator
+config/quota.toml               # eu-west Quota Coordinator
 deploy/crds/                    # GENERATED by `cargo run -p pt-crds --bin crdgen`; never hand-edit
 deploy/examples/                # example CRs; parsed and planned in tests
 deploy/operator/                # RBAC, Deployment, Dockerfile (untested)
@@ -58,6 +60,8 @@ Its source HTML lived in a session scratchpad, not in this repo. To update it, r
 - `TermMonths` lives in `pt-core` and is shared by the CRDs and the control plane.
 - Call `Service::bump()` after every committed change that could alter what a region serves. Snapshot versions must only increase: read the version before listing data.
 - Gateways look up deployments by `sha256_hex(api_key)`, never by plaintext. Apply snapshots through `AppState::apply_snapshot`, which reuses limiters (`ReservationLimiter::reconfigure`) and estimators. Never rebuild them, or bucket state resets.
+- With `[quota]`, the limiter enforces the gateway's *share*: `Reservation.entitlement_wu_s` is the regional total, and `limiter.config()` is the local rate. Anything that resizes limiters must go through `AppState::local_rate`, including snapshot applies, or it overwrites the lease.
+- The coordinator invariant is that the sum of unexpired grants never exceeds the entitlement. Keep `grant = min(target, E − others' unexpired grants)`, and keep the coordinator's hold (1.5 × TTL) longer than the gateway's lease.
 - A gateway uses either `[entitlements]` or static `[[reservations]]`/`[[deployments]]`, never both. Profiles are always local to the gateway.
 - The signing key in `config/control-plane.toml` and the public key in `config/gateway-eu-west.toml` are a matched development pair. If you change one, regenerate both with `pt-control-plane keygen`.
 

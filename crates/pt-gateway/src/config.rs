@@ -20,6 +20,11 @@ pub struct GatewayConfig {
     pub profiles: Vec<PerformanceProfile>,
     #[serde(default)]
     pub entitlements: Option<EntitlementSourceConfig>,
+    /// Share entitlements with other gateway replicas through the Quota Coordinator.
+    /// Without it, this gateway enforces each reservation's full regional entitlement, so
+    /// run only one replica per region.
+    #[serde(default)]
+    pub quota: Option<QuotaClientConfig>,
     #[serde(default)]
     pub reservations: Vec<ReservationConfig>,
     #[serde(default)]
@@ -49,6 +54,36 @@ pub struct EntitlementSourceConfig {
 
 fn default_wait_secs() -> u64 {
     30
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuotaClientConfig {
+    /// For example `http://127.0.0.1:8095`.
+    pub coordinator_url: String,
+    pub token: String,
+    /// Defaults to a random id per process.
+    #[serde(default)]
+    pub gateway_id: Option<String>,
+    #[serde(default = "default_renew_interval_ms")]
+    pub renew_interval_ms: u64,
+    /// Before the first lease, each gateway admits entitlement ÷ this.
+    #[serde(default = "default_assumed_gateways")]
+    pub assumed_gateways: u32,
+    /// After a lease expires, the rate moves linearly from the last lease to
+    /// 50% × entitlement ÷ active gateways over this long (ADR-003).
+    #[serde(default = "default_fallback_decay_secs")]
+    pub fallback_decay_secs: f64,
+}
+
+fn default_renew_interval_ms() -> u64 {
+    250
+}
+fn default_assumed_gateways() -> u32 {
+    3
+}
+fn default_fallback_decay_secs() -> f64 {
+    30.0
 }
 
 impl EntitlementSourceConfig {
@@ -149,6 +184,17 @@ impl GatewayConfig {
             }
             if e.wait_secs > 60 {
                 return invalid("entitlements.wait_secs can be at most 60".into());
+            }
+        }
+        if let Some(q) = &self.quota {
+            if q.assumed_gateways < 1 {
+                return invalid("quota.assumed_gateways must be at least 1".into());
+            }
+            if q.renew_interval_ms < 20 {
+                return invalid("quota.renew_interval_ms must be at least 20".into());
+            }
+            if q.fallback_decay_secs.is_nan() || q.fallback_decay_secs <= 0.0 {
+                return invalid("quota.fallback_decay_secs must be positive".into());
             }
         }
         let profiles: HashSet<_> = self.profiles.iter().map(|p| p.name.as_str()).collect();

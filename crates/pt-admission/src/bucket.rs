@@ -2,6 +2,9 @@
 
 use std::time::{Duration, Instant};
 
+/// Upper bound on any computed wait, so tiny or zero rates never overflow a `Duration`.
+const MAX_WAIT: Duration = Duration::from_secs(60);
+
 /// A token bucket in WU that refills at the entitlement rate and may go into bounded debt.
 ///
 /// Requests are admitted on an estimate. When the request completes, the difference between
@@ -69,9 +72,13 @@ impl DebtBucket {
         }
         // Smallest level that satisfies can_admit: just above zero, and either enough to stay
         // within the debt bound or a full bucket.
+        if self.rate <= 0.0 {
+            // No entitlement right now (for example, mid-rebalance): try again shortly.
+            return MAX_WAIT;
+        }
         let target = (wu - self.max_debt).min(self.capacity).max(f64::EPSILON);
         let secs = ((target - self.level) / self.rate).max(0.0);
-        Duration::from_secs_f64(secs)
+        Duration::from_secs_f64(secs).min(MAX_WAIT)
     }
 
     /// Set the level directly, clamped to capacity. Used when resizing a bucket.

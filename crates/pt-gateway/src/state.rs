@@ -7,11 +7,12 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use pt_admission::{LimiterConfig, OutputEstimator, ReservationLimiter};
 use pt_core::{ApproxTokenCounter, PerformanceProfile, Shape, Tier, TokenCounter};
 use pt_entitlement::{sha256_hex, DeploymentEntitlement, ReservationEntitlement, Snapshot};
+use pt_quota::wire::{RenewResponse, ReservationDemand};
 
 use crate::config::{ConfigError, GatewayConfig};
 use crate::usage::UsageSink;
@@ -21,6 +22,9 @@ pub struct Reservation {
     pub tenant: String,
     pub model: String,
     pub cus: u32,
+    /// The region's full entitlement (CUs × WU/s per CU). With a Quota Coordinator, the
+    /// limiter enforces only this gateway's share of it.
+    pub entitlement_wu_s: f64,
     pub tier: Tier,
     pub profile: PerformanceProfile,
     pub shape: Shape,
@@ -86,6 +90,68 @@ impl Entitlements {
     pub fn deployment_count(&self) -> usize {
         self.by_deployment.len()
     }
+
+    pub fn reservations(&self) -> impl Iterator<Item = &Arc<Reservation>> {
+        self.reservations.values()
+    }
+}
+
+/// This gateway's leases from the Quota Coordinator.
+struct QuotaShares {
+    assumed_gateways: u32,
+    decay: Duration,
+    leases: Mutex<HashMap<String, LeaseState>>,
+    /// Smoothed demand per reservation, WU/s.
+    demand: Mutex<HashMap<String, f64>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LeaseState {
+    rate: f64,
+    expires_at: Instant,
+    gateways: u32,
+}
+
+/// How a reservation's local rate is currently set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuotaMode {
+    /// No coordinator: the full entitlement.
+    Disabled,
+    /// No lease yet: entitlement ÷ assumed gateways.
+    Unleased,
+    Lease,
+    /// Lease expired: decaying towards 50% of entitlement ÷ gateways.
+    Fallback,
+}
+
+impl QuotaMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            QuotaMode::Disabled => "disabled",
+            QuotaMode::Unleased => "unleased",
+            QuotaMode::Lease => "lease",
+            QuotaMode::Fallback => "fallback",
+        }
+    }
+}
+
+impl QuotaShares {
+    fn rate(&self, id: &str, entitlement: f64, now: Instant) -> (f64, QuotaMode) {
+        let leases = self.leases.lock().unwrap_or_else(|e| e.into_inner());
+        match leases.get(id) {
+            None => (
+                entitlement / f64::from(self.assumed_gateways),
+                QuotaMode::Unleased,
+            ),
+            Some(l) if now < l.expires_at => (l.rate.min(entitlement), QuotaMode::Lease),
+            Some(l) => {
+                let target = 0.5 * entitlement / f64::from(l.gateways.max(1));
+                let t = (now - l.expires_at).as_secs_f64() / self.decay.as_secs_f64();
+                let rate = l.rate + (target - l.rate) * t.min(1.0);
+                (rate.clamp(0.0, entitlement), QuotaMode::Fallback)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -109,6 +175,7 @@ pub enum ApplyError {
 
 pub struct Inner {
     current: RwLock<Arc<Entitlements>>,
+    quota: Option<QuotaShares>,
     profiles: HashMap<String, PerformanceProfile>,
     wu_per_cu: f64,
     pub http: reqwest::Client,
@@ -147,6 +214,12 @@ impl AppState {
         };
         let state = Self(Arc::new(Inner {
             current: RwLock::new(Arc::new(Entitlements::empty(source))),
+            quota: config.quota.as_ref().map(|q| QuotaShares {
+                assumed_gateways: q.assumed_gateways,
+                decay: Duration::from_secs_f64(q.fallback_decay_secs),
+                leases: Mutex::new(HashMap::new()),
+                demand: Mutex::new(HashMap::new()),
+            }),
             profiles: config
                 .profiles
                 .iter()
@@ -213,6 +286,74 @@ impl AppState {
             .by_key_hash
             .get(&sha256_hex(api_key.as_bytes()))
             .cloned()
+    }
+
+    /// The rate this gateway may admit for a reservation, and why.
+    pub fn local_rate(&self, id: &str, entitlement: f64, now: Instant) -> (f64, QuotaMode) {
+        match &self.quota {
+            None => (entitlement, QuotaMode::Disabled),
+            Some(q) => q.rate(id, entitlement, now),
+        }
+    }
+
+    /// Record leases from the coordinator, then resize limiters to match.
+    pub fn apply_leases(&self, resp: &RenewResponse, received_at: Instant) {
+        let Some(q) = &self.quota else { return };
+        let ttl = Duration::from_millis(resp.ttl_ms);
+        {
+            let mut leases = q.leases.lock().unwrap_or_else(|e| e.into_inner());
+            for l in &resp.leases {
+                leases.insert(
+                    l.id.clone(),
+                    LeaseState {
+                        rate: l.rate_wu_s.max(0.0),
+                        expires_at: received_at + ttl,
+                        gateways: l.active_gateways,
+                    },
+                );
+            }
+        }
+        self.refresh_local_rates(received_at);
+    }
+
+    /// Resize each limiter to its current local rate: the lease, the fallback, or the full
+    /// entitlement. Changes under 1% are skipped to avoid churn.
+    pub fn refresh_local_rates(&self, now: Instant) {
+        if self.quota.is_none() {
+            return;
+        }
+        for r in self.entitlements().reservations() {
+            let (target, _) = self.local_rate(&r.id, r.entitlement_wu_s, now);
+            let current = r.limiter.config().entitlement_wu_s;
+            let diff = (target - current).abs();
+            if diff > 1e-9 && diff >= 0.01 * current.max(target) {
+                r.limiter
+                    .reconfigure(LimiterConfig::new(target), r.limiter.policy(), now);
+            }
+        }
+    }
+
+    /// Demand for each reservation since the last report, smoothed. Drains each limiter's
+    /// attempted-WU counter.
+    pub fn demand_report(&self, elapsed: Duration) -> Vec<ReservationDemand> {
+        let Some(q) = &self.quota else { return vec![] };
+        let view = self.entitlements();
+        let secs = elapsed.as_secs_f64().max(1e-3);
+        let mut demand = q.demand.lock().unwrap_or_else(|e| e.into_inner());
+        demand.retain(|id, _| view.reservations.contains_key(id));
+        view.reservations()
+            .map(|r| {
+                let now_rate = r.limiter.take_attempted_wu() / secs;
+                let d = demand.entry(r.id.clone()).or_insert(now_rate);
+                *d = 0.5 * *d + 0.5 * now_rate;
+                ReservationDemand {
+                    id: r.id.clone(),
+                    entitlement_wu_s: r.entitlement_wu_s,
+                    snapshot_version: view.version,
+                    demand_wu_s: *d,
+                }
+            })
+            .collect()
     }
 
     /// Replace the entitlements with `snapshot`, if it's for this region and newer.
@@ -287,7 +428,9 @@ impl AppState {
                 report.skipped.push(format!("{}: no deployments", r.id));
                 continue;
             };
-            let config = LimiterConfig::new(f64::from(r.cus) * self.wu_per_cu);
+            let entitlement = f64::from(r.cus) * self.wu_per_cu;
+            let (rate, _) = self.local_rate(&r.id, entitlement, now);
+            let config = LimiterConfig::new(rate);
             let limiter = match prev.reservations.get(&r.id) {
                 Some(p) => {
                     p.limiter
@@ -303,6 +446,7 @@ impl AppState {
                     tenant: r.tenant.clone(),
                     model: r.model.clone(),
                     cus: r.cus,
+                    entitlement_wu_s: entitlement,
                     tier: r.tier,
                     profile: profile.clone(),
                     shape: r.shape,

@@ -94,6 +94,7 @@ fn gateway_config(
             cache_path: Some(cache.into()),
             wait_secs: 5,
         }),
+        quota: None,
         reservations: vec![],
         deployments: vec![],
     }

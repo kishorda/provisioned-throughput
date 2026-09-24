@@ -20,6 +20,7 @@ named latency tier.
 | `pt-core` | Shared types: WU cost model and `PerformanceProfile`, tiers and CU pricing, workload shape, token counting, usage records |
 | `pt-admission` | Debt-based WU bucket (ADR-002), burst bank, boundary-policy chain (burst → queue → spillover → reject), `continuation` reserve, output-length estimator |
 | `pt-gateway` | OpenAI-compatible gateway (axum): auth, estimate, admit, proxy/stream, settle, usage JSONL, `/v1/pt/status`. Loads entitlements from signed control-plane snapshots or a static file |
+| `pt-quota` | Regional Quota Coordinator: leases that split each reservation's entitlement across gateway replicas without overselling (ADR-012) |
 | `pt-entitlement` | Snapshot format shared by the control plane and gateways, Ed25519 signing and verification, API-key hashing |
 | `pt-mock-engine` | Stand-in for a Dynamo frontend: OpenAI chat API with configurable TTFT/TPOT and simulated prefix caching |
 | `pt-crds` | Custom resources (docs/08 §2): `PerformanceProfile`, `ModelPool`, `PoolAllocation`, `CapacityReservation`, and the `crdgen` binary |
@@ -100,6 +101,20 @@ target/debug/pt-gateway config/gateway-eu-west.toml &           # :8081, syncs e
 curl -s 127.0.0.1:8081/internal/v1/entitlements                 # version, generated_at, counts
 ```
 
+With `[quota]` set (it is in `config/gateway-eu-west.toml`), gateway replicas share each
+reservation's regional entitlement through the Quota Coordinator:
+
+```sh
+target/debug/pt-quota-coordinator config/quota.toml &           # :8095
+curl -s 127.0.0.1:8095/v1/leases -H 'Authorization: Bearer quota-token-eu-west-dev'
+# per reservation: entitlement, total granted (never above it), and each replica's grant
+```
+
+`/v1/pt/status` on a gateway shows `entitlement_wu_per_s` (the region's total),
+`local_share_wu_per_s` (this replica's lease), and `quota`: `lease`, `fallback`,
+`unleased`, or `disabled`. To run a second replica, copy the config with a different
+`listen` port and `cache_path`.
+
 The gateway caches the last snapshot in `entitlements-eu-west.json`, and keeps serving from
 it if the control plane is down. `pt-control-plane keygen` makes a new signing key pair. The
 keys in `config/` are for development only.
@@ -137,8 +152,9 @@ cargo fmt --all --check
 
 Follow-ups from the roadmap in docs/11:
 
-- **Quota Coordinator** (ADR-003). Each gateway currently enforces the full entitlement
-  locally, so run one gateway replica per reservation until leases exist.
+- **Quota Coordinator high availability.** It's a single instance per region (ADR-012).
+  While it's down, gateways fall back to 50% of each entitlement in total. There's also no
+  home-gateway routing for small tenants.
 - **Model tokenizer.** Input tokens are approximated (4 bytes per token). Settlement uses
   the engine's counts, so this affects only the admission estimate.
 - **Prefix-cache index at the gateway.** Estimates assume no cache hits; settlement

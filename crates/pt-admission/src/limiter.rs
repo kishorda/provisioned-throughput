@@ -91,6 +91,10 @@ struct State {
     provisioned: DebtBucket,
     burst: Option<BurstBank>,
     queued_wu: f64,
+    /// WU of new admission attempts (admitted or not) since the last `take_attempted_wu`.
+    /// The Quota Coordinator's demand signal: it includes rejected requests, so a gateway
+    /// starved of quota still shows that it needs more.
+    attempted_wu: f64,
 }
 
 impl State {
@@ -132,6 +136,7 @@ impl ReservationLimiter {
                 provisioned,
                 burst,
                 queued_wu: 0.0,
+                attempted_wu: 0.0,
             })),
         }
     }
@@ -163,27 +168,35 @@ impl ReservationLimiter {
             now,
         );
         provisioned.set_level(level);
-        let credit = st.burst.as_ref().map_or(0.0, BurstBank::credit);
-        let burst = policy.burst.as_ref().map(|p| {
-            let mut b = BurstBank::new(rate, p, now);
-            b.accrue(credit);
-            b
-        });
+        let burst = match (st.burst.as_mut(), policy.burst.as_ref()) {
+            (Some(old), Some(p)) => Some(old.rescaled(rate, p, now)),
+            (None, Some(p)) => Some(BurstBank::new(rate, p, now)),
+            (_, None) => None,
+        };
         st.provisioned = provisioned;
         st.burst = burst;
         st.config = config;
         st.policy = policy;
     }
 
+    /// WU attempted since the last call, then reset. Queue re-checks aren't counted twice.
+    pub fn take_attempted_wu(&self) -> f64 {
+        std::mem::take(&mut lock(&self.state).attempted_wu)
+    }
+
     /// Try to admit. Pass back the [`QueueSlot`] from a previous `Queue` decision, if any.
     pub fn admit(&self, req: &AdmitRequest, slot: Option<QueueSlot>, now: Instant) -> Decision {
         let queued_for = now.saturating_duration_since(req.received_at);
         // Leave the queue before re-evaluating, so our own entry doesn't count against depth.
+        let first_attempt = slot.is_none();
         drop(slot);
 
         let mut st = lock(&self.state);
         st.refill(now);
         let wu = req.estimated_wu;
+        if first_attempt {
+            st.attempted_wu += wu;
+        }
 
         if st.provisioned.can_admit(wu) {
             st.provisioned.debit(wu);
@@ -482,6 +495,38 @@ mod tests {
         assert_eq!(s.level_wu, 20.0);
         assert_eq!(s.burst_credit_wu, None);
         assert_eq!(l.policy(), BoundaryPolicy::default());
+    }
+
+    #[test]
+    fn zero_rate_rejects_without_panicking() {
+        let t0 = Instant::now();
+        let l = ReservationLimiter::new(LimiterConfig::new(100.0), BoundaryPolicy::default(), t0);
+        exhaust(&l, t0);
+        l.reconfigure(LimiterConfig::new(0.0), BoundaryPolicy::default(), t0);
+        match l.admit(&req(10.0, t0), None, at(t0, 5.0)) {
+            Decision::Reject { retry_after, .. } => {
+                assert_eq!(retry_after, Duration::from_secs(60))
+            }
+            d => panic!("expected reject, got {d:?}"),
+        }
+    }
+
+    #[test]
+    fn attempted_wu_counts_each_request_once() {
+        let t0 = Instant::now();
+        let policy = BoundaryPolicy {
+            queue: Some(QueuePolicy::default()),
+            ..Default::default()
+        };
+        let l = ReservationLimiter::new(LimiterConfig::new(100.0), policy, t0);
+        exhaust(&l, t0); // 250
+        let r = req(50.0, t0);
+        let Decision::Queue(slot) = l.admit(&r, None, t0) else {
+            panic!()
+        };
+        let _ = l.admit(&r, Some(slot), at(t0, 0.05)); // re-check: not counted again
+        assert_eq!(l.take_attempted_wu(), 300.0);
+        assert_eq!(l.take_attempted_wu(), 0.0);
     }
 
     #[test]

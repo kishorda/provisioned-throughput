@@ -33,6 +33,16 @@ impl BurstBank {
         self.credit
     }
 
+    /// A bank for a new entitlement that keeps this one's credit and ceiling level, clamped
+    /// to the new limits. Rebuilding with `new` would refill the ceiling on every resize and
+    /// let frequent resizes (quota leases) escape the burst rate cap.
+    pub fn rescaled(&mut self, entitlement_wu_s: f64, policy: &BurstPolicy, now: Instant) -> Self {
+        let mut b = Self::new(entitlement_wu_s, policy, now);
+        b.credit = self.credit.min(b.max_credit);
+        b.ceiling.set_level(self.ceiling.level(now));
+        b
+    }
+
     pub fn accrue(&mut self, wu: f64) {
         self.credit = (self.credit + wu).min(self.max_credit);
     }
@@ -70,6 +80,22 @@ mod tests {
             max_rate_multiple: 2.0,
             continuation_reserve: 0.25,
         }
+    }
+
+    #[test]
+    fn rescale_keeps_ceiling_level() {
+        let t0 = Instant::now();
+        let mut b = BurstBank::new(100.0, &policy(), t0);
+        b.accrue(1_000.0);
+        b.draw(100.0); // ceiling empty
+        let mut b = b.rescaled(120.0, &policy(), t0);
+        assert!(
+            !b.can_draw(10.0, true, t0),
+            "a resize must not refill the ceiling"
+        );
+        assert_eq!(b.credit(), 900.0);
+        let b = b.rescaled(10.0, &policy(), t0);
+        assert_eq!(b.credit(), 100.0, "clamped to the smaller cap");
     }
 
     #[test]

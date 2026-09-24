@@ -1,0 +1,5 @@
+# Quota Coordinator for eu-west: one instance per region (ADR-012).
+listen = "127.0.0.1:8095"
+token = "quota-token-eu-west-dev"   # development value; shared with the region's gateways
+lease_ttl_ms = 1000
+floor_fraction = 0.1                # share of each entitlement kept as a floor per replica

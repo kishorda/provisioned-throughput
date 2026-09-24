@@ -69,6 +69,7 @@ The design rests on six decisions:
 | [009](adr/ADR-009-rust.md) | Rust for the gateway, router extensions, and controllers |
 | [010](adr/ADR-010-sla-at-gateway.md) | SLA latency measured at the regional gateway |
 | [011](adr/ADR-011-single-pt-resource.md) | One customer-facing Provisioned Throughput resource |
+| [012](adr/ADR-012-single-instance-quota-coordinator.md) | Single-instance Quota Coordinator with soft state (amends 003) |
 
 ## Glossary
 

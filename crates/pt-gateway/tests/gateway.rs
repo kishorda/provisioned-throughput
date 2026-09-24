@@ -75,6 +75,7 @@ fn config(setup: Setup, engine_url: &str, payg_url: Option<&str>) -> GatewayConf
             capacity_wu_per_s: TierCapacity::default(),
         }],
         entitlements: None,
+        quota: None,
         reservations: vec![ReservationConfig {
             id: "res-1".into(),
             tenant: "acme".into(),

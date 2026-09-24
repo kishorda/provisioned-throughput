@@ -2,6 +2,7 @@
 
 pub mod chat;
 pub mod config;
+pub mod quota;
 pub mod sse;
 pub mod state;
 pub mod sync;
@@ -58,14 +59,19 @@ async fn status(State(app): State<AppState>, headers: HeaderMap) -> Response {
         );
     };
     let res = &dep.reservation;
-    let s = res.limiter.status(Instant::now());
+    let now = Instant::now();
+    let s = res.limiter.status(now);
+    let (_, quota) = app.local_rate(&res.id, res.entitlement_wu_s, now);
     Json(json!({
         "deployment": dep.id,
         "reservation": res.id,
         "model": res.model,
         "tier": res.tier,
         "cus": res.cus,
-        "entitlement_wu_per_s": s.entitlement_wu_s,
+        // The region's entitlement, and the share this gateway replica enforces.
+        "entitlement_wu_per_s": res.entitlement_wu_s,
+        "local_share_wu_per_s": s.entitlement_wu_s,
+        "quota": quota.as_str(),
         "bucket_wu": s.level_wu,
         "burst_credit_wu": s.burst_credit_wu,
         "queued_wu": s.queued_wu,

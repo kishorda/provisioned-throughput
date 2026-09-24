@@ -37,6 +37,14 @@ async fn main() -> anyhow::Result<()> {
         }
         tokio::spawn(client.run(app.clone()));
     }
+    if let Some(quota) = config.quota.clone() {
+        let client = pt_gateway::quota::QuotaClient::new(quota)?;
+        tracing::info!(
+            gateway_id = client.gateway_id(),
+            "sharing entitlements through the quota coordinator"
+        );
+        tokio::spawn(client.run(app.clone()));
+    }
 
     let listener = tokio::net::TcpListener::bind(&config.server.listen)
         .await

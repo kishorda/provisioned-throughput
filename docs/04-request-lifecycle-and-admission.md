@@ -139,5 +139,13 @@ on the hot path ([ADR-003](adr/ADR-003-lease-based-distributed-quota.md)):
 - Low-volume tenants (< 1 gateway's worth of traffic) are routed by consistent hashing to
   2 "home" gateways, so leases don't fragment.
 
+> **Implementation** (`crates/pt-quota`, `crates/pt-gateway/src/quota.rs`, [ADR-012](adr/ADR-012-single-instance-quota-coordinator.md)):
+> the coordinator is a single instance per region with soft state, not Raft, and uses
+> HTTP/JSON. Demand is attempted WU/s, and each gateway sends it with its snapshot's
+> entitlement. A gateway is granted `min(fair target, entitlement − other unexpired
+> grants)`, so grants never oversell, even mid-rebalance. Burst credit accrues from the
+> local lease instead of separate burst slices. Gateways apply leases by resizing their
+> limiters in place. Home-gateway routing isn't built yet.
+
 ## Blog problems addressed
 P7, P8, P11, P12. See [traceability](01-requirements-and-traceability.md#2-traceability-matrix).

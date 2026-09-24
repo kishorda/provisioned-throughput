@@ -17,6 +17,15 @@ public_key = "b51da0aa7183df2b9a9ac31f26e8f856fd8b818d1118cdb87c9253afe13bb164"
 cache_path = "entitlements-eu-west.json"
 wait_secs = 30
 
+# Share each reservation's eu-west entitlement with the other gateway replicas.
+# Remove this section to run a single replica that enforces the full entitlement.
+[quota]
+coordinator_url = "http://127.0.0.1:8095"
+token = "quota-token-eu-west-dev"
+renew_interval_ms = 250
+assumed_gateways = 3        # share before the first lease
+fallback_decay_secs = 30    # coordinator unreachable: decay to 50% ÷ replicas
+
 # Profiles for this region's pools. Snapshots name the profile per reservation.
 [[profiles]]
 name = "llama-4-maverick.b200.trtllm-1.2.tp8"

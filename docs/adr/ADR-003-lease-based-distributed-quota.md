@@ -1,6 +1,6 @@
 # ADR-003: Lease-based distributed quota; no central store on the hot path
 
-- **Status:** Accepted
+- **Status:** Accepted. Amended by [ADR-012](ADR-012-single-instance-quota-coordinator.md): a single coordinator with soft state, not Raft.
 - **Date:** 2026-09-23
 
 ## Context
