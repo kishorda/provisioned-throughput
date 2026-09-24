@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use pt_core::{Outcome, Tier, TrafficClass, UsageRecord};
 use serde::Serialize;
 
-use crate::directory::ReservationInfo;
+use crate::directory::{ExclusionWindow, ReservationInfo};
 use crate::stats::percentile;
 use crate::store::StoredRecord;
 
@@ -151,6 +151,18 @@ pub struct Exclusions {
     pub rejected: u64,
     pub errors: u64,
     pub cancelled_before_first_token: u64,
+    /// Otherwise-eligible requests inside an exclusion window, by the window's reason.
+    pub excluded_periods: BTreeMap<String, u64>,
+}
+
+/// An exclusion window as shown in a report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AppliedExclusion {
+    pub start: String,
+    pub end: String,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -171,6 +183,8 @@ pub struct SlaReport {
     pub currency: String,
     pub eligible_requests: usize,
     pub excluded: Exclusions,
+    /// Exclusion windows that overlap the month.
+    pub exclusion_windows: Vec<AppliedExclusion>,
     pub missed_windows: Vec<WindowResult>,
 }
 
@@ -182,9 +196,23 @@ pub fn report(
     complete: bool,
 ) -> SlaReport {
     let mut excluded = Exclusions::default();
+    let mut counted = Vec::with_capacity(records.len());
     for s in records {
         let r = &s.record;
         if is_eligible(r) {
+            match info
+                .exclusions
+                .iter()
+                .find(|w| w.covers(&s.region, s.at_ms))
+            {
+                Some(w) => {
+                    *excluded
+                        .excluded_periods
+                        .entry(w.reason.clone())
+                        .or_default() += 1
+                }
+                None => counted.push(s.clone()),
+            }
             continue;
         }
         match (&r.outcome, r.class) {
@@ -199,7 +227,18 @@ pub fn report(
         }
     }
 
-    let windows = windows(info.tier, records);
+    let windows = windows(info.tier, &counted);
+    let exclusion_windows: Vec<AppliedExclusion> = info
+        .exclusions
+        .iter()
+        .filter(|w| w.start_ms < period.1.max(period.0 + 1) && w.end_ms > period.0)
+        .map(|w: &ExclusionWindow| AppliedExclusion {
+            start: rfc3339(w.start_ms),
+            end: rfc3339(w.end_ms),
+            reason: w.reason.clone(),
+            region: w.region.clone(),
+        })
+        .collect();
     let met = windows.iter().filter(|w| w.met).count();
     let attainment_pct = if windows.is_empty() {
         100.0
@@ -223,6 +262,7 @@ pub fn report(
         monthly_price: info.monthly_price,
         currency: info.currency.clone(),
         excluded,
+        exclusion_windows,
         missed_windows: windows
             .into_iter()
             .filter(|w| !w.met)
@@ -319,6 +359,7 @@ mod tests {
             entitlement_wu_s: 10_000.0,
             monthly_price: 1_000_000,
             currency: "USD".into(),
+            exclusions: vec![],
             shape: Shape {
                 input_p95: 2_000,
                 input_max: 8_000,
@@ -413,7 +454,8 @@ mod tests {
                 over_entitlement: 1,
                 rejected: 1,
                 errors: 0,
-                cancelled_before_first_token: 1
+                cancelled_before_first_token: 1,
+                excluded_periods: Default::default(),
             }
         );
         assert_eq!(r.attainment_pct, 100.0);
@@ -433,6 +475,46 @@ mod tests {
         assert_eq!(r.credit_pct, 10);
         assert_eq!(r.credit_amount, 100_000);
         assert_eq!(r.missed_windows.len(), 3);
+    }
+
+    #[test]
+    fn exclusion_windows_remove_requests_by_time_and_region() {
+        // Window 1 fast; window 2 slow. The slow window falls inside a declared incident.
+        let mut recs = window(0, 100, 0);
+        recs.extend(window(WINDOW_MS, 100, 100));
+        let mut i = info();
+        assert_eq!(
+            report(&i, &recs, "1970-01", (0, 2 * WINDOW_MS), true).windows_met,
+            1
+        );
+
+        i.exclusions = vec![ExclusionWindow {
+            start_ms: WINDOW_MS,
+            end_ms: 2 * WINDOW_MS,
+            reason: "failover".into(),
+            region: None,
+        }];
+        let r = report(&i, &recs, "1970-01", (0, 2 * WINDOW_MS), true);
+        assert_eq!((r.windows, r.windows_met, r.attainment_pct), (1, 1, 100.0));
+        assert_eq!(r.eligible_requests, 100);
+        assert_eq!(r.excluded.excluded_periods["failover"], 100);
+        assert_eq!(r.exclusion_windows.len(), 1);
+        assert_eq!(r.exclusion_windows[0].start, rfc3339(WINDOW_MS));
+
+        // Restricted to another region: nothing is excluded.
+        i.exclusions[0].region = Some("us-east".into());
+        let r = report(&i, &recs, "1970-01", (0, 2 * WINDOW_MS), true);
+        assert_eq!(r.windows_met, 1);
+        assert_eq!(r.windows, 2);
+        assert!(r.excluded.excluded_periods.is_empty());
+
+        // Ineligible requests keep their own reason even inside a window.
+        let mut burst = record(WINDOW_MS + 5, 100.0, None);
+        burst.record.class = Some(TrafficClass::Burst);
+        i.exclusions[0].region = None;
+        let r = report(&i, &[burst], "1970-01", (0, 2 * WINDOW_MS), true);
+        assert_eq!(r.excluded.over_entitlement, 1);
+        assert!(r.excluded.excluded_periods.is_empty());
     }
 
     #[test]

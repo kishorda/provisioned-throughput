@@ -56,6 +56,12 @@ flowchart LR
 
 ## 4. Region failure sequence (Multi-region SKU)
 
+> **Implementation:** operators declare region incidents in the control plane
+> (`POST /internal/v1/incidents`). The SLA then excludes the first `failover_window_minutes`
+> for Multi-region reservations, and the whole incident in the failed region for Regional
+> ones ([09 §5](09-metering-observability-and-slas.md#5-implementation)). Steps 1–3 and 5
+> (DNS failover, failover entitlements, headroom claims) aren't built yet.
+
 1. Health checks fail. GeoDNS removes the region (TTL 30 s) and anycast withdraws.
 2. The surviving paired region's Quota Coordinator activates the **failover entitlement**,
    which is pre-distributed in the snapshot and dormant until activated.

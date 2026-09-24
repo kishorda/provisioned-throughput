@@ -195,8 +195,13 @@ async fn gateway_usage_reaches_customer_reports() {
     assert_eq!(session["throttled"], 0);
 
     let sla = get(&format!("{base}/sla")).await;
-    assert_eq!(sla["eligible_requests"], 12);
-    assert_eq!(sla["windows"], 1, "sparse traffic merges into one window");
+    // Every call came within the 10-minute activation grace, so none count yet.
+    assert_eq!(
+        sla["excluded"]["excluded_periods"]["activation"], 12,
+        "{sla}"
+    );
+    assert_eq!(sla["eligible_requests"], 0);
+    assert_eq!(sla["exclusion_windows"][0]["reason"], "activation");
     assert_eq!(sla["attainment_pct"], 100.0);
     assert_eq!(sla["credit_pct"], 0);
     assert_eq!(sink.dropped(), 0);

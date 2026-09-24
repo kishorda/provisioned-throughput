@@ -20,6 +20,12 @@ signing_key = "653d2967965c4705b7cd3703484ef9835995b0db06894437a355824aaf48a8fe"
 [telemetry]
 wu_per_cu = 1000.0
 retention_days = 35
+change_grace_minutes = 10      # SLA exclusion after activation, resizes, shape changes
+failover_window_minutes = 5    # multi-region SLA exclusion after a region incident starts
+
+# Operator API for declaring region incidents (development key).
+[operators]
+api_key = "sk-operator-dev"
 
 # Regions whose gateways pull snapshots and push usage, and their tokens (development values).
 [[regions]]

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Mutex;
 
-use crate::model::ProvisionedThroughput;
+use crate::model::{ProvisionedThroughput, RegionIncident};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum StoreError {
@@ -62,12 +62,27 @@ pub trait Store: Send + Sync + 'static {
         key: &str,
         record: IdempotencyRecord,
     ) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    fn insert_incident(
+        &self,
+        incident: RegionIncident,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// Replace an existing incident.
+    fn update_incident(
+        &self,
+        incident: RegionIncident,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// All incidents, oldest first.
+    fn list_incidents(&self) -> impl Future<Output = Vec<RegionIncident>> + Send;
 }
 
 #[derive(Default)]
 struct Inner {
     by_id: HashMap<String, ProvisionedThroughput>,
     idempotency: HashMap<(String, String), IdempotencyRecord>,
+    incidents: Vec<RegionIncident>,
 }
 
 #[derive(Default)]
@@ -162,5 +177,32 @@ impl Store for MemoryStore {
         }
         inner.idempotency.insert(k, record);
         Ok(())
+    }
+
+    async fn insert_incident(&self, incident: RegionIncident) -> Result<(), StoreError> {
+        let mut inner = self.lock();
+        if inner.incidents.iter().any(|i| i.id == incident.id) {
+            return Err(StoreError::AlreadyExists(incident.id));
+        }
+        let pos = inner
+            .incidents
+            .partition_point(|i| i.started_at <= incident.started_at);
+        inner.incidents.insert(pos, incident);
+        Ok(())
+    }
+
+    async fn update_incident(&self, incident: RegionIncident) -> Result<(), StoreError> {
+        let mut inner = self.lock();
+        match inner.incidents.iter_mut().find(|i| i.id == incident.id) {
+            Some(slot) => {
+                *slot = incident;
+                Ok(())
+            }
+            None => Err(StoreError::NotFound(incident.id)),
+        }
+    }
+
+    async fn list_incidents(&self) -> Vec<RegionIncident> {
+        self.lock().incidents.clone()
     }
 }

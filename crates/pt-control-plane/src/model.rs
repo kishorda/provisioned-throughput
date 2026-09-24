@@ -214,3 +214,40 @@ pub struct UpdateRequest {
 fn default_true() -> bool {
     true
 }
+
+/// An operator-declared region incident (docs/07 §4, docs/09 §4).
+///
+/// Multi-region reservations with a share in the region have requests excluded from the
+/// SLA for the failover window after `started_at`. Regional reservations have requests
+/// served in the region excluded until `ended_at`, because they have no SLO during a
+/// region failure.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RegionIncident {
+    pub id: String,
+    pub region: String,
+    pub started_at: Timestamp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<Timestamp>,
+    pub description: String,
+    pub declared_at: Timestamp,
+}
+
+/// `POST /internal/v1/incidents`
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeclareIncident {
+    pub region: String,
+    /// Defaults to now. At most 24 hours in the past.
+    #[serde(default)]
+    pub started_at: Option<Timestamp>,
+    pub description: String,
+}
+
+/// `POST /internal/v1/incidents/{id}/resolve`
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolveIncident {
+    /// Defaults to now.
+    #[serde(default)]
+    pub ended_at: Option<Timestamp>,
+}

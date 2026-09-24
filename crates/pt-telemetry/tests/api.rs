@@ -35,6 +35,7 @@ impl Directory for FakeDirectory {
             entitlement_wu_s: 1_000.0,
             monthly_price: 225_000,
             currency: "USD".into(),
+            exclusions: vec![],
             shape: Shape {
                 input_p95: 2_000,
                 input_max: 8_000,

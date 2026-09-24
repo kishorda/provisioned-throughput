@@ -87,6 +87,14 @@ curl -s -X DELETE http://127.0.0.1:8090/v1/provisioned-throughput/<id> \
 
 See [docs/12](docs/12-control-plane-api.md) for all rules and error codes.
 
+Operators declare region incidents, which the SLA report excludes (docs/09 §5):
+
+```sh
+curl -s -X POST http://127.0.0.1:8090/internal/v1/incidents -H 'Authorization: Bearer sk-operator-dev' \
+  -d '{"region":"eu-west","description":"Network partition in eu-west-1a"}'
+curl -s -X POST http://127.0.0.1:8090/internal/v1/incidents/<id>/resolve -H 'Authorization: Bearer sk-operator-dev'
+```
+
 Quotes size a reservation before buying, or recommend a resize from real usage (docs/02 §5):
 
 ```sh
@@ -180,7 +188,7 @@ Follow-ups from the roadmap in docs/11:
   the engine's counts, so this affects only the admission estimate.
 - **Prefix-cache index at the gateway.** Estimates assume no cache hits; settlement
   refunds the difference.
-- **Redpanda/ClickHouse.** Usage goes to JSONL and/or the control plane's in-memory telemetry store (35-day retention). The SLA's failover and customer-change exclusions aren't applied yet.
+- **Redpanda/ClickHouse.** Usage goes to JSONL and/or the control plane's in-memory telemetry store (35-day retention). Region incidents must be declared by an operator; nothing detects them automatically, and DNS failover isn't built.
 - **Signing-key rotation.** Gateways trust a single snapshot public key.
 - **Control-plane persistence.** The API keeps state in memory. The CockroachDB schema is in
   `crates/pt-control-plane/migrations/`, but there's no SQL store yet. The capacity planner

@@ -297,6 +297,7 @@ mod tests {
             entitlement_wu_s: 10.0,
             monthly_price: 0,
             currency: "USD".into(),
+            exclusions: vec![],
             shape: Shape {
                 input_p95: 500,
                 input_max: 8_000,

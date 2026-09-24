@@ -58,6 +58,7 @@ Its source HTML lived in a session scratchpad, not in this repo. To update it, r
 
 - Control-plane rules live in `pt-control-plane/src/service.rs`. Validate before touching capacity. Record every planner call as a `PlanOp`, so a failed write undoes it. Take time from the injected `Clock`, never `Timestamp::now()` directly, so lifecycle tests can use `ManualClock`.
 - `Store` and `CapacityPlanner` use `impl Future + Send` trait methods, so the service is generic rather than `dyn`. A SQL store must implement the same trait and keep optimistic concurrency on `version`.
+- SLA exclusion windows are derived only in `pt-control-plane/src/telemetry.rs` (`exclusion_windows`), from reservation events and operator-declared `RegionIncident`s, and applied in `pt-telemetry/src/sla.rs`. When you add an event kind, decide whether it opens a grace window.
 - SLA rules live only in `pt-telemetry/src/sla.rs`, and per-request latency targets only in `pt_core::Tier::{ttft_target_ms, tpot_target_ms}`. Keep them in line with docs/02 §3 and docs/09 §4, and keep the credit schedule matching the product decisions below.
 - Telemetry must not depend on control-plane storage. It reads reservations through the `pt_telemetry::Directory` trait (`CpDirectory` in `pt-control-plane/src/telemetry.rs`). `pt_control_plane::app(svc)` merges the customer API, snapshots, and telemetry routes.
 - Gateways stamp `received_at_ms` with wall time. Tests that query telemetry through the control plane must use `SystemClock` (or explicit `from`/`to`), or the default window misses the records.

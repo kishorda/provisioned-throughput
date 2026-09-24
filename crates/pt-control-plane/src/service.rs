@@ -18,8 +18,8 @@ use tokio::sync::watch;
 use crate::clock::Clock;
 use crate::config::ControlPlaneConfig;
 use crate::model::{
-    total_cus, CreateRequest, Endpoint, Event, EventKind, PendingChanges, ProvisionedThroughput,
-    RegionShare, State, UpdateRequest,
+    total_cus, CreateRequest, DeclareIncident, Endpoint, Event, EventKind, PendingChanges,
+    ProvisionedThroughput, RegionIncident, RegionShare, ResolveIncident, State, UpdateRequest,
 };
 use crate::planner::{CapacityPlanner, PlanError};
 use crate::pricing;
@@ -604,6 +604,102 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         self.bump();
         tracing::info!(id = %pt.id, %tenant, ?effect, "provisioned throughput deleted");
         Ok((pt, effect))
+    }
+
+    /// Declare a region incident. One open incident per region at a time.
+    pub async fn declare_incident(
+        &self,
+        req: DeclareIncident,
+    ) -> Result<RegionIncident, ServiceError> {
+        let now = self.clock.now();
+        if !self.config.regions.iter().any(|r| r.name == req.region) {
+            return Err(ServiceError::Validation {
+                field: "region".into(),
+                message: format!("Unknown region {}.", req.region),
+            });
+        }
+        let description = req.description.trim().to_string();
+        if description.is_empty() || description.len() > 500 {
+            return Err(ServiceError::Validation {
+                field: "description".into(),
+                message: "Give a description of 1–500 characters.".into(),
+            });
+        }
+        let started_at = req.started_at.unwrap_or(now);
+        if started_at > now + SignedDuration::from_mins(1)
+            || started_at < now - SignedDuration::from_hours(24)
+        {
+            return Err(ServiceError::Validation {
+                field: "started_at".into(),
+                message: "started_at must be within the last 24 hours.".into(),
+            });
+        }
+        let open = self.store.list_incidents().await;
+        if let Some(o) = open
+            .iter()
+            .find(|i| i.region == req.region && i.ended_at.is_none())
+        {
+            return Err(conflict(
+                "incident_open",
+                format!(
+                    "Incident {} is already open for {}. Resolve it first.",
+                    o.id, req.region
+                ),
+            ));
+        }
+        let incident = RegionIncident {
+            id: format!("inc-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]),
+            region: req.region,
+            started_at,
+            ended_at: None,
+            description,
+            declared_at: now,
+        };
+        self.store
+            .insert_incident(incident.clone())
+            .await
+            .map_err(|e| conflict("already_exists", e.to_string()))?;
+        tracing::warn!(id = %incident.id, region = %incident.region, "region incident declared");
+        Ok(incident)
+    }
+
+    pub async fn resolve_incident(
+        &self,
+        id: &str,
+        req: ResolveIncident,
+    ) -> Result<RegionIncident, ServiceError> {
+        let now = self.clock.now();
+        let mut incident = self
+            .store
+            .list_incidents()
+            .await
+            .into_iter()
+            .find(|i| i.id == id)
+            .ok_or(ServiceError::NotFound)?;
+        if incident.ended_at.is_some() {
+            return Err(conflict(
+                "already_resolved",
+                "This incident is already resolved.",
+            ));
+        }
+        let ended_at = req.ended_at.unwrap_or(now);
+        if ended_at < incident.started_at || ended_at > now + SignedDuration::from_mins(1) {
+            return Err(ServiceError::Validation {
+                field: "ended_at".into(),
+                message: "ended_at must be between started_at and now.".into(),
+            });
+        }
+        incident.ended_at = Some(ended_at);
+        self.store
+            .update_incident(incident.clone())
+            .await
+            .map_err(|_| ServiceError::NotFound)?;
+        tracing::info!(id = %incident.id, region = %incident.region, "region incident resolved");
+        Ok(incident)
+    }
+
+    pub async fn incidents(&self) -> Vec<RegionIncident> {
+        self.store.list_incidents().await
     }
 
     /// Activate, renew, and end reservations that are due. Run periodically.

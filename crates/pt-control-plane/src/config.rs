@@ -26,6 +26,9 @@ pub struct ControlPlaneConfig {
     pub telemetry: TelemetryConfig,
     /// Regions whose gateways pull entitlement snapshots and push usage records.
     pub regions: Vec<RegionConfig>,
+    /// Operator access, for declaring region incidents. Without it, the incident API is off.
+    #[serde(default)]
+    pub operators: Option<OperatorsConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -45,6 +48,28 @@ pub struct TelemetryConfig {
     /// Usage records older than this are dropped.
     #[serde(default = "default_retention_days")]
     pub retention_days: u64,
+    /// After a customer-initiated change (activation, CU increase, shape change, change
+    /// applied at renewal), requests are excluded from the SLA for this long (docs/09 §4).
+    #[serde(default = "default_change_grace_minutes")]
+    pub change_grace_minutes: u64,
+    /// Multi-region SKU: requests are excluded for this long after a region incident
+    /// starts, while traffic fails over (docs/07 §4).
+    #[serde(default = "default_failover_window_minutes")]
+    pub failover_window_minutes: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperatorsConfig {
+    /// Bearer key for the operator API. From a secret store in production.
+    pub api_key: String,
+}
+
+fn default_change_grace_minutes() -> u64 {
+    10
+}
+fn default_failover_window_minutes() -> u64 {
+    5
 }
 
 impl Default for TelemetryConfig {
@@ -52,6 +77,8 @@ impl Default for TelemetryConfig {
         Self {
             wu_per_cu: default_wu_per_cu(),
             retention_days: default_retention_days(),
+            change_grace_minutes: default_change_grace_minutes(),
+            failover_window_minutes: default_failover_window_minutes(),
         }
     }
 }

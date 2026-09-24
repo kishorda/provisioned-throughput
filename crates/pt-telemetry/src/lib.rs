@@ -17,7 +17,7 @@ pub mod stats;
 pub mod store;
 pub mod usage;
 
-pub use directory::{Directory, ReservationInfo};
+pub use directory::{Directory, ExclusionWindow, ReservationInfo};
 pub use store::{MemoryUsageStore, UsageStore};
 
 /// Store plus directory: everything the API needs.

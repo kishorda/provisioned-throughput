@@ -18,7 +18,7 @@ use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -48,6 +48,14 @@ pub fn router<S: Store, P: CapacityPlanner, C: Clock>(svc: Svc<S, P, C>) -> Rout
         .route(
             "/internal/v1/entitlements/{region}",
             get(entitlements::<S, P, C>),
+        )
+        .route(
+            "/internal/v1/incidents",
+            get(list_incidents::<S, P, C>).post(declare_incident::<S, P, C>),
+        )
+        .route(
+            "/internal/v1/incidents/{id}/resolve",
+            post(resolve_incident::<S, P, C>),
         )
         .route("/healthz", get(|| async { "ok" }))
         .with_state(svc)
@@ -247,6 +255,59 @@ async fn create<S: Store, P: CapacityPlanner, C: Clock>(
         Json(body),
     )
         .into_response())
+}
+
+fn operator<S, P, C>(svc: &Service<S, P, C>, headers: &HeaderMap) -> Result<(), ApiError> {
+    let expected = svc.config.operators.as_ref().map(|o| o.api_key.as_str());
+    let given = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim);
+    match (expected, given) {
+        (Some(e), Some(g)) if e == g => Ok(()),
+        _ => Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "invalid_operator_key",
+            "Invalid or missing operator key.",
+        )),
+    }
+}
+
+/// `POST /internal/v1/incidents`: declare a region incident (operators only).
+async fn declare_incident<S: Store, P: CapacityPlanner, C: Clock>(
+    State(svc): State<Svc<S, P, C>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    operator(&svc, &headers)?;
+    let incident = svc.declare_incident(parse(&body)?).await?;
+    Ok((StatusCode::CREATED, Json(incident)).into_response())
+}
+
+/// `POST /internal/v1/incidents/{id}/resolve`
+async fn resolve_incident<S: Store, P: CapacityPlanner, C: Clock>(
+    State(svc): State<Svc<S, P, C>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    operator(&svc, &headers)?;
+    let req = if body.is_empty() {
+        Default::default()
+    } else {
+        parse(&body)?
+    };
+    Ok(Json(svc.resolve_incident(&id, req).await?).into_response())
+}
+
+/// `GET /internal/v1/incidents`
+async fn list_incidents<S: Store, P: CapacityPlanner, C: Clock>(
+    State(svc): State<Svc<S, P, C>>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    operator(&svc, &headers)?;
+    Ok(Json(json!({ "data": svc.incidents().await })).into_response())
 }
 
 /// Longest a snapshot long-poll may wait.

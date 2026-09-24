@@ -131,8 +131,26 @@ flowchart LR
   within target".
 - Windows are merged forward until each has at least 100 eligible requests. A short
   tail joins the previous window. A month with no eligible traffic has 100% attainment.
-- Not yet applied: the failover-window exclusion and the exclusion for customer-initiated
-  changes. They need event timestamps from the control plane.
+- **Exclusion windows.** The control plane derives them for each reservation
+  (`pt-control-plane/src/telemetry.rs`):
+
+  | Cause | Window | Scope | `reason` |
+  |-------|--------|-------|----------|
+  | Activation (term start) | `change_grace_minutes` (default 10) | All regions | `activation` |
+  | CU increase | `change_grace_minutes` | All regions | `resize` |
+  | Shape change | `change_grace_minutes` | All regions | `shape_change` |
+  | Change applied at renewal | `change_grace_minutes` | All regions | `scheduled_change` |
+  | Region incident, Multi-region SKU | First `failover_window_minutes` (default 5) of the incident | All regions | `failover` |
+  | Region incident, Regional SKU | The whole incident, while open | The failed region only | `region_outage` |
+
+  Otherwise-eligible requests inside a window are left out and counted under
+  `excluded.excluded_periods` by reason. The report lists the windows that overlap the
+  month in `exclusion_windows`, so customers can see exactly what was excluded.
+- **Region incidents** are declared by operators: `POST /internal/v1/incidents` with
+  `{region, started_at?, description}`, then `POST /internal/v1/incidents/{id}/resolve`.
+  Both use the `[operators]` key. Each region can have one open incident at a time.
+  `started_at` can be at most 24 hours in the past, so exclusions can't be backdated
+  arbitrarily.
 
 **Limits**
 - The report uses the reservation's current tier, CUs, and price. A tier change at
