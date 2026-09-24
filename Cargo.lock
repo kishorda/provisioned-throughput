@@ -1755,6 +1755,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "pt-router"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "bytes",
+ "futures",
+ "pt-admission",
+ "pt-core",
+ "pt-gateway",
+ "pt-mock-engine",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "pt-telemetry"
 version = "0.1.0"
 dependencies = [

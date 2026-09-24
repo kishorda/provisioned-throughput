@@ -126,6 +126,10 @@ remains the source of truth.
 | Deployment | Operator, `DynamoGraphDeployment`, Grove | `ModelPool` → DGD rendering; drain gating |
 | Discovery | etcd + NATS | Tenant allocation projection published into the same etcd namespace |
 
+> **Update (ADR-013):** Dynamo's router plugins cover placement but not request ordering, so
+> tenant scheduling runs as the `pt-router` tier in front of Dynamo for now. See
+> [13 §3–4](13-tenant-aware-routing.md#3-mapping-onto-dynamo).
+
 **Integration approach:** the tenant scheduler is a Rust crate implemented behind a trait
 at Dynamo's router selection/queueing boundary. We maintain a thin fork until an upstream
 plugin interface exists, and rebase every Dynamo minor release. Engine KV-budget changes

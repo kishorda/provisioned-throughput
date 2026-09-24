@@ -187,6 +187,11 @@ pub async fn chat_completions(
         .header("x-pt-reservation", &res.id)
         .header("x-pt-class", class.as_str())
         .header("x-pt-wu-estimate", format!("{wu_est:.1}"))
+        // The router's WFQ weight: this gateway's share of the reservation.
+        .header(
+            "x-pt-weight",
+            format!("{:.1}", res.limiter.config().entitlement_wu_s),
+        )
         .json(&req);
     if let Some(s) = &settlement.session_id {
         upstream = upstream.header("x-pt-session-id", s);

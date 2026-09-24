@@ -42,6 +42,10 @@ Strict preemption of on-demand traffic by provisioned traffic is, in the blog's 
 
 ## 3. Level 2 · Router
 
+> **Implementation:** `crates/pt-router`, a scheduling tier in front of the workers
+> ([13](13-tenant-aware-routing.md), [ADR-013](adr/ADR-013-tenant-scheduling-tier.md)).
+> Dynamo's plugins can take over placement, but not ordering, so ordering stays in the tier.
+
 We extend Dynamo's KV-aware router, a Rust component, with a **tenant scheduler** layer:
 
 - **Per-pool queues** keyed by `(class, tenant)`. Within a class, **Weighted Fair Queuing

@@ -53,6 +53,7 @@ The design rests on six decisions:
 | 10 | [Hardware & model lifecycle](10-hardware-and-model-lifecycle.md) | Capacity, PM |
 | 11 | [Roadmap, risks, product decisions](11-roadmap-risks-open-questions.md) | Leadership, PM |
 | 12 | [Control-plane API](12-control-plane-api.md) | PM, API and portal teams |
+| 13 | [Tenant-aware routing](13-tenant-aware-routing.md) | Router, platform, and Dynamo integration teams |
 
 ## Architecture decision records
 
@@ -70,6 +71,7 @@ The design rests on six decisions:
 | [010](adr/ADR-010-sla-at-gateway.md) | SLA latency measured at the regional gateway |
 | [011](adr/ADR-011-single-pt-resource.md) | One customer-facing Provisioned Throughput resource |
 | [012](adr/ADR-012-single-instance-quota-coordinator.md) | Single-instance Quota Coordinator with soft state (amends 003) |
+| [013](adr/ADR-013-tenant-scheduling-tier.md) | Tenant scheduling as a tier in front of Dynamo (refines 004, 008) |
 
 ## Glossary
 

@@ -1,0 +1,33 @@
+# pt-router in front of two local workers (pt-mock-engine on :9000 and :9002).
+# Point a gateway's server.engine_url (and payg_engine_url) at http://127.0.0.1:9100.
+# In production, workers and allocations come from Dynamo discovery and PoolAllocation CRDs.
+
+listen = "127.0.0.1:9100"
+block_size = 16             # tokens per KV block
+default_max_tokens = 256    # assumed output length when a request doesn't set max_tokens
+queue_timeout_ms = 30000
+payg_guard_every = 50       # PAYG goes first after 50 dispatches without one, if waiting
+
+[weights]
+overlap = 1.0               # prefer workers that already hold the prompt's prefix
+load = 1.0                  # prefer less-loaded workers
+session = 0.5               # prefer the worker that served this x-pt-session-id
+kv_overcommit = 1.2         # a reservation may hold kv_share × blocks × 1.2 per worker
+
+[[workers]]
+id = "w0"
+url = "http://127.0.0.1:9000"
+slots = 8
+kv_blocks = 4096
+
+[[workers]]
+id = "w1"
+url = "http://127.0.0.1:9002"
+slots = 8
+kv_blocks = 4096
+
+# Mirrors PoolAllocation CRDs. Reservations without an entry get the gateway's x-pt-weight.
+[[allocations]]
+reservation = "res-acme-agents"
+wu_per_sec = 2000.0
+kv_share = 0.5

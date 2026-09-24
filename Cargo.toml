@@ -11,6 +11,7 @@ members = [
     "crates/pt-control-plane",
     "crates/pt-quota",
     "crates/pt-telemetry",
+    "crates/pt-router",
 ]
 
 [workspace.package]

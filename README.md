@@ -20,6 +20,7 @@ named latency tier.
 | `pt-core` | Shared types: WU cost model and `PerformanceProfile`, tiers and CU pricing, workload shape, token counting, usage records |
 | `pt-admission` | Debt-based WU bucket (ADR-002), burst bank, boundary-policy chain (burst → queue → spillover → reject), `continuation` reserve, output-length estimator |
 | `pt-gateway` | OpenAI-compatible gateway (axum): auth, estimate, admit, proxy/stream, settle, usage JSONL, `/v1/pt/status`. Loads entitlements from signed control-plane snapshots or a static file |
+| `pt-router` | Tenant-aware router tier (docs/13): priority classes, WFQ by WU, pull-based dispatch on worker slots and KV, dedicated placement, per-reservation KV budgets, prefix and session affinity |
 | `pt-quota` | Regional Quota Coordinator: leases that split each reservation's entitlement across gateway replicas without overselling (ADR-012) |
 | `pt-telemetry` | Customer usage, latency, session, and monthly SLA reports built from gateway usage records (docs/09 §5), served by the control plane |
 | `pt-entitlement` | Snapshot format shared by the control plane and gateways, Ed25519 signing and verification, API-key hashing |
@@ -164,6 +165,23 @@ curl -s 127.0.0.1:8095/v1/leases -H 'Authorization: Bearer quota-token-eu-west-d
 The gateway caches the last snapshot in `entitlements-eu-west.json`, and keeps serving from
 it if the control plane is down. `pt-control-plane keygen` makes a new signing key pair. The
 keys in `config/` are for development only.
+
+## Tenant-aware router
+
+`pt-router` sits between gateways and workers and decides which request runs next and where
+(docs/13):
+
+```sh
+MOCK_ADDR=127.0.0.1:9000 MOCK_NAME=w0 target/debug/pt-mock-engine &
+MOCK_ADDR=127.0.0.1:9002 MOCK_NAME=w1 target/debug/pt-mock-engine &
+target/debug/pt-router config/router.toml &                      # :9100
+# point the gateway's server.engine_url (and payg_engine_url) at http://127.0.0.1:9100
+curl -s 127.0.0.1:9100/v1/router/status                          # queues, dispatches, per-worker load and KV
+```
+
+Responses carry `x-pt-router-worker` and `x-pt-router-queue-ms`. If the router can't
+serve a request it returns `x-pt-reason`: `router_queue_timeout`,
+`router_request_too_large`, or `router_no_worker`.
 
 ## Kubernetes
 

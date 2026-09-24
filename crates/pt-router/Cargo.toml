@@ -1,0 +1,27 @@
+[package]
+name = "pt-router"
+description = "Tenant-aware router: priority classes, WFQ by WU, pull-based dispatch, KV-aware placement (docs/05, docs/13)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pt-core.workspace = true
+anyhow.workspace = true
+axum.workspace = true
+bytes.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+pt-mock-engine.workspace = true
+pt-gateway = { path = "../pt-gateway" }
+pt-admission.workspace = true

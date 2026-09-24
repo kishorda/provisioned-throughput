@@ -49,6 +49,25 @@ impl Default for MockConfig {
 #[derive(Debug, Default)]
 struct Stats {
     requests: AtomicU64,
+    in_flight: AtomicU64,
+    max_in_flight: AtomicU64,
+}
+
+/// Counts a request as in flight until dropped.
+struct InFlight(Arc<Stats>);
+
+impl InFlight {
+    fn start(stats: &Arc<Stats>) -> Self {
+        let now = stats.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        stats.max_in_flight.fetch_max(now, Ordering::SeqCst);
+        Self(Arc::clone(stats))
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.in_flight.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 #[derive(Clone)]
@@ -70,6 +89,11 @@ impl MockEngine {
 
     pub fn requests_served(&self) -> u64 {
         self.stats.requests.load(Ordering::Relaxed)
+    }
+
+    /// Most requests this engine has had in progress at once.
+    pub fn max_in_flight(&self) -> u64 {
+        self.stats.max_in_flight.load(Ordering::SeqCst)
     }
 
     pub fn router(&self) -> Router {
@@ -142,6 +166,7 @@ async fn chat_completions(
     Json(req): Json<ChatRequest>,
 ) -> Response {
     engine.stats.requests.fetch_add(1, Ordering::Relaxed);
+    let in_flight = InFlight::start(&engine.stats);
     if req.messages.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -198,6 +223,7 @@ async fn chat_completions(
     let (tx, rx) = mpsc::channel::<Bytes>(16);
     let model = req.model;
     tokio::spawn(async move {
+        let _in_flight = in_flight;
         let chunk = |delta: Value, finish: Option<&str>| {
             sse(&json!({
                 "id": id, "object": "chat.completion.chunk", "created": created, "model": model,
