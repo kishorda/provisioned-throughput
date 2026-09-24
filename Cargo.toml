@@ -10,6 +10,7 @@ members = [
     "crates/pt-operator",
     "crates/pt-control-plane",
     "crates/pt-quota",
+    "crates/pt-telemetry",
 ]
 
 [workspace.package]
@@ -26,6 +27,7 @@ pt-crds = { path = "crates/pt-crds" }
 pt-entitlement = { path = "crates/pt-entitlement" }
 pt-control-plane = { path = "crates/pt-control-plane" }
 pt-quota = { path = "crates/pt-quota" }
+pt-telemetry = { path = "crates/pt-telemetry" }
 
 anyhow = "1"
 axum = "0.8"

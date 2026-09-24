@@ -72,6 +72,9 @@ pub struct Timings {
 pub struct UsageRecord {
     /// Idempotency key for exactly-once billing.
     pub request_id: Uuid,
+    /// When the gateway fully received the request, in Unix milliseconds.
+    #[serde(default)]
+    pub received_at_ms: u64,
     pub tenant: String,
     pub reservation: String,
     pub deployment: String,

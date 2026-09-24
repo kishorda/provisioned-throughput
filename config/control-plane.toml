@@ -16,7 +16,12 @@ base_cu_price_per_month_cents = 150000  # one Standard CU for one month
 [entitlements]
 signing_key = "653d2967965c4705b7cd3703484ef9835995b0db06894437a355824aaf48a8fe"
 
-# Regions whose gateways pull snapshots, and their pull tokens (development values).
+# Customer usage and SLA reports (docs/09). wu_per_cu must match the gateways'.
+[telemetry]
+wu_per_cu = 1000.0
+retention_days = 35
+
+# Regions whose gateways pull snapshots and push usage, and their tokens (development values).
 [[regions]]
 name = "eu-west"
 token = "region-token-eu-west-dev"

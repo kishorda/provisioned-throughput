@@ -76,6 +76,7 @@ fn config(setup: Setup, engine_url: &str, payg_url: Option<&str>) -> GatewayConf
         }],
         entitlements: None,
         quota: None,
+        usage_export: None,
         reservations: vec![ReservationConfig {
             id: "res-1".into(),
             tenant: "acme".into(),

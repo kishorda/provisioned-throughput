@@ -93,5 +93,52 @@ The blog notes that latency differs by vantage point. We publish exactly one:
 - The SLA report is generated from the same ClickHouse data that customers query, so
   customers can reproduce it.
 
+## 5. Implementation
+
+The code is in `crates/pt-telemetry`, served by the control plane. Gateways push usage with
+`[usage_export]` in `crates/pt-gateway/src/usage.rs`.
+
+```mermaid
+flowchart LR
+  GW[Regional gateways] -->|"batched usage records, region token"| ING[POST /internal/v1/usage]
+  ING --> ST[(UsageStore: in-memory now, ClickHouse later)]
+  C[Customer, management key] --> Q[usage / sla / sessions endpoints]
+  Q --> ST
+  Q --> DIR[Control-plane directory: tier, CUs, shape, price]
+```
+
+**Ingest**
+- Gateways buffer records and send batches of up to 500, or whatever has queued after
+  1 s. They retry with backoff while the control plane is unreachable, and drop and count
+  records only when the buffer is full.
+- Ingest de-duplicates by `request_id`, so retries never double-count. The region comes
+  from the push token.
+
+**Customer endpoints** (management key; another tenant's reservation returns 404):
+
+| Endpoint | Returns |
+|----------|---------|
+| `GET /v1/provisioned-throughput/{id}/usage?from&to&granularity` | Time series (`1m`/`5m`/`1h`/`1d`, chosen automatically if omitted) and a summary. Includes requests by class, rejections by reason, errors, cancellations, tokens, WU, utilisation of the entitlement, TTFT/TPOT p50/p95/p99, cache hit rate, out-of-shape count, observed shape against declared, and plain-language advice |
+| `GET /v1/provisioned-throughput/{id}/sla?month=YYYY-MM` | Windows, windows met, attainment, credit percentage and amount, eligible requests, exclusions by reason, and missed windows |
+| `GET /v1/provisioned-throughput/{id}/sessions/{session_id}` | One agent session's calls, total time, TTFT percentiles, cache reuse, and throttles |
+
+**How §4's rules are applied**
+- Per-request targets come from `Tier::ttft_target_ms` and `Tier::tpot_target_ms`. TTFT
+  depends on input length (Interactive) and cache hits (Agentic). TPOT is tighter for
+  outputs of 64 tokens or fewer.
+- A window meets the SLA when the p95 of `latency ÷ that request's target` is at most 1,
+  for both TTFT and TPOT. With a single fixed target, this is the same as "p95 latency
+  within target".
+- Windows are merged forward until each has at least 100 eligible requests. A short
+  tail joins the previous window. A month with no eligible traffic has 100% attainment.
+- Not yet applied: the failover-window exclusion and the exclusion for customer-initiated
+  changes. They need event timestamps from the control plane.
+
+**Limits**
+- The report uses the reservation's current tier, CUs, and price. A tier change at
+  renewal applies to the whole month in which it's viewed.
+- Records are kept in memory for 35 days (`[telemetry] retention_days`).
+- Usage records include `session_id`. They carry no prompt or completion content.
+
 ## Blog problems addressed
 P8, P18, P19. See [traceability](01-requirements-and-traceability.md#2-traceability-matrix).

@@ -19,7 +19,9 @@ pub struct ControlPlaneConfig {
     pub models: Vec<ModelConfig>,
     pub capacity: Vec<CapacityConfig>,
     pub entitlements: EntitlementsConfig,
-    /// Regions whose gateways pull entitlement snapshots.
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
+    /// Regions whose gateways pull entitlement snapshots and push usage records.
     pub regions: Vec<RegionConfig>,
 }
 
@@ -29,6 +31,33 @@ pub struct EntitlementsConfig {
     /// Ed25519 seed (32 bytes, hex) that signs snapshots. Generate one with
     /// `pt-control-plane keygen`. From a secret store in production.
     pub signing_key: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TelemetryConfig {
+    /// WU/s per CU, for utilisation. Must match the gateways' `server.wu_per_cu`.
+    #[serde(default = "default_wu_per_cu")]
+    pub wu_per_cu: f64,
+    /// Usage records older than this are dropped.
+    #[serde(default = "default_retention_days")]
+    pub retention_days: u64,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            wu_per_cu: default_wu_per_cu(),
+            retention_days: default_retention_days(),
+        }
+    }
+}
+
+fn default_wu_per_cu() -> f64 {
+    1_000.0
+}
+fn default_retention_days() -> u64 {
+    35
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -184,6 +213,11 @@ impl ControlPlaneConfig {
         }
         if pt_entitlement::SnapshotSigner::from_hex(&self.entitlements.signing_key).is_err() {
             return invalid("entitlements.signing_key must be 32 bytes of hex".into());
+        }
+        if self.telemetry.wu_per_cu <= 0.0 || self.telemetry.retention_days == 0 {
+            return invalid(
+                "telemetry.wu_per_cu and telemetry.retention_days must be positive".into(),
+            );
         }
         if !self.server.endpoint_template.contains("{region}") {
             return invalid("server.endpoint_template must contain {region}".into());

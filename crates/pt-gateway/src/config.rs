@@ -25,6 +25,9 @@ pub struct GatewayConfig {
     /// run only one replica per region.
     #[serde(default)]
     pub quota: Option<QuotaClientConfig>,
+    /// Push usage records to the control plane's telemetry API (docs/09).
+    #[serde(default)]
+    pub usage_export: Option<UsageExportConfig>,
     #[serde(default)]
     pub reservations: Vec<ReservationConfig>,
     #[serde(default)]
@@ -54,6 +57,33 @@ pub struct EntitlementSourceConfig {
 
 fn default_wait_secs() -> u64 {
     30
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsageExportConfig {
+    /// Control-plane base URL, for example `http://127.0.0.1:8090`.
+    pub control_plane_url: String,
+    /// The region's token; it also identifies the region on ingest.
+    pub token: String,
+    #[serde(default = "default_batch_size")]
+    pub batch_size: usize,
+    #[serde(default = "default_flush_interval_ms")]
+    pub flush_interval_ms: u64,
+    /// Records held while the control plane is unreachable. New records are dropped (and
+    /// counted) beyond this.
+    #[serde(default = "default_buffer")]
+    pub buffer: usize,
+}
+
+fn default_batch_size() -> usize {
+    500
+}
+fn default_flush_interval_ms() -> u64 {
+    1_000
+}
+fn default_buffer() -> usize {
+    100_000
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -184,6 +214,14 @@ impl GatewayConfig {
             }
             if e.wait_secs > 60 {
                 return invalid("entitlements.wait_secs can be at most 60".into());
+            }
+        }
+        if let Some(u) = &self.usage_export {
+            if u.batch_size == 0 || u.batch_size > 5_000 {
+                return invalid("usage_export.batch_size must be between 1 and 5000".into());
+            }
+            if u.buffer < u.batch_size {
+                return invalid("usage_export.buffer must be at least batch_size".into());
             }
         }
         if let Some(q) = &self.quota {

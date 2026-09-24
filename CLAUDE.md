@@ -4,7 +4,7 @@
 This is the architecture design and code for a **Provisioned Throughput (PT)** product for AI inference, written from a principal-architect perspective. It answers the problems raised in the PM's blog post:
 https://kishoraher.wordpress.com/2026/09/23/provisioned-throughput-for-ai-inference-why-just-reserve-some-capacity-is-harder-than-it-sounds/
 
-**Current state:** design docs are complete. The Rust workspace implements the **P0 admission path** (docs/04, run locally against a mock engine) the **P1 CRDs plus the Regional Capacity Controller** (docs/06, docs/08), and the **control-plane customer API** (docs/12, in-memory store), which gateways follow through **signed entitlement snapshots** (docs/12 §6), and the **Quota Coordinator** that shares entitlements across gateway replicas (ADR-012). The controller has only been unit-tested: there's no cluster, Docker, or kubectl on this machine. There's no Dynamo router extension yet. `README.md` lists what's missing. The remote is `origin` = `git@github.com:kishorda/provisioned-throughput.git` (SSH). HTTPS has no credentials on this machine, and there's no `gh` CLI.
+**Current state:** design docs are complete. The Rust workspace implements the **P0 admission path** (docs/04, run locally against a mock engine) the **P1 CRDs plus the Regional Capacity Controller** (docs/06, docs/08), and the **control-plane customer API** (docs/12, in-memory store), which gateways follow through **signed entitlement snapshots** (docs/12 §6), the **Quota Coordinator** that shares entitlements across gateway replicas (ADR-012), and **customer usage/SLA telemetry** (docs/09 §5) fed by gateway usage export. The controller has only been unit-tested: there's no cluster, Docker, or kubectl on this machine. There's no Dynamo router extension yet. `README.md` lists what's missing. The remote is `origin` = `git@github.com:kishorda/provisioned-throughput.git` (SSH). HTTPS has no credentials on this machine, and there's no `gh` CLI.
 
 ## Fixed decisions (don't re-litigate without the user)
 - **Sellable unit:** an abstract **Capacity Unit (CU)** = a fixed rate of **Work Units (WU)** per second at a named SLO tier (Interactive / Agentic / Standard).
@@ -19,6 +19,7 @@ https://kishoraher.wordpress.com/2026/09/23/provisioned-throughput-for-ai-infere
 Cargo.toml                      # workspace
 crates/
   pt-core/                      # WU cost model, PerformanceProfile, tiers + pricing, Shape, TermMonths, token counting, UsageRecord
+  pt-telemetry/                 # usage store (trait + in-memory), usage.rs (series/summary/advice), sla.rs (windows, attainment, credits), sessions.rs, api.rs; Directory trait implemented by the control plane
   pt-quota/                     # Quota Coordinator: allocator.rs (pure max-min split), coordinator.rs (leases, never-oversell rule), wire.rs (shared with gateway), api.rs
   pt-entitlement/               # Snapshot format, Ed25519 SnapshotSigner/Verifier, sha256_hex for API keys
   pt-admission/                 # DebtBucket (ADR-002), BurstBank, ReservationLimiter (burst → queue → spillover → reject), OutputEstimator
@@ -57,6 +58,9 @@ Its source HTML lived in a session scratchpad, not in this repo. To update it, r
 
 - Control-plane rules live in `pt-control-plane/src/service.rs`. Validate before touching capacity. Record every planner call as a `PlanOp`, so a failed write undoes it. Take time from the injected `Clock`, never `Timestamp::now()` directly, so lifecycle tests can use `ManualClock`.
 - `Store` and `CapacityPlanner` use `impl Future + Send` trait methods, so the service is generic rather than `dyn`. A SQL store must implement the same trait and keep optimistic concurrency on `version`.
+- SLA rules live only in `pt-telemetry/src/sla.rs`, and per-request latency targets only in `pt_core::Tier::{ttft_target_ms, tpot_target_ms}`. Keep them in line with docs/02 §3 and docs/09 §4, and keep the credit schedule matching the product decisions below.
+- Telemetry must not depend on control-plane storage. It reads reservations through the `pt_telemetry::Directory` trait (`CpDirectory` in `pt-control-plane/src/telemetry.rs`). `pt_control_plane::app(svc)` merges the customer API, snapshots, and telemetry routes.
+- Gateways stamp `received_at_ms` with wall time. Tests that query telemetry through the control plane must use `SystemClock` (or explicit `from`/`to`), or the default window misses the records.
 - `TermMonths` lives in `pt-core` and is shared by the CRDs and the control plane.
 - Call `Service::bump()` after every committed change that could alter what a region serves. Snapshot versions must only increase: read the version before listing data.
 - Gateways look up deployments by `sha256_hex(api_key)`, never by plaintext. Apply snapshots through `AppState::apply_snapshot`, which reuses limiters (`ReservationLimiter::reconfigure`) and estimators. Never rebuild them, or bucket state resets.

@@ -32,6 +32,9 @@ pub async fn chat_completions(
 ) -> Response {
     // The body extractor has read the whole request, so this is "fully received" (ADR-010).
     let received_at = Instant::now();
+    let received_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
     let request_id = Uuid::new_v4();
 
     let Some(dep) = bearer_token(&headers).and_then(|k| app.deployment_for_key(k)) else {
@@ -99,6 +102,7 @@ pub async fn chat_completions(
         request_id,
         session_id,
         received_at,
+        received_at_ms,
         input_tokens,
         wu_est,
         in_shape,
@@ -294,6 +298,7 @@ struct Settlement {
     request_id: Uuid,
     session_id: Option<String>,
     received_at: Instant,
+    received_at_ms: u64,
     input_tokens: u64,
     wu_est: f64,
     in_shape: bool,
@@ -371,6 +376,7 @@ impl Settlement {
         let res = &self.dep.reservation;
         self.app.sink.emit(UsageRecord {
             request_id: self.request_id,
+            received_at_ms: self.received_at_ms,
             tenant: res.tenant.clone(),
             reservation: res.id.clone(),
             deployment: self.dep.id.clone(),

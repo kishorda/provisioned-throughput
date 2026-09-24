@@ -19,10 +19,19 @@ async fn main() -> anyhow::Result<()> {
         .nth(1)
         .unwrap_or_else(|| "config/gateway.toml".into());
     let config = GatewayConfig::load(&path)?;
-    let sink: Arc<dyn UsageSink> = match &config.server.usage_log {
-        Some(p) => Arc::new(JsonlSink::file(p).with_context(|| format!("opening usage log {p}"))?),
-        None => Arc::new(JsonlSink::stdout()),
-    };
+    let mut sinks: Vec<Arc<dyn UsageSink>> = Vec::new();
+    if let Some(p) = &config.server.usage_log {
+        sinks.push(Arc::new(
+            JsonlSink::file(p).with_context(|| format!("opening usage log {p}"))?,
+        ));
+    }
+    if let Some(export) = config.usage_export.clone() {
+        sinks.push(pt_gateway::usage::HttpSink::start(export));
+    }
+    if sinks.is_empty() {
+        sinks.push(Arc::new(JsonlSink::stdout()));
+    }
+    let sink: Arc<dyn UsageSink> = Arc::new(pt_gateway::usage::TeeSink(sinks));
     let app = AppState::new(&config, sink)?;
 
     if let Some(source) = config.entitlements.clone() {

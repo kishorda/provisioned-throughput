@@ -95,6 +95,7 @@ fn gateway_config(
             wait_secs: 5,
         }),
         quota: None,
+        usage_export: None,
         reservations: vec![],
         deployments: vec![],
     }

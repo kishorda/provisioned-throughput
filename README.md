@@ -21,6 +21,7 @@ named latency tier.
 | `pt-admission` | Debt-based WU bucket (ADR-002), burst bank, boundary-policy chain (burst → queue → spillover → reject), `continuation` reserve, output-length estimator |
 | `pt-gateway` | OpenAI-compatible gateway (axum): auth, estimate, admit, proxy/stream, settle, usage JSONL, `/v1/pt/status`. Loads entitlements from signed control-plane snapshots or a static file |
 | `pt-quota` | Regional Quota Coordinator: leases that split each reservation's entitlement across gateway replicas without overselling (ADR-012) |
+| `pt-telemetry` | Customer usage, latency, session, and monthly SLA reports built from gateway usage records (docs/09 §5), served by the control plane |
 | `pt-entitlement` | Snapshot format shared by the control plane and gateways, Ed25519 signing and verification, API-key hashing |
 | `pt-mock-engine` | Stand-in for a Dynamo frontend: OpenAI chat API with configurable TTFT/TPOT and simulated prefix caching |
 | `pt-crds` | Custom resources (docs/08 §2): `PerformanceProfile`, `ModelPool`, `PoolAllocation`, `CapacityReservation`, and the `crdgen` binary |
@@ -85,6 +86,14 @@ curl -s -X DELETE http://127.0.0.1:8090/v1/provisioned-throughput/<id> \
 ```
 
 See [docs/12](docs/12-control-plane-api.md) for all rules and error codes.
+
+Usage and SLA reports, from gateways configured with `[usage_export]` (docs/09 §5):
+
+```sh
+curl -s "http://127.0.0.1:8090/v1/provisioned-throughput/<id>/usage?granularity=5m" -H 'Authorization: Bearer sk-admin-acme-dev'
+curl -s "http://127.0.0.1:8090/v1/provisioned-throughput/<id>/sla?month=2026-10"   -H 'Authorization: Bearer sk-admin-acme-dev'
+curl -s "http://127.0.0.1:8090/v1/provisioned-throughput/<id>/sessions/<session>"  -H 'Authorization: Bearer sk-admin-acme-dev'
+```
 
 ## Control plane → gateway
 
@@ -159,7 +168,7 @@ Follow-ups from the roadmap in docs/11:
   the engine's counts, so this affects only the admission estimate.
 - **Prefix-cache index at the gateway.** Estimates assume no cache hits; settlement
   refunds the difference.
-- **Redpanda publisher and metrics.** Usage goes to JSONL, which the ClickHouse schema can ingest.
+- **Redpanda/ClickHouse.** Usage goes to JSONL and/or the control plane's in-memory telemetry store (35-day retention). The SLA's failover and customer-change exclusions aren't applied yet.
 - **Signing-key rotation.** Gateways trust a single snapshot public key.
 - **Control-plane persistence.** The API keeps state in memory. The CockroachDB schema is in
   `crates/pt-control-plane/migrations/`, but there's no SQL store yet. The capacity planner

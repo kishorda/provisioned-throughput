@@ -80,6 +80,7 @@ fn config(engine: &str, coordinator: &str, gateway_id: &str) -> GatewayConfig {
             assumed_gateways: 2,
             fallback_decay_secs: 1.0,
         }),
+        usage_export: None,
         reservations: vec![ReservationConfig {
             id: "res-1".into(),
             tenant: "acme".into(),
