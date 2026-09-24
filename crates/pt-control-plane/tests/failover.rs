@@ -59,8 +59,11 @@ async fn multi_region_holds_failover_headroom_in_the_paired_region() {
     // Each region holds its own share plus the other's.
     assert_eq!(available(&svc, "eu-west"), 200 - 10 - 4);
     assert_eq!(available(&svc, "eu-central"), 100 - 4 - 10);
-    // The price covers the shares only.
+    // The price covers the shares only, with the Multi-region surcharge of 0.2 × base:
+    // Agentic is 1.5 + 0.2 = 1.7 × 150,000 cents per CU.
     assert_eq!(pt.cus, 14);
+    assert_eq!(pt.price.per_cu_monthly, 255_000);
+    assert_eq!(pt.price.monthly, 14 * 255_000);
 
     // Growing a share grows the headroom it needs in its pair.
     let up = UpdateRequest {
@@ -82,6 +85,7 @@ async fn multi_region_holds_failover_headroom_in_the_paired_region() {
         .unwrap()
         .resource;
     assert!(regional.failover_headroom.is_empty());
+    assert_eq!(regional.price.per_cu_monthly, 225_000, "no surcharge");
     assert_eq!(available(&svc, "eu-west"), 200 - 12 - 4 - 5);
 }
 

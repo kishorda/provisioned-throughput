@@ -11,8 +11,8 @@ lifecycle_interval_secs = 60
 currency = "USD"
 base_cu_price_per_month_cents = 150000  # one Standard CU for one month
 
-# PAYG list prices, in cents per million tokens. Spillover is billed at these.
-# Placeholders until PM sets them.
+# PAYG list prices, in cents per million tokens. Spillover is billed as regular PAYG
+# traffic, so these must mirror the PAYG product's price list. Development values.
 [[payg_prices]]
 model = "llama-4-maverick"
 input_per_mtok = 27

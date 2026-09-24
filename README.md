@@ -255,8 +255,7 @@ Follow-ups from the roadmap in docs/11:
 - **Region failover gaps.** Steering is an API; no GeoDNS/anycast controller consumes it.
   Router `hot_spare` flags are configured, not rendered by the capacity controller.
   There's no weight-prefetch DaemonSet, so loaded warm spares start cold. Preempted PAYG isn't metered.
-  Failover activation needs the control plane. Failover headroom is
-  reserved but not priced (open PM question, docs/11 §4).
+  Failover activation needs the control plane.
 - **Signing-key rotation.** Gateways trust a single snapshot public key.
 - **Control-plane scale-out.** State is durable in SQL (ADR-017), but the capacity planner
   and region health are per-process, so run one control-plane instance. The planner counts

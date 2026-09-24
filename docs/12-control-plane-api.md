@@ -276,8 +276,6 @@ and `total`, in minor units.
   support for more than one key.
 - Invoice adjustments, taxes, and payment collection. Final invoices are immutable, but
   there's no adjustment line for corrections yet.
-- Pricing for failover headroom. It's reserved but not billed (open question in
-  [11 §4](11-roadmap-risks-open-questions.md#4-product-decisions)).
 
 ## Blog problems addressed
 P4 (customer-facing unit), P5 (tier), P6 (term, renewal, re-rating at renewal), P12 (boundary policy), P19 (SLA credits applied on invoices). See [traceability](01-requirements-and-traceability.md#2-traceability-matrix).

@@ -58,6 +58,11 @@ per CU therefore differs by tier, but the CU definition does not change.
 | Interactive | 1.25× |
 | Agentic | 1.5× |
 
+Surcharges add to the tier multiplier, as multiples of the base price
+([11 §4](11-roadmap-risks-open-questions.md#4-product-decisions)): **strict-dedicated +0.3×**,
+and **Multi-region +0.2×**, which pays for failover headroom reserved in the paired region.
+For example, an Agentic Multi-region CU costs 1.7× base.
+
 Once calibration has run, check the multipliers against each tier's WU/s-per-replica
 ratio, so every tier covers its GPU cost.
 

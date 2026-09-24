@@ -415,7 +415,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         let suffix = uuid::Uuid::new_v4().simple().to_string();
         let (api_key, key_record) = issue_key(now);
         let cus = total_cus(&req.regions);
-        let price = self.price(&req.tier, req.isolation, cus);
+        let price = self.price(&req.tier, req.isolation, req.sku, cus);
         let state = if start <= now {
             State::Active
         } else {
@@ -661,7 +661,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                     self.planner.reserve(&pt.model, &extra, &shape).await?;
                     ops.push(PlanOp::Reserved(extra));
                     pt.failover_headroom = headroom;
-                    let per_cu = self.price(&pt.tier, pt.isolation, 1).per_cu_monthly;
+                    let per_cu = self.price(&pt.tier, pt.isolation, pt.sku, 1).per_cu_monthly;
                     let mut running = pt.cus;
                     for d in deltas {
                         running += d.cus;
@@ -748,7 +748,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
 
         pt.cus = total_cus(&pt.regions);
         pt.endpoints = self.endpoints(&pt.regions);
-        pt.price = self.price(&pt.tier, pt.isolation, pt.cus);
+        pt.price = self.price(&pt.tier, pt.isolation, pt.sku, pt.cus);
         Ok(())
     }
 
@@ -1459,7 +1459,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                 pt.tier = t;
             }
             let monthly = self
-                .price(&pt.tier, pt.isolation, total_cus(&pt.regions))
+                .price(&pt.tier, pt.isolation, pt.sku, total_cus(&pt.regions))
                 .monthly;
             pt.events.push(Event {
                 at: pt.term_end,
@@ -1474,7 +1474,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         pt.term_end = add_months(pt.term_start, pt.term_months.months());
         pt.cus = total_cus(&pt.regions);
         pt.endpoints = self.endpoints(&pt.regions);
-        pt.price = self.price(&pt.tier, pt.isolation, pt.cus);
+        pt.price = self.price(&pt.tier, pt.isolation, pt.sku, pt.cus);
         pt.events.push(Event {
             at: pt.term_start,
             kind: EventKind::Renewed {
@@ -1524,6 +1524,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         &self,
         tier: &pt_core::Tier,
         isolation: pt_core::PoolIsolation,
+        sku: Sku,
         cus: u32,
     ) -> crate::model::Price {
         let p = &self.config.pricing;
@@ -1532,6 +1533,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
             p.base_cu_price_per_month_cents,
             *tier,
             isolation,
+            sku,
             cus,
         )
     }

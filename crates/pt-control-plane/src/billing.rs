@@ -7,7 +7,8 @@
 //!   `Activated`, `CapacityIncreased`, `ChangeApplied`, and `Renewed` set the monthly price;
 //!   `Ended` and `Cancelled` stop it. A full month bills exactly the monthly price.
 //! - **Spillover.** Tokens of spillover requests that ran (`Ok` or cancelled by the
-//!   client), at the model's PAYG list price per million tokens. Burst is free.
+//!   client), billed as regular PAYG traffic at the model's PAYG list price per million
+//!   tokens. Burst is free.
 //! - **SLA credit.** Once the month has ended, the SLA report's credit percentage applied
 //!   to that reservation's fee for the month.
 //!
@@ -374,6 +375,7 @@ pub async fn compute<S: Store, P: CapacityPlanner, C: Clock>(
                 config.pricing.base_cu_price_per_month_cents,
                 tier,
                 pt.isolation,
+                pt.sku,
                 cus,
             )
             .monthly

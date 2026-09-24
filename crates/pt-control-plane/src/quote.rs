@@ -28,7 +28,7 @@ use pt_telemetry::UsageStore;
 use serde::{Deserialize, Serialize};
 
 use crate::clock::Clock;
-use crate::model::{Price, RegionShare};
+use crate::model::{Price, RegionShare, Sku};
 use crate::planner::CapacityPlanner;
 use crate::pricing;
 use crate::service::{Service, ServiceError};
@@ -58,6 +58,9 @@ pub struct QuoteRequest {
     pub tier: Option<Tier>,
     #[serde(default)]
     pub isolation: Option<PoolIsolation>,
+    /// Prices the Multi-region surcharge. Defaults to the reservation's SKU, or Regional.
+    #[serde(default)]
+    pub sku: Option<Sku>,
     /// Defaults to every region offering the model (or the reservation's regions).
     #[serde(default)]
     pub regions: Option<Vec<String>>,
@@ -383,6 +386,7 @@ where
 
     // Resolve the model, tiers, regions, and per-region workloads.
     let mut current = None;
+    let mut reservation_sku = None;
     let (model_id, workloads, default_regions, default_tier, source, shape_for_context) =
         if let Some(id) = &req.from_reservation {
             let pt = svc.get(tenant, id).await?;
@@ -434,6 +438,7 @@ where
                     format!("No usage in the last {days} days to base a quote on."),
                 ));
             }
+            reservation_sku = Some(pt.sku);
             current = Some(Current {
                 reservation: pt.id.clone(),
                 tier: pt.tier,
@@ -547,6 +552,7 @@ where
         }
     }
     let isolation = req.isolation.unwrap_or_default();
+    let sku = req.sku.or(reservation_sku).unwrap_or_default();
 
     // The workload for a region: the region's own history, or the one shared workload.
     let workload_for = |region: &str| workloads.get(region).or_else(|| workloads.get(""));
@@ -609,7 +615,14 @@ where
                     input_tokens_per_minute: rpm_per_cu * demand.avg_input_tokens,
                     output_tokens_per_minute: rpm_per_cu * demand.avg_output_tokens,
                 },
-                price: pricing::price(&config.pricing.currency, base, tier, isolation, recommended),
+                price: pricing::price(
+                    &config.pricing.currency,
+                    base,
+                    tier,
+                    isolation,
+                    sku,
+                    recommended,
+                ),
                 slo: Slo {
                     ttft_p95_ms: tier.ttft_target_ms(
                         shape_for_context.input_p95,
@@ -652,7 +665,15 @@ where
                     region: regions.join(","),
                     tier: c.tier,
                     cus: recommended,
-                    monthly_price: pricing::price(&config.pricing.currency, base, c.tier, isolation, recommended).monthly,
+                    monthly_price: pricing::price(
+                        &config.pricing.currency,
+                        base,
+                        c.tier,
+                        isolation,
+                        sku,
+                        recommended,
+                    )
+                    .monthly,
                     summary,
                 }
             })

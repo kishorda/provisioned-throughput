@@ -41,8 +41,9 @@ region's `pair` if the reservation has a share there, otherwise its largest othe
 A Multi-region reservation's regions must all be in one residency zone. Its
 `failover_headroom` is the largest share that fails over into each region, and the
 planner reserves it together with the shares, all or nothing. For example, eu-west 10 and
-eu-central 4 hold 14 CUs in each region. Headroom isn't billed separately yet (see
-[11 §4](11-roadmap-risks-open-questions.md#4-product-decisions)).
+eu-central 4 hold 14 CUs in each region. Headroom isn't billed as CUs. Instead, the
+Multi-region SKU adds a surcharge of 0.2× the base price to every CU
+([11 §4](11-roadmap-risks-open-questions.md#4-product-decisions)).
 
 ## 3. Traffic steering
 

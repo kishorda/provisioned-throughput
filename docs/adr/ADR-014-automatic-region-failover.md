@@ -24,7 +24,8 @@ questions needed answers:
   count shares plus headroom, all or nothing. The target is the region's configured
   `pair` if the reservation has a share there, otherwise its largest other region. All of
   a Multi-region reservation's regions must share one data-residency zone. Headroom isn't
-  billed separately yet. The Multi-region price is an open PM question.
+  billed as CUs. The Multi-region SKU carries a surcharge of 0.2× the base price per CU
+  instead (docs/11 §4, decided 2026-09-24).
 - **Detect from gateway heartbeats.** Every gateway sends
   `POST /internal/v1/heartbeats` every 5 s with its region token. It reports `serving`
   only if it has entitlements and its engine answers health checks. A region is down when
@@ -61,5 +62,5 @@ questions needed answers:
   over-serving, never under-serving, and the headroom is already held.
 - ⚠️ Health is soft state. After a control-plane restart, regions are `unknown` until
   their gateways report, and nothing is declared for them.
-- ⚠️ Headroom raises the capacity cost of Multi-region reservations without raising their
-  price yet.
+- ⚠️ Headroom can double a Multi-region reservation's capacity cost, while the price rises
+  by 0.2× base per CU. PAYG backfill on the spares covers the gap (ADR-006).

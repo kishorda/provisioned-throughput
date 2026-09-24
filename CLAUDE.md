@@ -99,18 +99,17 @@ Its source HTML lived in a session scratchpad, not in this repo. To update it, r
 - **Mermaid:** extract the ```mermaid blocks and render each one with
   `npx -y @mermaid-js/mermaid-cli -p pp.json -i d.mmd -o d.svg`, where `pp.json` is `{"args":["--no-sandbox"]}`. Chromium's sandbox is unavailable on this machine (Ubuntu AppArmor userns restriction). Put temporary files in the session scratchpad, not in the repo.
 
-## Product decisions (resolved 2026-09-23)
+## Product decisions (resolved 2026-09-23 and 2026-09-24)
 These are recorded in `docs/11-roadmap-risks-open-questions.md` §4. Treat them as fixed:
-- Burst credit is free within its cap. Spillover is billed at PAYG list price.
+- Burst credit is free within its cap. Spillover is billed as regular PAYG traffic, at the regular PAYG list price per model (`[[payg_prices]]` mirrors the PAYG price list).
 - CU re-rating is infrequent (no fixed cadence) and passes 50% of efficiency gains to customers.
 - SLA commitment is 99.8% attainment. Credits are 10% / 20% / 30% / 50% below 99.8 / 99.7 / 99.6 / 99.5. There is no out-of-shape grace margin.
 - Minimum reservation is 1 CU, with 1-, 3-, or 6-month terms. Increases are allowed mid-term for the remaining term. Decreases happen only at renewal.
 - Strict-dedicated (no backfill) is offered at launch at a surcharge of 0.3× the base (Standard) CU price on top of the tier price (Standard 1.3×, Interactive 1.55×, Agentic 1.8×).
 - There is no customer-defined priority beyond `continuation` at launch.
 - Tier price multipliers: Standard 1.0× (base), Interactive 1.25×, Agentic 1.5×.
+- Multi-region SKU: a surcharge of 0.2× the base CU price on top of the tier price (Standard 1.2×, Interactive 1.45×, Agentic 1.7×). It stacks with strict-dedicated (`pt_core::MULTI_REGION_SURCHARGE`, decided 2026-09-24).
 
 ## Open items
-Two PM questions are open (docs/11 §4):
-- Pricing for the Multi-region SKU, whose failover headroom is reserved but not billed. A Multi-region reservation can hold up to twice its CUs.
-- The PAYG list prices spillover is billed at. `[[payg_prices]]` values are placeholders.
+No PM pricing questions are open. `[[payg_prices]]` must mirror the regular PAYG price list; the values in `config/control-plane.toml` are development numbers.
 Known failover limits (ADR-014): activation needs the control plane, so a region failure during a control-plane outage doesn't fail over. A partition between a healthy region and the control plane makes the reservation over-serve briefly, never under-serve. During the return ramp, a gateway's limiter can run up to 1% above the entitlement, because rate changes under 1% are skipped. Not built: a weight-prefetch DaemonSet (so loaded warm spares start cold), rendering hot spares as separate router workers (router `hot_spare` flags are configured by hand), metering of preempted PAYG, and a GeoDNS/anycast controller for `/internal/v1/steering`. Top technical risks: Dynamo API churn and fork maintenance, and upstream acceptance of the engine KV-budget patch.

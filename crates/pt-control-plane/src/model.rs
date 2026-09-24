@@ -203,7 +203,8 @@ pub struct ProvisionedThroughput {
     pub endpoints: Vec<Endpoint>,
     pub price: Price,
     /// Multi-region SKU: capacity held in each region to absorb another region's share if
-    /// it fails (docs/07 §2). Not billed separately. Empty for the Regional SKU.
+    /// it fails (docs/07 §2). Not billed as CUs: the Multi-region SKU carries a 0.2× base
+    /// surcharge per CU instead. Empty for the Regional SKU.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failover_headroom: Vec<RegionShare>,
     /// Deployments sharing this reservation's entitlement, each with its own keys and an

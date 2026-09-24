@@ -78,13 +78,23 @@ pub enum PoolIsolation {
 /// Surcharge for strict-dedicated, as a multiple of the base (Standard) CU price.
 pub const STRICT_DEDICATED_SURCHARGE: f64 = 0.3;
 
-/// CU price as a multiple of the Standard base price.
-pub fn cu_price_multiplier(tier: Tier, isolation: PoolIsolation) -> f64 {
-    let surcharge = match isolation {
+/// Surcharge for the Multi-region SKU (reserved failover headroom in a paired region), as
+/// a multiple of the base (Standard) CU price.
+pub const MULTI_REGION_SURCHARGE: f64 = 0.2;
+
+/// CU price as a multiple of the Standard base price: the tier multiplier plus any
+/// surcharges. Surcharges add up.
+pub fn cu_price_multiplier(tier: Tier, isolation: PoolIsolation, multi_region: bool) -> f64 {
+    let isolation_surcharge = match isolation {
         PoolIsolation::StrictDedicated => STRICT_DEDICATED_SURCHARGE,
         PoolIsolation::Shared | PoolIsolation::Dedicated => 0.0,
     };
-    tier.price_multiplier() + surcharge
+    let sku_surcharge = if multi_region {
+        MULTI_REGION_SURCHARGE
+    } else {
+        0.0
+    };
+    tier.price_multiplier() + isolation_surcharge + sku_surcharge
 }
 
 #[cfg(test)]
@@ -112,9 +122,23 @@ mod tests {
             (Tier::Agentic, 1.8),
         ];
         for (tier, want) in cases {
-            let got = cu_price_multiplier(tier, PoolIsolation::StrictDedicated);
+            let got = cu_price_multiplier(tier, PoolIsolation::StrictDedicated, false);
             assert!((got - want).abs() < 1e-9, "{tier:?}: {got}");
-            assert!(got > cu_price_multiplier(tier, PoolIsolation::Shared));
+            assert!(got > cu_price_multiplier(tier, PoolIsolation::Shared, false));
+        }
+    }
+
+    #[test]
+    fn multi_region_adds_base_surcharge_and_stacks() {
+        let cases = [
+            (Tier::Standard, PoolIsolation::Shared, 1.2),
+            (Tier::Interactive, PoolIsolation::Dedicated, 1.45),
+            (Tier::Agentic, PoolIsolation::Shared, 1.7),
+            (Tier::Agentic, PoolIsolation::StrictDedicated, 2.0),
+        ];
+        for (tier, isolation, want) in cases {
+            let got = cu_price_multiplier(tier, isolation, true);
+            assert!((got - want).abs() < 1e-9, "{tier:?} {isolation:?}: {got}");
         }
     }
 }

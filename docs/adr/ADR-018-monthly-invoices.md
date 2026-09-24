@@ -5,9 +5,10 @@
 
 ## Context
 The product decisions (docs/11 §4) fix what's charged:
-- the reservation fee: tier price × CUs, plus the strict-dedicated surcharge;
+- the reservation fee: tier price × CUs, plus the strict-dedicated and Multi-region
+  surcharges;
 - mid-term increases, billed for the rest of the term;
-- spillover at the PAYG list price, with burst free;
+- spillover billed as regular PAYG traffic, at the PAYG list price, with burst free;
 - SLA credits of 10/20/30/50% of the month's fee.
 
 Nothing turned these into invoices. Events recorded a lump-sum `prorated_charge` per
@@ -47,8 +48,6 @@ increase. There was no PAYG price, and SLA credits were only reported. The choic
   after usage is pruned.
 - ⚠️ No mid-month or in-advance billing. Revenue is recognised a month later than
   billing in advance would.
-- ⚠️ Multi-region failover headroom isn't priced (open PM question), so it doesn't
-  appear on invoices.
 - ⚠️ No taxes, currency conversion, payment collection, or adjustment lines yet. Amounts
   are in the configured currency's minor units.
 - ⚠️ Reservations created before this change lack rate fields on their events, and fall

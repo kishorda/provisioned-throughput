@@ -3,15 +3,23 @@
 use jiff::Timestamp;
 use pt_core::{cu_price_multiplier, PoolIsolation, Tier};
 
-use crate::model::Price;
+use crate::model::{Price, Sku};
 
-/// Monthly price of one CU: base × (tier multiplier + strict-dedicated surcharge).
-pub fn per_cu_monthly(base: u64, tier: Tier, isolation: PoolIsolation) -> u64 {
-    (base as f64 * cu_price_multiplier(tier, isolation)).round() as u64
+/// Monthly price of one CU: base × (tier multiplier + strict-dedicated surcharge +
+/// Multi-region surcharge).
+pub fn per_cu_monthly(base: u64, tier: Tier, isolation: PoolIsolation, sku: Sku) -> u64 {
+    (base as f64 * cu_price_multiplier(tier, isolation, sku == Sku::MultiRegion)).round() as u64
 }
 
-pub fn price(currency: &str, base: u64, tier: Tier, isolation: PoolIsolation, cus: u32) -> Price {
-    let per_cu = per_cu_monthly(base, tier, isolation);
+pub fn price(
+    currency: &str,
+    base: u64,
+    tier: Tier,
+    isolation: PoolIsolation,
+    sku: Sku,
+    cus: u32,
+) -> Price {
+    let per_cu = per_cu_monthly(base, tier, isolation, sku);
     Price {
         currency: currency.to_string(),
         per_cu_monthly: per_cu,
@@ -45,24 +53,56 @@ mod tests {
     fn tier_and_isolation_multipliers() {
         let base = 10_000;
         assert_eq!(
-            per_cu_monthly(base, Tier::Standard, PoolIsolation::Shared),
+            per_cu_monthly(base, Tier::Standard, PoolIsolation::Shared, Sku::Regional),
             10_000
         );
         assert_eq!(
-            per_cu_monthly(base, Tier::Interactive, PoolIsolation::Dedicated),
+            per_cu_monthly(
+                base,
+                Tier::Interactive,
+                PoolIsolation::Dedicated,
+                Sku::Regional
+            ),
             12_500
         );
         assert_eq!(
-            per_cu_monthly(base, Tier::Agentic, PoolIsolation::Shared),
+            per_cu_monthly(base, Tier::Agentic, PoolIsolation::Shared, Sku::Regional),
             15_000
         );
         assert_eq!(
-            per_cu_monthly(base, Tier::Agentic, PoolIsolation::StrictDedicated),
+            per_cu_monthly(
+                base,
+                Tier::Agentic,
+                PoolIsolation::StrictDedicated,
+                Sku::Regional
+            ),
             18_000
         );
         assert_eq!(
-            price("USD", base, Tier::Agentic, PoolIsolation::Shared, 4).monthly,
+            price(
+                "USD",
+                base,
+                Tier::Agentic,
+                PoolIsolation::Shared,
+                Sku::Regional,
+                4
+            )
+            .monthly,
             60_000
+        );
+        // Multi-region: + 0.2 × base, on top of any other surcharge.
+        assert_eq!(
+            per_cu_monthly(base, Tier::Agentic, PoolIsolation::Shared, Sku::MultiRegion),
+            17_000
+        );
+        assert_eq!(
+            per_cu_monthly(
+                base,
+                Tier::Agentic,
+                PoolIsolation::StrictDedicated,
+                Sku::MultiRegion
+            ),
+            20_000
         );
     }
 
