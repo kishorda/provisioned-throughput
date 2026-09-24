@@ -183,7 +183,7 @@ mod tests {
                 per_cu_monthly: 0,
                 monthly: 0,
             },
-            api_key_sha256: String::new(),
+            api_keys: vec![],
             version: 1,
             created_at: at("2026-10-01T00:00:00Z"),
             updated_at: at("2026-10-01T00:00:00Z"),

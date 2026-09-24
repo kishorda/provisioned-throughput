@@ -12,14 +12,17 @@
 use jiff::{SignedDuration, Span, Timestamp};
 use pt_core::Shape;
 pub use pt_entitlement::sha256_hex;
-use pt_entitlement::{DeploymentEntitlement, ReservationEntitlement, Snapshot, SnapshotSigner};
+use pt_entitlement::{
+    DeploymentEntitlement, PreviousKey, ReservationEntitlement, Snapshot, SnapshotSigner,
+};
 use tokio::sync::watch;
 
 use crate::clock::Clock;
 use crate::config::ControlPlaneConfig;
 use crate::model::{
-    total_cus, CreateRequest, DeclareIncident, Endpoint, Event, EventKind, PendingChanges,
-    ProvisionedThroughput, RegionIncident, RegionShare, ResolveIncident, State, UpdateRequest,
+    total_cus, ApiKey, CreateRequest, DeclareIncident, Endpoint, Event, EventKind, PendingChanges,
+    ProvisionedThroughput, RegionIncident, RegionShare, ResolveIncident, RotateKeyRequest, State,
+    UpdateRequest,
 };
 use crate::planner::{CapacityPlanner, PlanError};
 use crate::pricing;
@@ -29,6 +32,40 @@ use crate::validate;
 /// How far in the past `start_at` may be (clock skew), and how far ahead.
 const START_SKEW: SignedDuration = SignedDuration::from_mins(5);
 const MAX_START_AHEAD: SignedDuration = SignedDuration::from_hours(24 * 90);
+/// Rotation grace period: default and maximum.
+const DEFAULT_KEY_GRACE_MINUTES: u64 = 60;
+const MAX_KEY_GRACE_MINUTES: u64 = 7 * 24 * 60;
+/// Rotated-out keys kept in their grace period. Older ones are revoked on rotation.
+const MAX_PREVIOUS_KEYS: usize = 2;
+
+/// A new inference key: the secret (returned once) and its stored metadata.
+fn issue_key(now: Timestamp) -> (String, ApiKey) {
+    let secret = format!(
+        "ptk_{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    let key = ApiKey {
+        id: format!("key-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]),
+        prefix: secret[..12].to_string(),
+        sha256: sha256_hex(secret.as_bytes()),
+        created_at: now,
+        expires_at: None,
+    };
+    (secret, key)
+}
+
+/// Remove keys whose grace period has ended. Returns the ids removed.
+fn prune_expired_keys(pt: &mut ProvisionedThroughput, now: Timestamp) -> Vec<String> {
+    let expired: Vec<String> = pt
+        .api_keys
+        .iter()
+        .filter(|k| k.expires_at.is_some_and(|e| e <= now))
+        .map(|k| k.id.clone())
+        .collect();
+    pt.api_keys.retain(|k| !expired.contains(&k.id));
+    expired
+}
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum ServiceError {
@@ -169,7 +206,23 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
             deployments.push(DeploymentEntitlement {
                 id: pt.deployment_id.clone(),
                 reservation: pt.id.clone(),
-                api_key_sha256: pt.api_key_sha256.clone(),
+                api_key_sha256: pt
+                    .api_keys
+                    .iter()
+                    .find(|k| k.is_current())
+                    .map(|k| k.sha256.clone())
+                    .unwrap_or_default(),
+                previous_keys: pt
+                    .api_keys
+                    .iter()
+                    .filter_map(|k| {
+                        let expires = k.expires_at.filter(|e| *e > self.clock.now())?;
+                        Some(PreviousKey {
+                            api_key_sha256: k.sha256.clone(),
+                            expires_at_ms: expires.as_millisecond().max(0) as u64,
+                        })
+                    })
+                    .collect(),
                 boundary_policy: pt.boundary_policy.clone(),
             });
         }
@@ -235,11 +288,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
             .await?;
 
         let suffix = uuid::Uuid::new_v4().simple().to_string();
-        let api_key = format!(
-            "ptk_{}{}",
-            uuid::Uuid::new_v4().simple(),
-            uuid::Uuid::new_v4().simple()
-        );
+        let (api_key, key_record) = issue_key(now);
         let cus = total_cus(&req.regions);
         let price = self.price(&req.tier, req.isolation, cus);
         let state = if start <= now {
@@ -281,7 +330,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
             pending_changes: None,
             deployment_id: format!("dep-{}", &suffix[16..]),
             price,
-            api_key_sha256: sha256_hex(api_key.as_bytes()),
+            api_keys: vec![key_record],
             version: 1,
             created_at: now,
             updated_at: now,
@@ -606,6 +655,127 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         Ok((pt, effect))
     }
 
+    /// Issue a new inference key. The current key keeps working for the grace period (0
+    /// revokes it now). At most two rotated-out keys stay live; older ones are revoked.
+    /// Returns the updated resource and the new secret, which isn't stored.
+    pub async fn rotate_key(
+        &self,
+        tenant: &str,
+        id: &str,
+        if_match: Option<u64>,
+        req: RotateKeyRequest,
+    ) -> Result<(ProvisionedThroughput, String), ServiceError> {
+        let grace = req.grace_minutes.unwrap_or(DEFAULT_KEY_GRACE_MINUTES);
+        if grace > MAX_KEY_GRACE_MINUTES {
+            return Err(ServiceError::Validation {
+                field: "grace_minutes".into(),
+                message: format!("grace_minutes can be at most {MAX_KEY_GRACE_MINUTES} (7 days)."),
+            });
+        }
+        let mut pt = self.get(tenant, id).await?;
+        check_version(&pt, if_match)?;
+        if !pt.state.is_live() {
+            return Err(conflict(
+                "inactive",
+                "This reservation has ended and can't be changed.",
+            ));
+        }
+        let expected = pt.version;
+        let now = self.clock.now();
+        for key in prune_expired_keys(&mut pt, now) {
+            pt.events.push(Event {
+                at: now,
+                kind: EventKind::KeyExpired { key },
+            });
+        }
+
+        let (secret, new_key) = issue_key(now);
+        let previous_expires_at =
+            (grace > 0).then(|| now + SignedDuration::from_mins(grace as i64));
+        let current = pt.api_keys.iter_mut().find(|k| k.is_current());
+        let previous_id = current.as_ref().map(|k| k.id.clone()).unwrap_or_default();
+        match (current, previous_expires_at) {
+            (Some(k), Some(at)) => k.expires_at = Some(at),
+            (Some(_), None) => pt.api_keys.retain(|k| k.id != previous_id),
+            (None, _) => {}
+        }
+        // Keep the newest rotated-out keys only.
+        let mut previous: Vec<ApiKey> = pt.api_keys.drain(..).collect();
+        previous.sort_by_key(|k| std::cmp::Reverse(k.created_at));
+        let revoked: Vec<ApiKey> = previous.split_off(MAX_PREVIOUS_KEYS.min(previous.len()));
+        pt.api_keys = previous;
+        pt.api_keys.push(new_key.clone());
+        pt.api_keys.sort_by_key(|k| k.created_at);
+
+        pt.events.push(Event {
+            at: now,
+            kind: EventKind::KeyRotated {
+                new_key: new_key.id.clone(),
+                previous_key: previous_id,
+                previous_expires_at,
+            },
+        });
+        for k in revoked {
+            pt.events.push(Event {
+                at: now,
+                kind: EventKind::KeyRevoked { key: k.id },
+            });
+        }
+        pt.version += 1;
+        pt.updated_at = now;
+        self.store.update(pt.clone(), expected).await.map_err(|_| {
+            conflict(
+                "concurrent_modification",
+                "The reservation changed while this request ran. Retry.",
+            )
+        })?;
+        self.bump();
+        tracing::info!(id = %pt.id, %tenant, key = %new_key.id, grace, "inference key rotated");
+        Ok((pt, secret))
+    }
+
+    /// Revoke a rotated-out key now. The current key can only be replaced by rotating.
+    pub async fn revoke_key(
+        &self,
+        tenant: &str,
+        id: &str,
+        key_id: &str,
+        if_match: Option<u64>,
+    ) -> Result<ProvisionedThroughput, ServiceError> {
+        let mut pt = self.get(tenant, id).await?;
+        check_version(&pt, if_match)?;
+        let expected = pt.version;
+        let now = self.clock.now();
+        let key = pt.api_keys.iter().find(|k| k.id == key_id).ok_or_else(|| {
+            ServiceError::Validation {
+                field: "key_id".into(),
+                message: format!("No live key {key_id} on this reservation."),
+            }
+        })?;
+        if key.is_current() {
+            return Err(conflict(
+                "current_key",
+                "The current key can't be revoked. Rotate with grace_minutes 0 to replace it immediately.",
+            ));
+        }
+        pt.api_keys.retain(|k| k.id != key_id);
+        pt.events.push(Event {
+            at: now,
+            kind: EventKind::KeyRevoked { key: key_id.into() },
+        });
+        pt.version += 1;
+        pt.updated_at = now;
+        self.store.update(pt.clone(), expected).await.map_err(|_| {
+            conflict(
+                "concurrent_modification",
+                "The reservation changed while this request ran. Retry.",
+            )
+        })?;
+        self.bump();
+        tracing::info!(id = %pt.id, %tenant, key = %key_id, "inference key revoked");
+        Ok(pt)
+    }
+
     /// Declare a region incident. One open incident per region at a time.
     pub async fn declare_incident(
         &self,
@@ -711,6 +881,13 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
             let mut ops = Vec::new();
             let mut changed = false;
 
+            for key in prune_expired_keys(&mut pt, now) {
+                pt.events.push(Event {
+                    at: now,
+                    kind: EventKind::KeyExpired { key },
+                });
+                changed = true;
+            }
             if pt.state == State::Scheduled && now >= pt.term_start {
                 pt.state = State::Active;
                 pt.events.push(Event {

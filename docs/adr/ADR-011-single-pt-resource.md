@@ -23,5 +23,5 @@ Commercial rules apply at the resource level:
 - ✅ The commitment model is enforced in one place.
 - ⚠️ Several endpoints sharing one reservation (for example, prod and staging keys) needs
   a later API addition.
-- ⚠️ The inference key is shown once. Customers who lose it need key rotation, which isn't
-  built yet.
+- ✅ The inference key is shown once. Customers rotate keys with a grace period, or revoke
+  them (docs/12 §3).

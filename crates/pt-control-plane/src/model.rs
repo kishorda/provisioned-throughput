@@ -126,6 +126,17 @@ pub enum EventKind {
         effective_at: Timestamp,
     },
     CancellationWithdrawn,
+    KeyRotated {
+        new_key: String,
+        previous_key: String,
+        previous_expires_at: Option<Timestamp>,
+    },
+    KeyRevoked {
+        key: String,
+    },
+    KeyExpired {
+        key: String,
+    },
     Renewed {
         term_start: Timestamp,
         term_end: Timestamp,
@@ -159,9 +170,9 @@ pub struct ProvisionedThroughput {
     pub deployment_id: String,
     pub endpoints: Vec<Endpoint>,
     pub price: Price,
-    /// SHA-256 of the inference API key. The key itself is only returned at creation.
-    #[serde(skip_serializing, default)]
-    pub api_key_sha256: String,
+    /// Inference API keys: exactly one current key (no expiry), plus up to two rotated-out
+    /// keys in their grace period. Secrets are only returned when a key is issued.
+    pub api_keys: Vec<ApiKey>,
     pub version: u64,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
@@ -250,4 +261,35 @@ pub struct ResolveIncident {
     /// Defaults to now.
     #[serde(default)]
     pub ended_at: Option<Timestamp>,
+}
+
+/// Metadata for one inference API key.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApiKey {
+    pub id: String,
+    /// The key's first characters, to recognise it by (for example `ptk_3f9a2c1b`).
+    pub prefix: String,
+    /// Never returned by the API.
+    #[serde(skip_serializing, default)]
+    pub sha256: String,
+    pub created_at: Timestamp,
+    /// `None` for the current key. Set when a rotation starts the key's grace period.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<Timestamp>,
+}
+
+impl ApiKey {
+    pub fn is_current(&self) -> bool {
+        self.expires_at.is_none()
+    }
+}
+
+/// `POST /v1/provisioned-throughput/{id}/keys/rotate`
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RotateKeyRequest {
+    /// How long the current key keeps working. Default 60, at most 10,080 (7 days).
+    /// 0 revokes it immediately.
+    #[serde(default)]
+    pub grace_minutes: Option<u64>,
 }

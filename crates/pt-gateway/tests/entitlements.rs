@@ -313,3 +313,151 @@ async fn untrusted_snapshots_are_rejected() {
     let err = client.poll_once(&app, false).await.unwrap_err();
     assert!(matches!(err, SyncError::Status(s) if s == 403), "{err}");
 }
+
+async fn rotate(cp: &str, id: &str, grace_minutes: u64) -> String {
+    let v: Value = reqwest::Client::new()
+        .post(format!("{cp}/v1/provisioned-throughput/{id}/keys/rotate"))
+        .bearer_auth(ADMIN)
+        .json(&json!({ "grace_minutes": grace_minutes }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    v["api_key"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn key_rotation_reaches_the_gateway() {
+    let (cp, svc, _) = spawn_control_plane().await;
+    let engine = spawn_engine().await;
+    let cache = cache_path("rotation");
+    let (gw, _) = spawn_gateway(gateway_config(
+        &cp,
+        &engine,
+        svc.signer().public_key_hex(),
+        &cache,
+    ))
+    .await;
+    let (id, first) = create_pt(&cp, 1).await;
+    eventually("first key works", || async {
+        status(&gw, &first).await.0 == 200
+    })
+    .await;
+
+    // Rotate with a grace period: both keys work.
+    let second = rotate(&cp, &id, 30).await;
+    eventually("new key works", || async {
+        status(&gw, &second).await.0 == 200
+    })
+    .await;
+    assert_eq!(
+        status(&gw, &first).await.0,
+        200,
+        "old key still in its grace period"
+    );
+    assert_eq!(chat(&gw, &first).send().await.unwrap().status(), 200);
+
+    // Revoke the old key: it stops working; the new one doesn't.
+    let keys: Value = reqwest::Client::new()
+        .get(format!("{cp}/v1/provisioned-throughput/{id}/keys"))
+        .bearer_auth(ADMIN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let old_id = keys["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|k| k.get("expires_at").is_some())
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let r = reqwest::Client::new()
+        .delete(format!("{cp}/v1/provisioned-throughput/{id}/keys/{old_id}"))
+        .bearer_auth(ADMIN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    eventually("old key revoked", || async {
+        status(&gw, &first).await.0 == 401
+    })
+    .await;
+    assert_eq!(status(&gw, &second).await.0, 200);
+
+    // A compromised key: rotate with no grace period.
+    let third = rotate(&cp, &id, 0).await;
+    eventually("replaced immediately", || async {
+        status(&gw, &second).await.0 == 401 && status(&gw, &third).await.0 == 200
+    })
+    .await;
+
+    let _ = std::fs::remove_file(cache);
+}
+
+#[tokio::test]
+async fn gateway_enforces_key_expiry_itself() {
+    let (_, svc, _) = spawn_control_plane().await;
+    let config = gateway_config(
+        "http://127.0.0.1:1",
+        "http://127.0.0.1:1",
+        svc.signer().public_key_hex(),
+        &cache_path("expiry"),
+    );
+    let app = AppState::new(&config, Arc::new(MemorySink::default())).unwrap();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let snapshot = pt_entitlement::Snapshot {
+        region: "eu-west".into(),
+        version: 1,
+        generated_at: "2026-10-01T00:00:00Z".into(),
+        reservations: vec![pt_entitlement::ReservationEntitlement {
+            id: "pt-1".into(),
+            tenant: "acme".into(),
+            model: MODEL.into(),
+            cus: 1,
+            tier: pt_core::Tier::Agentic,
+            profile: PROFILE.into(),
+            shape: pt_core::Shape {
+                input_p95: 1,
+                input_max: 1,
+                output_p95: 1,
+                context_ceiling: 1,
+                cache_hit_ratio: 0.0,
+                burst_factor: 1.0,
+            },
+        }],
+        deployments: vec![pt_entitlement::DeploymentEntitlement {
+            id: "dep-1".into(),
+            reservation: "pt-1".into(),
+            api_key_sha256: pt_entitlement::sha256_hex(b"current"),
+            previous_keys: vec![
+                pt_entitlement::PreviousKey {
+                    api_key_sha256: pt_entitlement::sha256_hex(b"expired"),
+                    expires_at_ms: now_ms - 1,
+                },
+                pt_entitlement::PreviousKey {
+                    api_key_sha256: pt_entitlement::sha256_hex(b"in-grace"),
+                    expires_at_ms: now_ms + 60_000,
+                },
+            ],
+            boundary_policy: Default::default(),
+        }],
+    };
+    app.apply_snapshot(&snapshot).unwrap();
+    assert!(app.deployment_for_key("current").is_some());
+    assert!(app.deployment_for_key("in-grace").is_some());
+    assert!(
+        app.deployment_for_key("expired").is_none(),
+        "expired before the next snapshot"
+    );
+    assert!(app.deployment_for_key("unknown").is_none());
+}

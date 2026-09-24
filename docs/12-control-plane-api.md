@@ -25,6 +25,9 @@ separate from the inference keys that the gateway accepts.
 | `GET` | `/v1/provisioned-throughput/{id}` | 200 | Returns an `ETag` |
 | `PATCH` | `/v1/provisioned-throughput/{id}` | 200 | Supports `If-Match`. Only the fields sent change |
 | `DELETE` | `/v1/provisioned-throughput/{id}` | 202 mid-term, or 200 | Supports `If-Match` |
+| `POST` | `/v1/provisioned-throughput/{id}/keys/rotate` | 200 | Returns a new inference key once. Body `{"grace_minutes"}` is optional. Supports `If-Match` |
+| `GET` | `/v1/provisioned-throughput/{id}/keys` | 200 | Key metadata: id, prefix, created, expires. Never secrets or hashes |
+| `DELETE` | `/v1/provisioned-throughput/{id}/keys/{key_id}` | 200 | Revoke a rotated-out key now. Supports `If-Match` |
 | `POST` | `/v1/quotes` | 200 | CUs needed for a shape, trace, or existing reservation. See [02 §5](02-capacity-unit-and-cost-model.md#5-sizing--quote-api) |
 | `GET` | `/v1/provisioned-throughput/{id}/usage`, `/sla`, `/sessions/{session_id}` | 200 | Telemetry. See [09 §5](09-metering-observability-and-slas.md#5-implementation) |
 
@@ -87,6 +90,20 @@ Errors use the same shape as the gateway:
 
 Before the term starts, every change applies immediately. A request that mixes an increase
 with a region change is scheduled as a whole. Send the increase on its own to apply it now.
+
+**Inference keys**
+- Every reservation has exactly one current key, shown once at creation or rotation. Only
+  its SHA-256 is stored.
+- **Rotate** issues a new current key. The old key keeps working for `grace_minutes`
+  (default 60, at most 7 days), so clients can switch without downtime. `0` revokes it
+  immediately, for a compromised key.
+- At most two rotated-out keys stay live. Rotating again revokes the oldest.
+- **Revoke** removes a rotated-out key now. The current key can't be revoked (409
+  `current_key`); rotate with `grace_minutes: 0` instead, so a deployment is never left
+  without a key.
+- Snapshots carry each rotated-out key's hash and expiry. Gateways stop accepting it at
+  that moment by their own clock, without waiting for the next snapshot. The lifecycle
+  loop then removes the expired key and records a `key_expired` event.
 
 **Delete**
 - `scheduled` → `cancelled` immediately. Capacity is released and nothing is billed.
@@ -180,7 +197,7 @@ sequenceDiagram
   counts CUs per region and model, regardless of tier.
 - Rotating the snapshot signing key. Gateways trust one public key, so rotation needs
   support for more than one key.
-- Rotating inference keys, and more than one deployment per reservation.
+- More than one deployment per reservation.
 - Invoicing. Events record amounts, but nothing turns them into invoices yet.
 
 ## Blog problems addressed

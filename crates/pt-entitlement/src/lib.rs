@@ -48,9 +48,22 @@ pub struct ReservationEntitlement {
 pub struct DeploymentEntitlement {
     pub id: String,
     pub reservation: String,
-    /// SHA-256 of the inference API key, lowercase hex. Keys never leave the control plane.
+    /// SHA-256 of the current inference API key, lowercase hex. Keys never leave the
+    /// control plane.
     pub api_key_sha256: String,
+    /// Keys replaced by a rotation that are still in their grace period.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previous_keys: Vec<PreviousKey>,
     pub boundary_policy: BoundaryPolicy,
+}
+
+/// A rotated-out key that keeps working until `expires_at_ms`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreviousKey {
+    pub api_key_sha256: String,
+    /// Unix milliseconds. Gateways reject the key from this moment.
+    pub expires_at_ms: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -175,6 +188,10 @@ mod tests {
                 id: "dep-1".into(),
                 reservation: "pt-1".into(),
                 api_key_sha256: sha256_hex(b"ptk_x"),
+                previous_keys: vec![PreviousKey {
+                    api_key_sha256: sha256_hex(b"ptk_old"),
+                    expires_at_ms: 1_800_000_000_000,
+                }],
                 boundary_policy: BoundaryPolicy::default(),
             }],
         }

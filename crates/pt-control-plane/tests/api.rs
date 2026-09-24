@@ -50,6 +50,11 @@ async fn full_lifecycle_over_http() {
     assert_eq!(location, format!("/v1/provisioned-throughput/{id}"));
     assert!(v["api_key"].as_str().unwrap().starts_with("ptk_"));
     assert!(v.get("api_key_sha256").is_none());
+    assert!(
+        v["api_keys"][0].get("sha256").is_none(),
+        "hashes are never returned"
+    );
+    assert_eq!(v["api_keys"][0]["prefix"].as_str().unwrap().len(), 12);
     assert_eq!(v["state"], "active");
     assert_eq!(v["price"]["monthly"], 10 * BASE * 3 / 2);
 

@@ -87,6 +87,15 @@ curl -s -X DELETE http://127.0.0.1:8090/v1/provisioned-throughput/<id> \
 
 See [docs/12](docs/12-control-plane-api.md) for all rules and error codes.
 
+Rotate inference keys without downtime (docs/12 §3):
+
+```sh
+curl -s -X POST http://127.0.0.1:8090/v1/provisioned-throughput/<id>/keys/rotate \
+  -H 'Authorization: Bearer sk-admin-acme-dev' -d '{"grace_minutes":60}'   # new api_key; old one works for 60 min
+curl -s http://127.0.0.1:8090/v1/provisioned-throughput/<id>/keys -H 'Authorization: Bearer sk-admin-acme-dev'
+curl -s -X DELETE http://127.0.0.1:8090/v1/provisioned-throughput/<id>/keys/<key_id> -H 'Authorization: Bearer sk-admin-acme-dev'
+```
+
 Operators declare region incidents, which the SLA report excludes (docs/09 §5):
 
 ```sh

@@ -53,7 +53,8 @@ pub struct Entitlements {
     /// When the control plane generated the snapshot (RFC 3339). Survives cache reloads,
     /// so it shows how stale the entitlements really are.
     pub generated_at: Option<String>,
-    by_key_hash: HashMap<String, Arc<Deployment>>,
+    /// Key hash → deployment, and when the key stops working (rotated-out keys only).
+    by_key_hash: HashMap<String, (Arc<Deployment>, Option<u64>)>,
     by_deployment: HashMap<String, Arc<Deployment>>,
     reservations: HashMap<String, Arc<Reservation>>,
 }
@@ -254,6 +255,7 @@ impl AppState {
                     id: d.id.clone(),
                     reservation: d.reservation.clone(),
                     api_key_sha256: sha256_hex(d.api_key.as_bytes()),
+                    previous_keys: vec![],
                     boundary_policy: d.boundary_policy.clone(),
                 })
                 .collect();
@@ -281,11 +283,21 @@ impl AppState {
         Arc::clone(&self.current.read().unwrap_or_else(|e| e.into_inner()))
     }
 
+    /// The deployment for an API key, if the key is current or still in its rotation grace
+    /// period. Expiry is checked here, to the millisecond, not only when the next snapshot
+    /// drops the key.
     pub fn deployment_for_key(&self, api_key: &str) -> Option<Arc<Deployment>> {
-        self.entitlements()
-            .by_key_hash
-            .get(&sha256_hex(api_key.as_bytes()))
-            .cloned()
+        let view = self.entitlements();
+        let (dep, expires_at_ms) = view.by_key_hash.get(&sha256_hex(api_key.as_bytes()))?;
+        if let Some(expires) = expires_at_ms {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64);
+            if now_ms >= *expires {
+                return None;
+            }
+        }
+        Some(Arc::clone(dep))
     }
 
     /// The rate this gateway may admit for a reservation, and why.
@@ -475,7 +487,13 @@ impl AppState {
                 estimator,
             });
             view.by_key_hash
-                .insert(d.api_key_sha256.clone(), Arc::clone(&dep));
+                .insert(d.api_key_sha256.clone(), (Arc::clone(&dep), None));
+            for old in &d.previous_keys {
+                view.by_key_hash.insert(
+                    old.api_key_sha256.clone(),
+                    (Arc::clone(&dep), Some(old.expires_at_ms)),
+                );
+            }
             view.by_deployment.insert(d.id.clone(), dep);
         }
         report.reservations = view.reservations.len();

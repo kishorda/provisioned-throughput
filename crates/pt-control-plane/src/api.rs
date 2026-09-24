@@ -50,6 +50,18 @@ pub fn router<S: Store, P: CapacityPlanner, C: Clock>(svc: Svc<S, P, C>) -> Rout
             get(entitlements::<S, P, C>),
         )
         .route(
+            "/v1/provisioned-throughput/{id}/keys",
+            get(list_keys::<S, P, C>),
+        )
+        .route(
+            "/v1/provisioned-throughput/{id}/keys/rotate",
+            post(rotate_key::<S, P, C>),
+        )
+        .route(
+            "/v1/provisioned-throughput/{id}/keys/{key_id}",
+            axum::routing::delete(revoke_key::<S, P, C>),
+        )
+        .route(
             "/internal/v1/incidents",
             get(list_incidents::<S, P, C>).post(declare_incident::<S, P, C>),
         )
@@ -255,6 +267,52 @@ async fn create<S: Store, P: CapacityPlanner, C: Clock>(
         Json(body),
     )
         .into_response())
+}
+
+/// `GET /v1/provisioned-throughput/{id}/keys`: key metadata, never secrets or hashes.
+async fn list_keys<S: Store, P: CapacityPlanner, C: Clock>(
+    State(svc): State<Svc<S, P, C>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let tenant = tenant(&svc, &headers)?;
+    let pt = svc.get(&tenant, &id).await?;
+    Ok(([etag(&pt)], Json(json!({ "data": pt.api_keys }))).into_response())
+}
+
+/// `POST /v1/provisioned-throughput/{id}/keys/rotate`: returns the resource and the new
+/// key, once.
+async fn rotate_key<S: Store, P: CapacityPlanner, C: Clock>(
+    State(svc): State<Svc<S, P, C>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let tenant = tenant(&svc, &headers)?;
+    let req = if body.is_empty() {
+        Default::default()
+    } else {
+        parse(&body)?
+    };
+    let (pt, secret) = svc
+        .rotate_key(&tenant, &id, if_match(&headers)?, req)
+        .await?;
+    let mut body = serde_json::to_value(&pt).expect("resource serialises");
+    body["api_key"] = json!(secret);
+    Ok(([etag(&pt)], Json(body)).into_response())
+}
+
+/// `DELETE /v1/provisioned-throughput/{id}/keys/{key_id}`: revoke a rotated-out key now.
+async fn revoke_key<S: Store, P: CapacityPlanner, C: Clock>(
+    State(svc): State<Svc<S, P, C>>,
+    headers: HeaderMap,
+    Path((id, key_id)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let tenant = tenant(&svc, &headers)?;
+    let pt = svc
+        .revoke_key(&tenant, &id, &key_id, if_match(&headers)?)
+        .await?;
+    Ok(([etag(&pt)], Json(pt)).into_response())
 }
 
 fn operator<S, P, C>(svc: &Service<S, P, C>, headers: &HeaderMap) -> Result<(), ApiError> {
