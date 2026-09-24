@@ -53,10 +53,24 @@ pub struct EntitlementSourceConfig {
     /// Long-poll duration.
     #[serde(default = "default_wait_secs")]
     pub wait_secs: u64,
+    /// Heartbeat to the control plane this often, so it can detect region failures
+    /// (docs/07 §4). 0 turns heartbeats off.
+    #[serde(default = "default_heartbeat_interval_ms")]
+    pub heartbeat_interval_ms: u64,
+    /// Engine path probed before each heartbeat. The gateway reports serving only if it
+    /// has entitlements and the engine answers 2xx here.
+    #[serde(default = "default_engine_health_path")]
+    pub engine_health_path: String,
 }
 
 fn default_wait_secs() -> u64 {
     30
+}
+fn default_heartbeat_interval_ms() -> u64 {
+    5_000
+}
+fn default_engine_health_path() -> String {
+    "/healthz".into()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -117,6 +131,13 @@ fn default_fallback_decay_secs() -> f64 {
 }
 
 impl EntitlementSourceConfig {
+    pub fn heartbeat_url(&self) -> String {
+        format!(
+            "{}/internal/v1/heartbeats",
+            self.control_plane_url.trim_end_matches('/')
+        )
+    }
+
     pub fn snapshot_url(&self) -> String {
         format!(
             "{}/internal/v1/entitlements/{}",

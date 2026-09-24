@@ -11,7 +11,10 @@ use std::time::{Duration, Instant};
 
 use pt_admission::{BoundaryPolicy, LimiterConfig, OutputEstimator, ReservationLimiter};
 use pt_core::{ApproxTokenCounter, PerformanceProfile, Shape, Tier, TokenCounter};
-use pt_entitlement::{sha256_hex, DeploymentEntitlement, ReservationEntitlement, Snapshot};
+use pt_entitlement::{
+    failover_cus, sha256_hex, DeploymentEntitlement, FailoverShare, RegionFailover,
+    ReservationEntitlement, Snapshot,
+};
 use pt_quota::wire::{RenewResponse, ReservationDemand};
 
 use crate::config::{ConfigError, GatewayConfig};
@@ -21,10 +24,12 @@ pub struct Reservation {
     pub id: String,
     pub tenant: String,
     pub model: String,
+    /// This region's own share.
     pub cus: u32,
-    /// The region's full entitlement (CUs × WU/s per CU). With a Quota Coordinator, the
-    /// limiter enforces only this gateway's share of it.
-    pub entitlement_wu_s: f64,
+    wu_per_cu: f64,
+    /// Failover entitlements, and the region failures that can activate them.
+    failover: Vec<FailoverShare>,
+    failovers: Arc<Vec<RegionFailover>>,
     pub tier: Tier,
     pub profile: PerformanceProfile,
     pub shape: Shape,
@@ -41,6 +46,28 @@ pub struct Deployment {
     /// the reservation's own bucket. Over the cap is rejected; the reservation's boundary
     /// policy doesn't apply to it.
     pub cap: Option<ReservationLimiter>,
+}
+
+impl Reservation {
+    /// CUs from failover entitlements active now (docs/07 §4).
+    pub fn failover_cus(&self) -> f64 {
+        if self.failover.is_empty() {
+            return 0.0;
+        }
+        failover_cus(&self.failover, &self.failovers, now_ms())
+    }
+
+    /// The region's full entitlement now: (own CUs + active failover CUs) × WU/s per CU.
+    /// With a Quota Coordinator, the limiter enforces only this gateway's share of it.
+    pub fn entitlement_wu_s(&self) -> f64 {
+        (f64::from(self.cus) + self.failover_cus()) * self.wu_per_cu
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 impl Deployment {
@@ -264,6 +291,7 @@ impl AppState {
                     tier: r.tier,
                     profile: r.profile.clone(),
                     shape: r.shape,
+                    failover: vec![],
                 })
                 .collect();
             let deployments: Vec<_> = config
@@ -291,7 +319,13 @@ impl AppState {
                     )));
                 }
             }
-            let (view, _) = state.build(0, EntitlementSource::Static, &reservations, &deployments);
+            let (view, _) = state.build(
+                0,
+                EntitlementSource::Static,
+                &reservations,
+                &deployments,
+                &[],
+            );
             *state.current.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(view);
         }
         Ok(state)
@@ -309,10 +343,7 @@ impl AppState {
         let view = self.entitlements();
         let (dep, expires_at_ms) = view.by_key_hash.get(&sha256_hex(api_key.as_bytes()))?;
         if let Some(expires) = expires_at_ms {
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_millis() as u64);
-            if now_ms >= *expires {
+            if now_ms() >= *expires {
                 return None;
             }
         }
@@ -348,13 +379,11 @@ impl AppState {
     }
 
     /// Resize each limiter to its current local rate: the lease, the fallback, or the full
-    /// entitlement. Changes under 1% are skipped to avoid churn.
+    /// entitlement, which moves while a failover entitlement is active or ramping down.
+    /// Changes under 1% are skipped to avoid churn.
     pub fn refresh_local_rates(&self, now: Instant) {
-        if self.quota.is_none() {
-            return;
-        }
         for r in self.entitlements().reservations() {
-            let (target, _) = self.local_rate(&r.id, r.entitlement_wu_s, now);
+            let (target, _) = self.local_rate(&r.id, r.entitlement_wu_s(), now);
             let current = r.limiter.config().entitlement_wu_s;
             let diff = (target - current).abs();
             if diff > 1e-9 && diff >= 0.01 * current.max(target) {
@@ -394,7 +423,7 @@ impl AppState {
                 *d = 0.5 * *d + 0.5 * now_rate;
                 ReservationDemand {
                     id: r.id.clone(),
-                    entitlement_wu_s: r.entitlement_wu_s,
+                    entitlement_wu_s: r.entitlement_wu_s(),
                     snapshot_version: view.version,
                     demand_wu_s: *d,
                 }
@@ -428,6 +457,7 @@ impl AppState {
             EntitlementSource::Snapshot { region },
             &snapshot.reservations,
             &snapshot.deployments,
+            &snapshot.failovers,
         );
         view.generated_at = Some(snapshot.generated_at.clone());
         let mut slot = self.current.write().unwrap_or_else(|e| e.into_inner());
@@ -448,7 +478,9 @@ impl AppState {
         source: EntitlementSource,
         reservations: &[ReservationEntitlement],
         deployments: &[DeploymentEntitlement],
+        failovers: &[RegionFailover],
     ) -> (Entitlements, ApplyReport) {
+        let failovers = Arc::new(failovers.to_vec());
         let now = Instant::now();
         let prev = self.entitlements();
         let mut view = Entitlements::empty(source);
@@ -474,7 +506,8 @@ impl AppState {
                 report.skipped.push(format!("{}: no deployments", r.id));
                 continue;
             };
-            let entitlement = f64::from(r.cus) * self.wu_per_cu;
+            let active = failover_cus(&r.failover, &failovers, now_ms());
+            let entitlement = (f64::from(r.cus) + active) * self.wu_per_cu;
             let (rate, _) = self.local_rate(&r.id, entitlement, now);
             let config = LimiterConfig::new(rate);
             let limiter = match prev.reservations.get(&r.id) {
@@ -492,7 +525,9 @@ impl AppState {
                     tenant: r.tenant.clone(),
                     model: r.model.clone(),
                     cus: r.cus,
-                    entitlement_wu_s: entitlement,
+                    wu_per_cu: self.wu_per_cu,
+                    failover: r.failover.clone(),
+                    failovers: Arc::clone(&failovers),
                     tier: r.tier,
                     profile: profile.clone(),
                     shape: r.shape,

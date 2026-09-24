@@ -72,6 +72,7 @@ The design rests on six decisions:
 | [011](adr/ADR-011-single-pt-resource.md) | One customer-facing Provisioned Throughput resource |
 | [012](adr/ADR-012-single-instance-quota-coordinator.md) | Single-instance Quota Coordinator with soft state (amends 003) |
 | [013](adr/ADR-013-tenant-scheduling-tier.md) | Tenant scheduling as a tier in front of Dynamo (refines 004, 008) |
+| [014](adr/ADR-014-automatic-region-failover.md) | Automatic region failover from gateway heartbeats (refines 007) |
 
 ## Glossary
 

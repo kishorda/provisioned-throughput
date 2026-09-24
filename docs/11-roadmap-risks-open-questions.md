@@ -43,4 +43,6 @@ The PM answered the open questions on 2026-09-23.
 | 7 | Can customers set their own traffic priority beyond `continuation`? | **Not at launch.** `continuation` is the only intra-tenant priority. | [04 §5](04-request-lifecycle-and-admission.md#5-agentic-workloads) |
 | 8 | What are the per-tier CU price multipliers? | **Standard 1.0×** (base), **Interactive 1.25×**, **Agentic 1.5×**. | [02 §3](02-capacity-unit-and-cost-model.md#3-capacity-unit-cu-and-slo-tiers) |
 
-No pricing questions are open.
+**Open:** how is the Multi-region SKU priced? Its failover headroom is reserved in the
+paired region from 2026-09-24 ([ADR-014](adr/ADR-014-automatic-region-failover.md)), so a
+Multi-region reservation holds up to twice its CUs. Today it's priced like a Regional one.

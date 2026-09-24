@@ -146,7 +146,10 @@ flowchart LR
   Otherwise-eligible requests inside a window are left out and counted under
   `excluded.excluded_periods` by reason. The report lists the windows that overlap the
   month in `exclusion_windows`, so customers can see exactly what was excluded.
-- **Region incidents** are declared by operators: `POST /internal/v1/incidents` with
+- **Region incidents** are declared automatically when a region's gateways stop
+  reporting serving, and resolved once they've served for `recovery_seconds`
+  ([07 §4](07-multi-region.md#4-region-failure-sequence-multi-region-sku)). Operators can
+  also declare them: `POST /internal/v1/incidents` with
   `{region, started_at?, description}`, then `POST /internal/v1/incidents/{id}/resolve`.
   Both use the `[operators]` key. Each region can have one open incident at a time.
   `started_at` can be at most 24 hours in the past, so exclusions can't be backdated

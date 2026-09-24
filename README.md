@@ -105,12 +105,18 @@ curl -s -X POST http://127.0.0.1:8090/v1/provisioned-throughput/<id>/deployments
 # staging's own api_key; at most 20% of the entitlement; 429 deployment_cap_exhausted above it
 ```
 
-Operators declare region incidents, which the SLA report excludes (docs/09 §5):
+Region incidents open automatically when a region's gateways stop reporting serving
+(heartbeats), and close once the region has served for 60 s. Snapshots then activate
+failover entitlements in the paired region, and `/internal/v1/steering` gives DNS weights
+(docs/07 §4, ADR-014). Operators can also declare incidents, for example to drain a
+region. The SLA report excludes both (docs/09 §5):
 
 ```sh
 curl -s -X POST http://127.0.0.1:8090/internal/v1/incidents -H 'Authorization: Bearer sk-operator-dev' \
   -d '{"region":"eu-west","description":"Network partition in eu-west-1a"}'
 curl -s -X POST http://127.0.0.1:8090/internal/v1/incidents/<id>/resolve -H 'Authorization: Bearer sk-operator-dev'
+curl -s http://127.0.0.1:8090/internal/v1/regions  -H 'Authorization: Bearer sk-operator-dev'   # health from heartbeats
+curl -s http://127.0.0.1:8090/internal/v1/steering -H 'Authorization: Bearer sk-operator-dev'   # DNS weights
 ```
 
 Quotes size a reservation before buying, or recommend a resize from real usage (docs/02 §5):
@@ -223,7 +229,11 @@ Follow-ups from the roadmap in docs/11:
   the engine's counts, so this affects only the admission estimate.
 - **Prefix-cache index at the gateway.** Estimates assume no cache hits; settlement
   refunds the difference.
-- **Redpanda/ClickHouse.** Usage goes to JSONL and/or the control plane's in-memory telemetry store (35-day retention). Region incidents must be declared by an operator; nothing detects them automatically, and DNS failover isn't built.
+- **Redpanda/ClickHouse.** Usage goes to JSONL and/or the control plane's in-memory telemetry store (35-day retention).
+- **Region failover gaps.** Steering is an API; no GeoDNS/anycast controller consumes it.
+  The capacity controller doesn't preempt PAYG on hot spares or load warm spares when an
+  incident opens. Failover activation needs the control plane. Failover headroom is
+  reserved but not priced (open PM question, docs/11 §4).
 - **Signing-key rotation.** Gateways trust a single snapshot public key.
 - **Control-plane persistence.** The API keeps state in memory. The CockroachDB schema is in
   `crates/pt-control-plane/migrations/`, but there's no SQL store yet. The capacity planner

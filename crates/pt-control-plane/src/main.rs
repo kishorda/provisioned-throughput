@@ -44,6 +44,22 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    let failover = svc.clone();
+    let check = Duration::from_millis(failover.config.failover.check_interval_ms);
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(check);
+        loop {
+            tick.tick().await;
+            let r = failover.run_failover().await;
+            for (id, region) in &r.declared {
+                tracing::warn!(%id, %region, "region down: failover entitlements active");
+            }
+            for (id, region) in &r.resolved {
+                tracing::info!(%id, %region, "region recovered: returning traffic gradually");
+            }
+        }
+    });
+
     let (routes, telemetry) = app(svc.clone());
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(3_600));

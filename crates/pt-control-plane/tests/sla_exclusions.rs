@@ -148,7 +148,7 @@ async fn incident_api() {
 #[tokio::test]
 async fn multi_region_failover_and_resize_are_excluded() {
     let (base, svc, tel) = spawn().await;
-    let mut req = request("agents", &[("eu-west", 4), ("us-east", 4)]);
+    let mut req = request("agents", &[("eu-west", 4), ("eu-central", 4)]);
     req.sku = Sku::MultiRegion;
     let id = svc.create(ACME, None, req).await.unwrap().resource.id;
 
@@ -156,7 +156,7 @@ async fn multi_region_failover_and_resize_are_excluded() {
     let mut recs = requests(&id, hours(1), false);
     recs.extend(requests(&id, hours(2), true));
     recs.extend(requests(&id, hours(4), true));
-    tel.store.append("us-east", recs, ms(hours(5))).await;
+    tel.store.append("eu-central", recs, ms(hours(5))).await;
 
     let before = sla(&base, &id).await;
     assert_eq!(before["windows_met"], 1, "{before}");
@@ -182,7 +182,7 @@ async fn multi_region_failover_and_resize_are_excluded() {
 
     svc.clock.set(hours(4));
     let increase = UpdateRequest {
-        regions: Some(shares(&[("eu-west", 6), ("us-east", 4)])),
+        regions: Some(shares(&[("eu-west", 6), ("eu-central", 4)])),
         ..Default::default()
     };
     svc.update(ACME, &id, None, increase).await.unwrap();

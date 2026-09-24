@@ -184,6 +184,10 @@ pub struct ProvisionedThroughput {
     pub pending_changes: Option<PendingChanges>,
     pub endpoints: Vec<Endpoint>,
     pub price: Price,
+    /// Multi-region SKU: capacity held in each region to absorb another region's share if
+    /// it fails (docs/07 §2). Not billed separately. Empty for the Regional SKU.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failover_headroom: Vec<RegionShare>,
     /// Deployments sharing this reservation's entitlement, each with its own keys and an
     /// optional cap. The first is the primary, created with the reservation.
     pub deployments: Vec<Deployment>,
@@ -255,6 +259,29 @@ pub struct RegionIncident {
     pub ended_at: Option<Timestamp>,
     pub description: String,
     pub declared_at: Timestamp,
+    #[serde(default)]
+    pub source: IncidentSource,
+}
+
+/// Who declared an incident. Only automatic incidents are resolved automatically.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IncidentSource {
+    #[default]
+    Operator,
+    /// Declared by the control plane when a region's gateways stopped reporting.
+    Automatic,
+}
+
+/// `POST /internal/v1/heartbeats`, sent by every gateway every few seconds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Heartbeat {
+    pub gateway_id: String,
+    /// The gateway has entitlements and its engine answers health checks.
+    pub serving: bool,
+    #[serde(default)]
+    pub snapshot_version: u64,
 }
 
 /// `POST /internal/v1/incidents`

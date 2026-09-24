@@ -72,10 +72,14 @@ Errors use the same shape as the gateway:
 
 **Create**
 - The model must exist, the tier must be offered for it, and every region must offer it.
-  Each region needs at least 1 CU. `multi_region` needs at least two regions.
+  Each region needs at least 1 CU. `multi_region` needs at least two regions, all in one
+  data-residency zone.
 - The shape must satisfy `input_p95 ≤ input_max ≤ context_ceiling ≤` the model's
   maximum, and each region's pools must serve `context_ceiling`.
-- Capacity is reserved in every region at once, or not at all.
+- Capacity is reserved in every region at once, or not at all. For `multi_region`, that
+  includes `failover_headroom`: in each region, the largest share that fails over to it
+  ([07 §2](07-multi-region.md#2-reservation-geography)). Increases grow the headroom with
+  them.
 - The term runs from `start_at` for 1, 3, or 6 calendar months (UTC). If `start_at` is
   in the future (up to 90 days), the reservation is `scheduled`.
 - The inference API key is returned once. Only its SHA-256 is stored.
@@ -208,6 +212,19 @@ sequenceDiagram
   version and `generated_at`, so staleness can be alerted on.
 - **Latency.** A change reaches a connected gateway in one long-poll round trip.
   Measured locally, a create was served in under 0.3 s (target N3: under 60 s).
+- **Failover.** Snapshots also carry each Multi-region reservation's dormant failover
+  shares, and the region failures that activate them (`failovers`). Declaring or resolving
+  an incident bumps the version ([07 §4](07-multi-region.md#4-region-failure-sequence-multi-region-sku)).
+
+Internal endpoints for regions and operators:
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| `GET` | `/internal/v1/entitlements/{region}` | Region token | Signed snapshot, long-poll |
+| `POST` | `/internal/v1/heartbeats` | Region token | Gateway liveness: `{"gateway_id", "serving", "snapshot_version"?}`, 204 |
+| `GET` | `/internal/v1/regions` | Operator key | Region health from heartbeats: `serving`, `down`, or `unknown` |
+| `GET` | `/internal/v1/steering` | Operator key | DNS weights per region and per reservation |
+| `GET`, `POST` | `/internal/v1/incidents`, `…/{id}/resolve` | Operator key | Region incidents. Each has `source`: `operator` or `automatic` |
 
 ## 7. Not yet built
 
@@ -216,6 +233,8 @@ sequenceDiagram
 - Rotating the snapshot signing key. Gateways trust one public key, so rotation needs
   support for more than one key.
 - Invoicing. Events record amounts, but nothing turns them into invoices yet.
+- Pricing for failover headroom. It's reserved but not billed (open question in
+  [11 §4](11-roadmap-risks-open-questions.md#4-product-decisions)).
 
 ## Blog problems addressed
 P4 (customer-facing unit), P5 (tier), P6 (term, renewal, re-rating at renewal), P12 (boundary policy). See [traceability](01-requirements-and-traceability.md#2-traceability-matrix).

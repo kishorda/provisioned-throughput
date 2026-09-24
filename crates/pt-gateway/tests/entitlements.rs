@@ -93,6 +93,8 @@ fn gateway_config(
             public_key,
             cache_path: Some(cache.into()),
             wait_secs: 5,
+            heartbeat_interval_ms: 0,
+            engine_health_path: "/healthz".into(),
         }),
         quota: None,
         usage_export: None,
@@ -434,6 +436,7 @@ async fn gateway_enforces_key_expiry_itself() {
                 cache_hit_ratio: 0.0,
                 burst_factor: 1.0,
             },
+            failover: vec![],
         }],
         deployments: vec![pt_entitlement::DeploymentEntitlement {
             id: "dep-1".into(),
@@ -452,6 +455,7 @@ async fn gateway_enforces_key_expiry_itself() {
             max_share: None,
             boundary_policy: Default::default(),
         }],
+        failovers: vec![],
     };
     app.apply_snapshot(&snapshot).unwrap();
     assert!(app.deployment_for_key("current").is_some());

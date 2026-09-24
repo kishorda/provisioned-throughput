@@ -2,6 +2,7 @@
 
 pub mod chat;
 pub mod config;
+pub mod health;
 pub mod quota;
 pub mod sse;
 pub mod state;
@@ -61,15 +62,18 @@ async fn status(State(app): State<AppState>, headers: HeaderMap) -> Response {
     let res = &dep.reservation;
     let now = Instant::now();
     let s = res.limiter.status(now);
-    let (_, quota) = app.local_rate(&res.id, res.entitlement_wu_s, now);
+    let entitlement = res.entitlement_wu_s();
+    let (_, quota) = app.local_rate(&res.id, entitlement, now);
     Json(json!({
         "deployment": dep.id,
         "reservation": res.id,
         "model": res.model,
         "tier": res.tier,
         "cus": res.cus,
+        // Active failover entitlement while another region is down (docs/07 §4).
+        "failover_cus": (res.failover_cus() * 100.0).round() / 100.0,
         // The region's entitlement, and the share this gateway replica enforces.
-        "entitlement_wu_per_s": res.entitlement_wu_s,
+        "entitlement_wu_per_s": entitlement,
         "local_share_wu_per_s": s.entitlement_wu_s,
         "quota": quota.as_str(),
         "deployment_max_share": dep.max_share,

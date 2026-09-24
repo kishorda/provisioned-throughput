@@ -106,6 +106,16 @@ pub fn regions(
             "A multi_region reservation needs at least two regions.",
         ));
     }
+    if sku == Sku::MultiRegion {
+        let zone = |r: &RegionShare| config.region(&r.region).and_then(|c| c.residency.clone());
+        let first = zone(&regions[0]);
+        if regions.iter().any(|r| zone(r) != first) {
+            return Err(invalid(
+                "regions",
+                "A multi_region reservation's regions must share one data-residency zone, so failover keeps prompts inside it.",
+            ));
+        }
+    }
     Ok(())
 }
 

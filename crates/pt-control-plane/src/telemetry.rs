@@ -182,6 +182,7 @@ mod tests {
                 per_cu_monthly: 0,
                 monthly: 0,
             },
+            failover_headroom: vec![],
             deployments: vec![],
             version: 1,
             created_at: at("2026-10-01T00:00:00Z"),
@@ -201,6 +202,7 @@ mod tests {
             ended_at: end.map(at),
             description: "d".into(),
             declared_at: at(start),
+            source: Default::default(),
         }
     }
 

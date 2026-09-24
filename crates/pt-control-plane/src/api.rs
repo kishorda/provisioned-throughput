@@ -9,6 +9,9 @@
 //! DELETE /v1/provisioned-throughput/{id}       If-Match supported
 //!
 //! GET    /internal/v1/entitlements/{region}    region token; If-None-Match + ?wait= long-poll
+//! POST   /internal/v1/heartbeats               region token; gateway liveness (docs/07 §4)
+//! GET    /internal/v1/regions                  operator key; region health
+//! GET    /internal/v1/steering                 operator key; DNS weights per region and reservation
 //! ```
 
 use std::sync::Arc;
@@ -93,6 +96,9 @@ pub fn router<S: Store, P: CapacityPlanner, C: Clock>(svc: Svc<S, P, C>) -> Rout
             "/internal/v1/incidents/{id}/resolve",
             post(resolve_incident::<S, P, C>),
         )
+        .route("/internal/v1/heartbeats", post(heartbeat::<S, P, C>))
+        .route("/internal/v1/regions", get(regions::<S, P, C>))
+        .route("/internal/v1/steering", get(steering::<S, P, C>))
         .route("/healthz", get(|| async { "ok" }))
         .with_state(svc)
 }
@@ -551,6 +557,62 @@ async fn list_incidents<S: Store, P: CapacityPlanner, C: Clock>(
     Ok(Json(json!({ "data": svc.incidents().await })).into_response())
 }
 
+/// `POST /internal/v1/heartbeats`: a gateway reports that it's alive and whether it serves.
+async fn heartbeat<S: Store, P: CapacityPlanner, C: Clock>(
+    State(svc): State<Svc<S, P, C>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let region = region_of(&svc, &headers)?.to_string();
+    let hb: crate::model::Heartbeat = parse(&body)?;
+    if hb.gateway_id.is_empty() || hb.gateway_id.len() > 128 {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "gateway_id must be 1–128 characters.",
+        ));
+    }
+    svc.heartbeat(&region, &hb);
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// `GET /internal/v1/regions`: health of every region, from heartbeats.
+async fn regions<S: Store, P: CapacityPlanner, C: Clock>(
+    State(svc): State<Svc<S, P, C>>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    operator(&svc, &headers)?;
+    Ok(Json(json!({ "data": svc.region_statuses() })).into_response())
+}
+
+/// `GET /internal/v1/steering`: DNS weights for a GeoDNS or global load-balancer controller.
+async fn steering<S: Store, P: CapacityPlanner, C: Clock>(
+    State(svc): State<Svc<S, P, C>>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    operator(&svc, &headers)?;
+    Ok(Json(svc.steering().await).into_response())
+}
+
+/// The region a bearer region token belongs to.
+fn region_of<'a, S, P, C>(
+    svc: &'a Service<S, P, C>,
+    headers: &HeaderMap,
+) -> Result<&'a str, ApiError> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .and_then(|t| svc.config.region_for_token(t.trim()))
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::UNAUTHORIZED,
+                "invalid_region_token",
+                "Invalid or missing region token.",
+            )
+        })
+}
+
 /// Longest a snapshot long-poll may wait.
 const MAX_WAIT_SECS: u64 = 60;
 
@@ -570,18 +632,7 @@ async fn entitlements<S: Store, P: CapacityPlanner, C: Clock>(
     Path(region): Path<String>,
     Query(q): Query<WaitQuery>,
 ) -> Result<Response, ApiError> {
-    let token_region = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .and_then(|t| svc.config.region_for_token(t.trim()))
-        .ok_or_else(|| {
-            ApiError::new(
-                StatusCode::UNAUTHORIZED,
-                "invalid_region_token",
-                "Invalid or missing region token.",
-            )
-        })?;
+    let token_region = region_of(&svc, &headers)?;
     if token_region != region {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,

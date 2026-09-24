@@ -29,6 +29,60 @@ pub struct ControlPlaneConfig {
     /// Operator access, for declaring region incidents. Without it, the incident API is off.
     #[serde(default)]
     pub operators: Option<OperatorsConfig>,
+    #[serde(default)]
+    pub failover: FailoverConfig,
+}
+
+/// Automatic region-failure handling (docs/07 §4, ADR-014).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FailoverConfig {
+    /// Declare and resolve region incidents from gateway heartbeats. Operators can always
+    /// declare them by hand.
+    #[serde(default = "default_true")]
+    pub auto_declare: bool,
+    /// A region is down when no gateway has reported serving for this long.
+    #[serde(default = "default_heartbeat_timeout_seconds")]
+    pub heartbeat_timeout_seconds: u64,
+    /// An automatic incident is resolved after the region has served continuously for
+    /// this long.
+    #[serde(default = "default_recovery_seconds")]
+    pub recovery_seconds: u64,
+    /// After recovery, failover entitlements ramp down and DNS weight ramps back up over
+    /// this long (10% per minute by default), so KV caches warm up.
+    #[serde(default = "default_return_ramp_minutes")]
+    pub return_ramp_minutes: u64,
+    /// How often the control plane checks region health.
+    #[serde(default = "default_check_interval_ms")]
+    pub check_interval_ms: u64,
+}
+
+impl Default for FailoverConfig {
+    fn default() -> Self {
+        Self {
+            auto_declare: true,
+            heartbeat_timeout_seconds: default_heartbeat_timeout_seconds(),
+            recovery_seconds: default_recovery_seconds(),
+            return_ramp_minutes: default_return_ramp_minutes(),
+            check_interval_ms: default_check_interval_ms(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_heartbeat_timeout_seconds() -> u64 {
+    30
+}
+fn default_recovery_seconds() -> u64 {
+    60
+}
+fn default_return_ramp_minutes() -> u64 {
+    10
+}
+fn default_check_interval_ms() -> u64 {
+    1_000
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -96,6 +150,13 @@ pub struct RegionConfig {
     pub name: String,
     /// Bearer token the region's gateways use to pull snapshots.
     pub token: String,
+    /// Preferred failover region for Multi-region reservations that have a share in both.
+    #[serde(default)]
+    pub pair: Option<String>,
+    /// Data-residency zone, for example `eu`. A Multi-region reservation's regions must all
+    /// be in one zone, so failover never moves prompts out of it.
+    #[serde(default)]
+    pub residency: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -233,6 +294,23 @@ impl ControlPlaneConfig {
                 return invalid(format!("region {} reuses another region's token", r.name));
             }
         }
+        for r in &self.regions {
+            if let Some(p) = &r.pair {
+                if p == &r.name || !region_names.contains(p.as_str()) {
+                    return invalid(format!(
+                        "region {} pairs with {p}, which isn't another configured region",
+                        r.name
+                    ));
+                }
+            }
+        }
+        let f = &self.failover;
+        if f.heartbeat_timeout_seconds == 0 || f.recovery_seconds == 0 || f.check_interval_ms == 0 {
+            return invalid(
+                "failover.heartbeat_timeout_seconds, recovery_seconds, and check_interval_ms must be positive"
+                    .into(),
+            );
+        }
         for c in &self.capacity {
             if self.profile(&c.profile).is_none() {
                 return invalid(format!(
@@ -282,6 +360,10 @@ impl ControlPlaneConfig {
 
     pub fn profile(&self, name: &str) -> Option<&pt_core::PerformanceProfile> {
         self.profiles.iter().find(|p| p.name == name)
+    }
+
+    pub fn region(&self, name: &str) -> Option<&RegionConfig> {
+        self.regions.iter().find(|r| r.name == name)
     }
 
     pub fn capacity_for(&self, region: &str, model: &str) -> Option<&CapacityConfig> {

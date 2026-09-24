@@ -1,0 +1,29 @@
+# pt-gateway for eu-central, eu-west's failover pair. A single replica (no [quota]), so it
+# enforces each reservation's full eu-central entitlement, including failover entitlements
+# while eu-west is down.
+
+[server]
+listen = "127.0.0.1:8082"
+engine_url = "http://127.0.0.1:9010"
+usage_log = "usage-eu-central.jsonl"
+wu_per_cu = 1000.0
+
+[entitlements]
+control_plane_url = "http://127.0.0.1:8090"
+region = "eu-central"
+token = "region-token-eu-central-dev"
+# Public half of the development signing key in config/control-plane.toml.
+public_key = "b51da0aa7183df2b9a9ac31f26e8f856fd8b818d1118cdb87c9253afe13bb164"
+cache_path = "entitlements-eu-central.json"
+wait_secs = 30
+heartbeat_interval_ms = 5000
+engine_health_path = "/healthz"
+
+[usage_export]
+control_plane_url = "http://127.0.0.1:8090"
+token = "region-token-eu-central-dev"
+
+[[profiles]]
+name = "llama-4-maverick.h200.vllm-0.11.tp8"
+coefficients = { a = 1.00, b = 0.08, c = 3.10, d = 0.00021 }
+capacity_wu_per_s = { interactive = 24000.0, agentic = 21000.0, standard = 34000.0 }

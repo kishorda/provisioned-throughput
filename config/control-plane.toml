@@ -27,18 +27,32 @@ failover_window_minutes = 5    # multi-region SLA exclusion after a region incid
 [operators]
 api_key = "sk-operator-dev"
 
+# Automatic region-failure handling (docs/07 §4). Gateways heartbeat every 5 s.
+[failover]
+auto_declare = true
+heartbeat_timeout_seconds = 30  # no serving gateway for this long: region down
+recovery_seconds = 60           # serving continuously for this long: incident resolved
+return_ramp_minutes = 10        # failover entitlement and DNS weight return at 10% a minute
+check_interval_ms = 1000
+
 # Regions whose gateways pull snapshots and push usage, and their tokens (development values).
+# `pair` is the preferred failover region; `residency` bounds where failover may go.
 [[regions]]
 name = "eu-west"
 token = "region-token-eu-west-dev"
+pair = "eu-central"
+residency = "eu"
 
 [[regions]]
 name = "eu-central"
 token = "region-token-eu-central-dev"
+pair = "eu-west"
+residency = "eu"
 
 [[regions]]
 name = "us-east"
 token = "region-token-us-east-dev"
+residency = "us"
 
 [[tenants]]
 id = "acme"

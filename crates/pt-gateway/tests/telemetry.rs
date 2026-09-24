@@ -98,6 +98,8 @@ async fn gateway_usage_reaches_customer_reports() {
             public_key: svc.signer().public_key_hex(),
             cache_path: None,
             wait_secs: 5,
+            heartbeat_interval_ms: 0,
+            engine_health_path: "/healthz".into(),
         }),
         quota: None,
         usage_export: Some(UsageExportConfig {

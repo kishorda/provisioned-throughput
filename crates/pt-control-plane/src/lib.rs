@@ -6,6 +6,7 @@
 pub mod api;
 pub mod clock;
 pub mod config;
+pub mod failover;
 pub mod model;
 pub mod planner;
 pub mod pricing;

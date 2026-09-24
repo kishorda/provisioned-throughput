@@ -35,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
     let app = AppState::new(&config, sink)?;
 
     if let Some(source) = config.entitlements.clone() {
-        let client = pt_gateway::sync::SnapshotClient::new(source)?;
+        let client = pt_gateway::sync::SnapshotClient::new(source.clone())?;
         // Serve last-known-good entitlements immediately, then keep them fresh.
         match client.load_cache(&app) {
             Ok(Some(v)) => tracing::info!(version = v, "serving cached entitlements"),
@@ -44,7 +44,20 @@ async fn main() -> anyhow::Result<()> {
             }
             Err(e) => tracing::warn!(error = %e, "ignoring entitlement cache"),
         }
+        if source.heartbeat_interval_ms > 0 {
+            let id = config
+                .quota
+                .as_ref()
+                .and_then(|q| q.gateway_id.clone())
+                .unwrap_or_else(|| format!("gw-{}", uuid::Uuid::new_v4().simple()));
+            let heartbeat = pt_gateway::health::HeartbeatClient::new(source.clone(), id)?;
+            tokio::spawn(heartbeat.run(app.clone()));
+        }
         tokio::spawn(client.run(app.clone()));
+        tokio::spawn(pt_gateway::health::run_rate_refresh(
+            app.clone(),
+            std::time::Duration::from_secs(1),
+        ));
     }
     if let Some(quota) = config.quota.clone() {
         let client = pt_gateway::quota::QuotaClient::new(quota)?;

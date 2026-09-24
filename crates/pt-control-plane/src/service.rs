@@ -13,16 +13,19 @@ use jiff::{SignedDuration, Span, Timestamp};
 use pt_core::Shape;
 pub use pt_entitlement::sha256_hex;
 use pt_entitlement::{
-    DeploymentEntitlement, PreviousKey, ReservationEntitlement, Snapshot, SnapshotSigner,
+    DeploymentEntitlement, FailoverShare, PreviousKey, RegionFailover, ReservationEntitlement,
+    Snapshot, SnapshotSigner,
 };
 use tokio::sync::watch;
 
 use crate::clock::Clock;
 use crate::config::ControlPlaneConfig;
+use crate::failover::{self, footprint, growth, Health, RegionHealth, RegionStatus, Steering};
 use crate::model::{
     total_cus, ApiKey, CreateDeploymentRequest, CreateRequest, DeclareIncident, Deployment,
-    Endpoint, Event, EventKind, PendingChanges, ProvisionedThroughput, RegionIncident, RegionShare,
-    ResolveIncident, RotateKeyRequest, State, UpdateDeploymentRequest, UpdateRequest,
+    Endpoint, Event, EventKind, Heartbeat, IncidentSource, PendingChanges, ProvisionedThroughput,
+    RegionIncident, RegionShare, ResolveIncident, RotateKeyRequest, Sku, State,
+    UpdateDeploymentRequest, UpdateRequest,
 };
 use crate::planner::{CapacityPlanner, PlanError};
 use crate::pricing;
@@ -130,6 +133,14 @@ pub enum DeleteEffect {
     AlreadyInactive,
 }
 
+/// What one failover check changed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FailoverReport {
+    /// Incidents declared, as (incident id, region).
+    pub declared: Vec<(String, String)>,
+    pub resolved: Vec<(String, String)>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LifecycleReport {
     pub activated: u32,
@@ -152,6 +163,7 @@ pub struct Service<S, P, C> {
     signer: SnapshotSigner,
     /// Entitlement version: bumped on every change, watched by snapshot long-polls.
     changes: watch::Sender<u64>,
+    health: RegionHealth,
 }
 
 impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
@@ -168,6 +180,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
             config,
             signer,
             changes,
+            health: RegionHealth::default(),
         }
     }
 
@@ -208,6 +221,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
             .collect();
         live.sort_by(|a, b| a.id.cmp(&b.id));
 
+        let now = self.clock.now();
         let mut reservations = Vec::new();
         let mut deployments = Vec::new();
         for pt in live {
@@ -226,8 +240,8 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                 tier: pt.tier,
                 profile: capacity.profile.clone(),
                 shape: pt.shape,
+                failover: self.failover_shares(&pt, region),
             });
-            let now = self.clock.now();
             for d in &pt.deployments {
                 let Some(current) = d.current_key() else {
                     continue;
@@ -255,10 +269,60 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         Some(Snapshot {
             region: region.to_string(),
             version,
-            generated_at: self.clock.now().to_string(),
+            generated_at: now.to_string(),
             reservations,
             deployments,
+            failovers: self.failovers(now).await,
         })
+    }
+
+    /// Dormant failover entitlements that `region` holds for a Multi-region reservation.
+    fn failover_shares(&self, pt: &ProvisionedThroughput, region: &str) -> Vec<FailoverShare> {
+        if pt.sku != Sku::MultiRegion {
+            return vec![];
+        }
+        failover::failover_targets(&self.config, &pt.regions)
+            .into_iter()
+            .filter(|(_, to)| to == region)
+            .filter_map(|(from, _)| {
+                let cus = pt.regions.iter().find(|r| r.region == from)?.cus;
+                Some(FailoverShare {
+                    from_region: from,
+                    cus,
+                })
+            })
+            .collect()
+    }
+
+    fn return_ramp(&self) -> SignedDuration {
+        SignedDuration::from_mins(self.config.failover.return_ramp_minutes as i64)
+    }
+
+    fn heartbeat_timeout(&self) -> SignedDuration {
+        SignedDuration::from_secs(self.config.failover.heartbeat_timeout_seconds as i64)
+    }
+
+    /// Region failures that activate failover entitlements now: open incidents, and
+    /// resolved ones still in their return ramp.
+    async fn failovers(&self, now: Timestamp) -> Vec<RegionFailover> {
+        let ramp = self.return_ramp();
+        let ms = |t: Timestamp| t.as_millisecond().max(0) as u64;
+        let mut out: Vec<_> = self
+            .store
+            .list_incidents()
+            .await
+            .into_iter()
+            .filter(|i| i.ended_at.is_none_or(|e| e + ramp > now))
+            .map(|i| RegionFailover {
+                started_at_ms: ms(i.started_at),
+                ended_at_ms: i.ended_at.map(ms),
+                return_ramp_ms: ramp.as_millis().max(0) as u64,
+                region: i.region,
+                incident: i.id,
+            })
+            .collect();
+        out.sort_by(|a, b| a.incident.cmp(&b.incident));
+        out
     }
 
     pub async fn create(
@@ -309,8 +373,9 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         };
         self.ensure_name_free(tenant, &req.name, None).await?;
 
+        let headroom = failover::headroom(&self.config, req.sku, &req.regions);
         self.planner
-            .reserve(&req.model, &req.regions, &req.shape)
+            .reserve(&req.model, &footprint(&req.regions, &headroom), &req.shape)
             .await?;
 
         let suffix = uuid::Uuid::new_v4().simple().to_string();
@@ -355,6 +420,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
             state,
             pending_changes: None,
             price,
+            failover_headroom: headroom,
             deployments: vec![Deployment {
                 id: format!("dep-{}", &suffix[16..]),
                 name: "default".into(),
@@ -369,7 +435,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         };
 
         if let Err(e) = self.store.insert(pt.clone()).await {
-            self.planner.release(&pt.model, &pt.regions).await;
+            self.planner.release(&pt.model, &held(&pt)).await;
             return Err(conflict("already_exists", e.to_string()));
         }
         if let Some(key) = idempotency_key {
@@ -538,16 +604,24 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         if let Some(new) = &req.regions {
             if not_started {
                 if *new != pt.regions {
-                    self.planner.release(&pt.model, &pt.regions).await;
-                    ops.push(PlanOp::Released(pt.regions.clone()));
-                    self.planner.reserve(&pt.model, new, &shape).await?;
-                    ops.push(PlanOp::Reserved(new.clone()));
+                    let before = held(pt);
+                    let headroom = failover::headroom(&self.config, pt.sku, new);
+                    let after = footprint(new, &headroom);
+                    self.planner.release(&pt.model, &before).await;
+                    ops.push(PlanOp::Released(before));
+                    self.planner.reserve(&pt.model, &after, &shape).await?;
+                    ops.push(PlanOp::Reserved(after));
                     pt.regions = new.clone();
+                    pt.failover_headroom = headroom;
                 }
             } else if let Some(deltas) = increases_only(&pt.regions, new) {
                 if !deltas.is_empty() {
-                    self.planner.reserve(&pt.model, &deltas, &shape).await?;
-                    ops.push(PlanOp::Reserved(deltas.clone()));
+                    // Growing a share can grow the headroom it needs in its failover target.
+                    let headroom = failover::headroom(&self.config, pt.sku, new);
+                    let extra = growth(&held(pt), &footprint(new, &headroom));
+                    self.planner.reserve(&pt.model, &extra, &shape).await?;
+                    ops.push(PlanOp::Reserved(extra));
+                    pt.failover_headroom = headroom;
                     let per_cu = self.price(&pt.tier, pt.isolation, 1).per_cu_monthly;
                     for d in deltas {
                         let from = pt
@@ -679,7 +753,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
             )
         })?;
         if effect == DeleteEffect::CancelledNow {
-            self.planner.release(&pt.model, &pt.regions).await;
+            self.planner.release(&pt.model, &held(&pt)).await;
         }
         self.bump();
         tracing::info!(id = %pt.id, %tenant, ?effect, "provisioned throughput deleted");
@@ -1009,32 +1083,51 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                 message: "started_at must be within the last 24 hours.".into(),
             });
         }
+        self.open_incident(
+            req.region,
+            started_at,
+            description,
+            IncidentSource::Operator,
+        )
+        .await
+    }
+
+    async fn open_incident(
+        &self,
+        region: String,
+        started_at: Timestamp,
+        description: String,
+        source: IncidentSource,
+    ) -> Result<RegionIncident, ServiceError> {
         let open = self.store.list_incidents().await;
         if let Some(o) = open
             .iter()
-            .find(|i| i.region == req.region && i.ended_at.is_none())
+            .find(|i| i.region == region && i.ended_at.is_none())
         {
             return Err(conflict(
                 "incident_open",
                 format!(
-                    "Incident {} is already open for {}. Resolve it first.",
-                    o.id, req.region
+                    "Incident {} is already open for {region}. Resolve it first.",
+                    o.id
                 ),
             ));
         }
         let incident = RegionIncident {
             id: format!("inc-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]),
-            region: req.region,
+            region,
             started_at,
             ended_at: None,
             description,
-            declared_at: now,
+            declared_at: self.clock.now(),
+            source,
         };
         self.store
             .insert_incident(incident.clone())
             .await
             .map_err(|e| conflict("already_exists", e.to_string()))?;
-        tracing::warn!(id = %incident.id, region = %incident.region, "region incident declared");
+        // Snapshots carry open incidents, which activate failover entitlements.
+        self.bump();
+        tracing::warn!(id = %incident.id, region = %incident.region, ?source, "region incident declared");
         Ok(incident)
     }
 
@@ -1069,12 +1162,154 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
             .update_incident(incident.clone())
             .await
             .map_err(|_| ServiceError::NotFound)?;
+        self.bump();
         tracing::info!(id = %incident.id, region = %incident.region, "region incident resolved");
         Ok(incident)
     }
 
     pub async fn incidents(&self) -> Vec<RegionIncident> {
         self.store.list_incidents().await
+    }
+
+    /// Record a gateway heartbeat for `region`.
+    pub fn heartbeat(&self, region: &str, hb: &Heartbeat) {
+        self.health
+            .record(region, hb, self.clock.now(), self.heartbeat_timeout());
+    }
+
+    /// Current health of every configured region.
+    pub fn region_statuses(&self) -> Vec<RegionStatus> {
+        let now = self.clock.now();
+        self.config
+            .regions
+            .iter()
+            .map(|r| self.health.status(&r.name, now, self.heartbeat_timeout()))
+            .collect()
+    }
+
+    /// Declare incidents for regions that stopped serving, and resolve automatic incidents
+    /// for regions that have served continuously for `recovery_seconds`. Run periodically.
+    ///
+    /// A region is declared down only while another region is serving: if every region
+    /// looks down, the control plane is probably the one cut off, and failing over would
+    /// help nobody.
+    pub async fn run_failover(&self) -> FailoverReport {
+        let mut report = FailoverReport::default();
+        if !self.config.failover.auto_declare {
+            return report;
+        }
+        let now = self.clock.now();
+        let statuses = self.region_statuses();
+        let any_serving = statuses.iter().any(|s| s.health == Health::Serving);
+        let recovery = SignedDuration::from_secs(self.config.failover.recovery_seconds as i64);
+        let incidents = self.store.list_incidents().await;
+        for s in &statuses {
+            let open = incidents
+                .iter()
+                .find(|i| i.region == s.region && i.ended_at.is_none());
+            match (s.health, open) {
+                (Health::Down, None) if any_serving => {
+                    let timeout = self.config.failover.heartbeat_timeout_seconds;
+                    let started_at = s
+                        .last_serving_at
+                        .unwrap_or(now)
+                        .max(now - SignedDuration::from_hours(24));
+                    let description = format!(
+                        "Automatic: no gateway in {} reported serving for {timeout} s.",
+                        s.region
+                    );
+                    match self
+                        .open_incident(
+                            s.region.clone(),
+                            started_at,
+                            description,
+                            IncidentSource::Automatic,
+                        )
+                        .await
+                    {
+                        Ok(i) => report.declared.push((i.id, i.region)),
+                        Err(e) => {
+                            tracing::warn!(error = %e, region = %s.region, "automatic incident not declared")
+                        }
+                    }
+                }
+                (Health::Serving, Some(i))
+                    if i.source == IncidentSource::Automatic
+                        && s.serving_since
+                            .is_some_and(|t| now.duration_since(t) >= recovery) =>
+                {
+                    match self
+                        .resolve_incident(
+                            &i.id,
+                            ResolveIncident {
+                                ended_at: Some(now),
+                            },
+                        )
+                        .await
+                    {
+                        Ok(i) => report.resolved.push((i.id, i.region)),
+                        Err(e) => {
+                            tracing::warn!(error = %e, id = %i.id, "automatic incident not resolved")
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        report
+    }
+
+    /// DNS steering for every region and live reservation (docs/07 §3).
+    pub async fn steering(&self) -> Steering {
+        let now = self.clock.now();
+        let ramp = self.return_ramp();
+        let incidents = self.store.list_incidents().await;
+        let weights: std::collections::HashMap<String, (f64, Option<String>)> = self
+            .config
+            .regions
+            .iter()
+            .map(|r| {
+                (
+                    r.name.clone(),
+                    failover::region_weight(&r.name, &incidents, now, ramp),
+                )
+            })
+            .collect();
+        let weight_of = |r: &str| weights.get(r).map_or(1.0, |w| w.0);
+        let regions = self
+            .region_statuses()
+            .into_iter()
+            .map(|status| {
+                let (weight, incident) =
+                    weights.get(&status.region).cloned().unwrap_or((1.0, None));
+                failover::RegionSteering {
+                    status,
+                    incident,
+                    weight: (weight * 1e4).round() / 1e4,
+                }
+            })
+            .collect();
+        let mut live: Vec<_> = self
+            .store
+            .list_live()
+            .await
+            .into_iter()
+            .filter(|pt| matches!(pt.state, State::Active | State::PendingCancellation))
+            .collect();
+        live.sort_by(|a, b| a.id.cmp(&b.id));
+        let reservations = live
+            .iter()
+            .map(|pt| failover::ReservationSteering {
+                id: pt.id.clone(),
+                sku: pt.sku,
+                targets: failover::reservation_targets(&self.config, pt, weight_of),
+            })
+            .collect();
+        Steering {
+            generated_at: now,
+            regions,
+            reservations,
+        }
     }
 
     /// Activate, renew, and end reservations that are due. Run periodically.
@@ -1106,8 +1341,9 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                     self.renew(&mut pt, now, &mut ops).await;
                     report.renewed += 1;
                 } else {
-                    self.planner.release(&pt.model, &pt.regions).await;
-                    ops.push(PlanOp::Released(pt.regions.clone()));
+                    let before = held(&pt);
+                    self.planner.release(&pt.model, &before).await;
+                    ops.push(PlanOp::Released(before));
                     pt.state = State::Ended;
                     pt.pending_changes = None;
                     pt.events.push(Event {
@@ -1137,19 +1373,20 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
     async fn renew(&self, pt: &mut ProvisionedThroughput, now: Timestamp, ops: &mut Vec<PlanOp>) {
         if let Some(pending) = pt.pending_changes.take() {
             if let Some(new) = pending.regions.filter(|r| *r != pt.regions) {
-                self.planner.release(&pt.model, &pt.regions).await;
-                match self.planner.reserve(&pt.model, &new, &pt.shape).await {
+                let before = held(pt);
+                let headroom = failover::headroom(&self.config, pt.sku, &new);
+                let after = footprint(&new, &headroom);
+                self.planner.release(&pt.model, &before).await;
+                match self.planner.reserve(&pt.model, &after, &pt.shape).await {
                     Ok(()) => {
-                        ops.push(PlanOp::Released(pt.regions.clone()));
-                        ops.push(PlanOp::Reserved(new.clone()));
+                        ops.push(PlanOp::Released(before));
+                        ops.push(PlanOp::Reserved(after));
                         pt.regions = new;
+                        pt.failover_headroom = headroom;
                     }
                     Err(e) => {
                         // Put the current capacity back and renew unchanged.
-                        let _ = self
-                            .planner
-                            .reserve(&pt.model, &pt.regions, &pt.shape)
-                            .await;
+                        let _ = self.planner.reserve(&pt.model, &before, &pt.shape).await;
                         pt.events.push(Event {
                             at: now,
                             kind: EventKind::ScheduledChangeFailed {
@@ -1249,6 +1486,11 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
             })
             .collect()
     }
+}
+
+/// Everything a reservation holds from the planner: its shares and its failover headroom.
+fn held(pt: &ProvisionedThroughput) -> Vec<RegionShare> {
+    footprint(&pt.regions, &pt.failover_headroom)
 }
 
 /// If `new` only raises CUs in the current regions (same set), return the increases.

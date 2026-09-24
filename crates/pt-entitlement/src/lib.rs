@@ -26,6 +26,73 @@ pub struct Snapshot {
     pub generated_at: String,
     pub reservations: Vec<ReservationEntitlement>,
     pub deployments: Vec<DeploymentEntitlement>,
+    /// Region failures that activate failover entitlements: open incidents, and resolved
+    /// ones whose return ramp hasn't finished (docs/07 §4).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failovers: Vec<RegionFailover>,
+}
+
+impl Snapshot {
+    /// A reservation's CUs in this region at `now_ms`: its own share plus the active part
+    /// of its failover entitlements.
+    pub fn effective_cus(&self, r: &ReservationEntitlement, now_ms: u64) -> f64 {
+        f64::from(r.cus) + failover_cus(&r.failover, &self.failovers, now_ms)
+    }
+}
+
+/// The active CUs of `shares`, given the current region failures.
+pub fn failover_cus(shares: &[FailoverShare], failovers: &[RegionFailover], now_ms: u64) -> f64 {
+    shares
+        .iter()
+        .map(|s| {
+            let active = failovers
+                .iter()
+                .filter(|f| f.region == s.from_region)
+                .map(|f| f.activation(now_ms))
+                .fold(0.0, f64::max);
+            f64::from(s.cus) * active
+        })
+        .sum()
+}
+
+/// A failed region. Failover entitlements from it are fully active from `started_at_ms`
+/// until `ended_at_ms`, then ramp down linearly over `return_ramp_ms` while traffic
+/// returns to the recovered region.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegionFailover {
+    pub region: String,
+    /// The incident that caused it.
+    pub incident: String,
+    pub started_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at_ms: Option<u64>,
+    pub return_ramp_ms: u64,
+}
+
+impl RegionFailover {
+    /// How much of a failover entitlement from this region is active: 0 to 1.
+    pub fn activation(&self, now_ms: u64) -> f64 {
+        if now_ms < self.started_at_ms {
+            return 0.0;
+        }
+        match self.ended_at_ms {
+            None => 1.0,
+            Some(end) if now_ms <= end => 1.0,
+            Some(_) if self.return_ramp_ms == 0 => 0.0,
+            Some(end) => (1.0 - (now_ms - end) as f64 / self.return_ramp_ms as f64).max(0.0),
+        }
+    }
+}
+
+/// Dormant capacity a reservation may use in this region while another region has failed
+/// (Multi-region SKU).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FailoverShare {
+    /// The region whose traffic this region takes over.
+    pub from_region: String,
+    pub cus: u32,
 }
 
 /// A reservation's entitlement in one region.
@@ -41,6 +108,9 @@ pub struct ReservationEntitlement {
     /// `PerformanceProfile` of the region's pool for this model.
     pub profile: String,
     pub shape: Shape,
+    /// Failover entitlements, dormant until their region fails.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failover: Vec<FailoverShare>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -186,6 +256,10 @@ mod tests {
                     cache_hit_ratio: 0.0,
                     burst_factor: 1.0,
                 },
+                failover: vec![FailoverShare {
+                    from_region: "eu-central".into(),
+                    cus: 2,
+                }],
             }],
             deployments: vec![DeploymentEntitlement {
                 id: "dep-1".into(),
@@ -198,7 +272,33 @@ mod tests {
                 max_share: Some(0.25),
                 boundary_policy: BoundaryPolicy::default(),
             }],
+            failovers: vec![RegionFailover {
+                region: "eu-central".into(),
+                incident: "inc-1".into(),
+                started_at_ms: 1_000,
+                ended_at_ms: Some(2_000),
+                return_ramp_ms: 1_000,
+            }],
         }
+    }
+
+    #[test]
+    fn failover_activates_then_ramps_down() {
+        let s = snapshot();
+        let r = &s.reservations[0];
+        assert_eq!(s.effective_cus(r, 999), 4.0, "not yet failed");
+        assert_eq!(s.effective_cus(r, 1_000), 6.0);
+        assert_eq!(s.effective_cus(r, 2_000), 6.0);
+        assert_eq!(s.effective_cus(r, 2_500), 5.0, "half way down the ramp");
+        assert_eq!(s.effective_cus(r, 3_000), 4.0);
+        assert_eq!(s.effective_cus(r, 9_000), 4.0);
+
+        let mut open = s.failovers[0].clone();
+        open.ended_at_ms = None;
+        assert_eq!(open.activation(u64::MAX), 1.0);
+        // Failures of other regions don't activate it.
+        open.region = "us-east".into();
+        assert_eq!(failover_cus(&r.failover, &[open], 1_500), 0.0);
     }
 
     #[test]

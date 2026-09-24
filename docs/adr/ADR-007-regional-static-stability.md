@@ -20,3 +20,5 @@ and hourly billing export pause, and billing is buffered locally.
 - ⚠️ Entitlement changes are eventually consistent (target < 60 s).
 - ⚠️ Multi-region shares can drift from real demand during a global outage. The burst
   bucket absorbs short-term mismatch.
+- ⚠️ Failover entitlements are activated by the control plane ([ADR-014](ADR-014-automatic-region-failover.md)).
+  A region failure during a global outage doesn't activate them.
