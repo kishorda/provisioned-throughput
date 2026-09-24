@@ -1,13 +1,21 @@
 //! Run the control-plane API: `pt-control-plane [config.toml]`
-//! (default `config/control-plane.toml`). State is in memory and lost on restart.
+//! (default `config/control-plane.toml`).
+//!
+//! With a `[store]` URL (or `PT_DATABASE_URL`), state lives in CockroachDB or PostgreSQL:
+//! migrations are applied and reserved capacity is rebuilt at startup. Without one, state
+//! is in memory and lost on restart.
 //!
 //! `pt-control-plane keygen` prints a new snapshot signing key and its public key.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
 use pt_control_plane::clock::SystemClock;
-use pt_control_plane::{app, in_memory, ControlPlaneConfig};
+use pt_control_plane::planner::MemoryPlanner;
+use pt_control_plane::sql::SqlStore;
+use pt_control_plane::store::Store;
+use pt_control_plane::{app, in_memory, with_store, ControlPlaneConfig, Service};
 use pt_telemetry::UsageStore;
 
 #[tokio::main]
@@ -27,10 +35,35 @@ async fn main() -> anyhow::Result<()> {
     }
     let path = arg.unwrap_or_else(|| "config/control-plane.toml".into());
     let config = ControlPlaneConfig::load(&path)?;
-    let listen = config.server.listen.clone();
-    let interval = Duration::from_secs(config.server.lifecycle_interval_secs);
-    let retention_ms = config.telemetry.retention_days * 86_400_000;
-    let svc = in_memory(config, SystemClock);
+    match config.store.as_ref().and_then(|s| s.resolved_url()) {
+        Some(url) => {
+            let store_cfg = config.store.clone().expect("checked above");
+            let store = SqlStore::connect(&url, store_cfg.max_connections)
+                .await
+                .context("connecting to the control-plane database")?;
+            if store_cfg.migrate {
+                store.migrate().await.context("applying migrations")?;
+            }
+            let svc = with_store(config, store, SystemClock)
+                .await
+                .context("restoring reserved capacity")?;
+            serve(svc, "sql").await
+        }
+        None => {
+            tracing::warn!("no [store] configured: state is in memory and lost on restart");
+            serve(in_memory(config, SystemClock), "in-memory").await
+        }
+    }
+}
+
+/// Run the background loops and the HTTP API until Ctrl-C.
+async fn serve<S: Store>(
+    svc: Arc<Service<S, MemoryPlanner, SystemClock>>,
+    store_kind: &str,
+) -> anyhow::Result<()> {
+    let listen = svc.config.server.listen.clone();
+    let interval = Duration::from_secs(svc.config.server.lifecycle_interval_secs);
+    let retention_ms = svc.config.telemetry.retention_days * 86_400_000;
 
     let lifecycle = svc.clone();
     tokio::spawn(async move {
@@ -79,7 +112,7 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&listen)
         .await
         .with_context(|| format!("binding {listen}"))?;
-    tracing::info!(%listen, "control plane listening (in-memory store)");
+    tracing::info!(%listen, store = store_kind, "control plane listening");
     axum::serve(listener, routes)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;

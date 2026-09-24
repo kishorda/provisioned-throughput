@@ -26,7 +26,7 @@ named latency tier.
 | `pt-entitlement` | Snapshot format shared by the control plane and gateways, Ed25519 signing and verification, API-key hashing |
 | `pt-mock-engine` | Stand-in for a Dynamo frontend: OpenAI chat API with configurable TTFT/TPOT and simulated prefix caching |
 | `pt-crds` | Custom resources (docs/08 §2): `PerformanceProfile`, `ModelPool`, `PoolAllocation`, `CapacityReservation`, and the `crdgen` binary |
-| `pt-control-plane` | Customer REST API (docs/12): create, get, list, update, and delete Provisioned Throughput; commercial rules; capacity checks; renewal lifecycle; in-memory store plus a CockroachDB migration |
+| `pt-control-plane` | Customer REST API (docs/12): create, get, list, update, and delete Provisioned Throughput; commercial rules; capacity checks; renewal lifecycle; durable SQL store (CockroachDB or PostgreSQL) or in-memory |
 | `pt-operator` | Regional Capacity Controller: sizes each `ModelPool` from its allocations (docs/06 §2), applies a `DynamoGraphDeployment` and per-role PodDisruptionBudgets, loads warm spares for failover demand from the regional snapshot, and reports status |
 
 ## Run locally
@@ -69,6 +69,8 @@ Mock engine settings: `MOCK_ADDR`, `MOCK_NAME`, `MOCK_TTFT_MS` (default 50),
 
 ```sh
 target/debug/pt-control-plane config/control-plane.toml &   # :8090, in-memory state
+# Durable: uncomment [store] in the config, or set PT_DATABASE_URL=postgres://user@host:5432/db.
+# Migrations are applied at startup, and state survives restarts (ADR-017).
 
 curl -s -X POST http://127.0.0.1:8090/v1/provisioned-throughput \
   -H 'Authorization: Bearer sk-admin-acme-dev' -H 'Content-Type: application/json' \
@@ -247,9 +249,10 @@ Follow-ups from the roadmap in docs/11:
   Failover activation needs the control plane. Failover headroom is
   reserved but not priced (open PM question, docs/11 §4).
 - **Signing-key rotation.** Gateways trust a single snapshot public key.
-- **Control-plane persistence.** The API keeps state in memory. The CockroachDB schema is in
-  `crates/pt-control-plane/migrations/`, but there's no SQL store yet. The capacity planner
-  is also in-memory and counts CUs per region and model, regardless of tier.
+- **Control-plane scale-out.** State is durable in SQL (ADR-017), but the capacity planner
+  and region health are per-process, so run one control-plane instance. The planner counts
+  CUs per region and model, regardless of tier. The database connection has no TLS yet,
+  and usage records are still in memory until ClickHouse.
 - **Dynamo router extensions** (tenant WFQ, KV budgets) and the engine KV-budget adapter (P1).
 - **Controller gaps:** no leader election (run one replica), no drain workflow beyond
   PDBs, and no Dynamo Planner floor integration. The controller owns `replicas` on the

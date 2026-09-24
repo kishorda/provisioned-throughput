@@ -168,7 +168,7 @@ async fn silent_region_is_declared_down_then_recovers() {
     assert_eq!(r.declared.len(), 1, "{r:?}");
     assert_eq!(r.declared[0].1, "eu-west");
     assert!(svc.entitlement_version() > before, "snapshots change");
-    let incident = svc.incidents().await.pop().unwrap();
+    let incident = svc.incidents().await.unwrap().pop().unwrap();
     assert_eq!(incident.source, IncidentSource::Automatic);
     assert_eq!(
         incident.started_at, last_west,
@@ -178,7 +178,7 @@ async fn silent_region_is_declared_down_then_recovers() {
     assert!(svc.run_failover().await.declared.is_empty());
 
     // eu-central's snapshot carries the dormant entitlement and the active failure.
-    let snap = svc.snapshot("eu-central").await.unwrap();
+    let snap = svc.snapshot("eu-central").await.unwrap().unwrap();
     let r = snap.reservations.iter().find(|r| r.id == id).unwrap();
     assert_eq!(r.cus, 4);
     assert_eq!(r.failover.len(), 1);
@@ -203,12 +203,12 @@ async fn silent_region_is_declared_down_then_recovers() {
     beat(&svc, "eu-central", "gw-b", true);
     let r = svc.run_failover().await;
     assert_eq!(r.resolved.len(), 1, "{r:?}");
-    let resolved = svc.incidents().await.pop().unwrap();
+    let resolved = svc.incidents().await.unwrap().pop().unwrap();
     assert_eq!(resolved.ended_at, Some(clock_now(&clock)));
 
     // The failover entitlement ramps down over 10 minutes, then leaves the snapshot.
     clock.advance(SignedDuration::from_mins(5));
-    let snap = svc.snapshot("eu-central").await.unwrap();
+    let snap = svc.snapshot("eu-central").await.unwrap().unwrap();
     let r = snap.reservations.iter().find(|r| r.id == id).unwrap();
     let now_ms = clock_now(&clock).as_millisecond() as u64;
     assert_eq!(snap.effective_cus(r, now_ms), 7.0, "half of 6 CUs left");
@@ -216,6 +216,7 @@ async fn silent_region_is_declared_down_then_recovers() {
     assert!(svc
         .snapshot("eu-central")
         .await
+        .unwrap()
         .unwrap()
         .failovers
         .is_empty());
@@ -259,6 +260,7 @@ async fn detection_guards() {
     let open: Vec<_> = svc
         .incidents()
         .await
+        .unwrap()
         .into_iter()
         .filter(|i| i.ended_at.is_none())
         .collect();

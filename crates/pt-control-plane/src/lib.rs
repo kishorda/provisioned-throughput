@@ -13,6 +13,7 @@ pub mod pricing;
 pub mod quote;
 pub mod quote_api;
 pub mod service;
+pub mod sql;
 pub mod store;
 pub mod telemetry;
 pub mod validate;
@@ -43,4 +44,17 @@ pub fn in_memory<C: Clock>(
 ) -> Arc<Service<MemoryStore, MemoryPlanner, C>> {
     let planner = MemoryPlanner::new(&config.capacity);
     Arc::new(Service::new(MemoryStore::default(), planner, clock, config))
+}
+
+/// A service over `store` with the in-memory planner, its reserved capacity rebuilt from the
+/// store's live reservations.
+pub async fn with_store<S: store::Store, C: Clock>(
+    config: ControlPlaneConfig,
+    store: S,
+    clock: C,
+) -> Result<Arc<Service<S, MemoryPlanner, C>>, store::StoreError> {
+    let planner = MemoryPlanner::new(&config.capacity);
+    let svc = Arc::new(Service::new(store, planner, clock, config));
+    svc.restore_capacity().await?;
+    Ok(svc)
 }

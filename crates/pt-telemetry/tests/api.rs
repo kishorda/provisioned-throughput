@@ -26,8 +26,12 @@ impl Directory for FakeDirectory {
         (token == "region-eu-west").then(|| "eu-west".into())
     }
 
-    async fn reservation(&self, tenant: &str, id: &str) -> Option<ReservationInfo> {
-        (tenant == "acme" && id == "pt-1").then(|| ReservationInfo {
+    async fn reservation(
+        &self,
+        tenant: &str,
+        id: &str,
+    ) -> Result<Option<ReservationInfo>, pt_telemetry::DirectoryError> {
+        Ok((tenant == "acme" && id == "pt-1").then(|| ReservationInfo {
             id: "pt-1".into(),
             tenant: "acme".into(),
             tier: Tier::Agentic,
@@ -44,7 +48,7 @@ impl Directory for FakeDirectory {
                 cache_hit_ratio: 0.5,
                 burst_factor: 2.0,
             },
-        })
+        }))
     }
 
     fn now_ms(&self) -> u64 {

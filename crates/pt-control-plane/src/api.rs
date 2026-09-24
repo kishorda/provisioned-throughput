@@ -178,6 +178,14 @@ impl From<ServiceError> for ApiError {
                 "version_mismatch",
                 e.to_string(),
             ),
+            ServiceError::Unavailable(m) => {
+                tracing::error!(error = %m, "store unavailable");
+                ApiError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "store_unavailable",
+                    "The control plane's store is unavailable. Retry shortly.",
+                )
+            }
         }
     }
 }
@@ -554,7 +562,7 @@ async fn list_incidents<S: Store, P: CapacityPlanner, C: Clock>(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     operator(&svc, &headers)?;
-    Ok(Json(json!({ "data": svc.incidents().await })).into_response())
+    Ok(Json(json!({ "data": svc.incidents().await? })).into_response())
 }
 
 /// `POST /internal/v1/heartbeats`: a gateway reports that it's alive and whether it serves.
@@ -591,7 +599,7 @@ async fn steering<S: Store, P: CapacityPlanner, C: Clock>(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     operator(&svc, &headers)?;
-    Ok(Json(svc.steering().await).into_response())
+    Ok(Json(svc.steering().await?).into_response())
 }
 
 /// The region a bearer region token belongs to.
@@ -656,7 +664,7 @@ async fn entitlements<S: Store, P: CapacityPlanner, C: Clock>(
         }
     }
 
-    let snapshot = svc.snapshot(&region).await.ok_or_else(|| {
+    let snapshot = svc.snapshot(&region).await?.ok_or_else(|| {
         ApiError::new(
             StatusCode::NOT_FOUND,
             "unknown_region",
@@ -710,7 +718,7 @@ async fn list<S: Store, P: CapacityPlanner, C: Clock>(
     let tenant = tenant(&svc, &headers)?;
     let data = svc
         .list(&tenant, q.model.as_deref(), q.include_inactive)
-        .await;
+        .await?;
     Ok(Json(json!({ "data": data })))
 }
 

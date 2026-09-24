@@ -73,6 +73,7 @@ impl IntoResponse for ApiError {
         let kind = match self.status {
             StatusCode::UNAUTHORIZED => "authentication_error",
             StatusCode::NOT_FOUND => "not_found_error",
+            StatusCode::SERVICE_UNAVAILABLE => "api_error",
             _ => "invalid_request_error",
         };
         let body = json!({ "error": { "type": kind, "code": self.code, "message": self.message } });
@@ -144,13 +145,24 @@ async fn reservation<U: UsageStore, D: Directory>(
                 "Invalid or missing API key.",
             )
         })?;
-    tel.directory.reservation(&tenant, id).await.ok_or_else(|| {
-        error(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "No provisioned throughput with that id.",
-        )
-    })
+    tel.directory
+        .reservation(&tenant, id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "reservation lookup failed");
+            error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "store_unavailable",
+                "Reservation data is unavailable. Retry shortly.",
+            )
+        })?
+        .ok_or_else(|| {
+            error(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "No provisioned throughput with that id.",
+            )
+        })
 }
 
 #[derive(Deserialize)]

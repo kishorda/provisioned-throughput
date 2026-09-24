@@ -12,8 +12,11 @@ pub trait Clock: Send + Sync + 'static {
 pub struct SystemClock;
 
 impl Clock for SystemClock {
+    /// Truncated to microseconds, the precision of the SQL store's TIMESTAMPTZ, so a resource
+    /// reads back exactly as it was written.
     fn now(&self) -> Timestamp {
-        Timestamp::now()
+        Timestamp::from_microsecond(Timestamp::now().as_microsecond())
+            .expect("the current time is in range")
     }
 }
 

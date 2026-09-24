@@ -51,7 +51,7 @@ async fn deployments_get_their_own_keys_and_reach_snapshots() {
     assert_eq!(dep.max_share, Some(0.25));
     assert_eq!(dep.api_keys[0].sha256, sha256_hex(key.as_bytes()));
 
-    let snap = svc.snapshot("eu-west").await.unwrap();
+    let snap = svc.snapshot("eu-west").await.unwrap().unwrap();
     assert_eq!(snap.reservations.len(), 1, "one shared entitlement");
     assert_eq!(snap.deployments.len(), 2);
     let s = snap.deployments.iter().find(|d| d.id == dep.id).unwrap();

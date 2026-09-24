@@ -77,7 +77,7 @@ async fn failed_create_reserves_nothing() {
         ServiceError::Capacity(PlanError::CapacityUnavailable { requested: 400, .. })
     ));
     assert_eq!(available(&svc, "eu-west"), 200);
-    assert!(svc.list(ACME, None, true).await.is_empty());
+    assert!(svc.list(ACME, None, true).await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -365,8 +365,8 @@ async fn delete_mid_term_ends_at_term_end() {
     let pt = svc.get(ACME, &pt.id).await.unwrap();
     assert_eq!(pt.state, State::Ended);
     assert_eq!(available(&svc, "eu-west"), 200);
-    assert!(svc.list(ACME, None, false).await.is_empty());
-    assert_eq!(svc.list(ACME, None, true).await.len(), 1);
+    assert!(svc.list(ACME, None, false).await.unwrap().is_empty());
+    assert_eq!(svc.list(ACME, None, true).await.unwrap().len(), 1);
 
     assert_eq!(
         svc.delete(ACME, &pt.id, None).await.unwrap().1,

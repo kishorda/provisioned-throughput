@@ -1,5 +1,10 @@
-//! Persistence. [`MemoryStore`] backs local runs and tests. The CockroachDB schema for the
-//! production store is in `migrations/`.
+//! Persistence. [`MemoryStore`] backs local runs and tests. [`crate::sql::SqlStore`] is the
+//! durable store over the Postgres protocol (CockroachDB in production, PostgreSQL works
+//! too). Its schema is in `migrations/`.
+//!
+//! Reads are fallible: a store that can't be reached must never look like "nothing
+//! there", or the snapshot endpoint would publish empty entitlements and gateways would
+//! drop every key.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -15,6 +20,9 @@ pub enum StoreError {
     VersionConflict(String),
     #[error("{0} not found")]
     NotFound(String),
+    /// The store couldn't be reached or failed. Retryable.
+    #[error("store unavailable: {0}")]
+    Unavailable(String),
 }
 
 /// What an idempotency key was first used for.
@@ -35,12 +43,18 @@ pub trait Store: Send + Sync + 'static {
         &self,
         tenant: &str,
         id: &str,
-    ) -> impl Future<Output = Option<ProvisionedThroughput>> + Send;
+    ) -> impl Future<Output = Result<Option<ProvisionedThroughput>, StoreError>> + Send;
 
-    fn list(&self, tenant: &str) -> impl Future<Output = Vec<ProvisionedThroughput>> + Send;
+    /// A tenant's resources, oldest first.
+    fn list(
+        &self,
+        tenant: &str,
+    ) -> impl Future<Output = Result<Vec<ProvisionedThroughput>, StoreError>> + Send;
 
-    /// Live resources across all tenants, for the lifecycle loop.
-    fn list_live(&self) -> impl Future<Output = Vec<ProvisionedThroughput>> + Send;
+    /// Live resources across all tenants, for the lifecycle loop and snapshots.
+    fn list_live(
+        &self,
+    ) -> impl Future<Output = Result<Vec<ProvisionedThroughput>, StoreError>> + Send;
 
     /// Replace `pt` if the stored version is `expected_version`.
     fn update(
@@ -53,7 +67,7 @@ pub trait Store: Send + Sync + 'static {
         &self,
         tenant: &str,
         key: &str,
-    ) -> impl Future<Output = Option<IdempotencyRecord>> + Send;
+    ) -> impl Future<Output = Result<Option<IdempotencyRecord>, StoreError>> + Send;
 
     /// Record a key. Fails if the key already exists.
     fn idempotency_put(
@@ -75,7 +89,9 @@ pub trait Store: Send + Sync + 'static {
     ) -> impl Future<Output = Result<(), StoreError>> + Send;
 
     /// All incidents, oldest first.
-    fn list_incidents(&self) -> impl Future<Output = Vec<RegionIncident>> + Send;
+    fn list_incidents(
+        &self,
+    ) -> impl Future<Output = Result<Vec<RegionIncident>, StoreError>> + Send;
 }
 
 #[derive(Default)]
@@ -106,15 +122,20 @@ impl Store for MemoryStore {
         Ok(())
     }
 
-    async fn get(&self, tenant: &str, id: &str) -> Option<ProvisionedThroughput> {
-        self.lock()
+    async fn get(
+        &self,
+        tenant: &str,
+        id: &str,
+    ) -> Result<Option<ProvisionedThroughput>, StoreError> {
+        Ok(self
+            .lock()
             .by_id
             .get(id)
             .filter(|pt| pt.tenant == tenant)
-            .cloned()
+            .cloned())
     }
 
-    async fn list(&self, tenant: &str) -> Vec<ProvisionedThroughput> {
+    async fn list(&self, tenant: &str) -> Result<Vec<ProvisionedThroughput>, StoreError> {
         let mut out: Vec<_> = self
             .lock()
             .by_id
@@ -127,16 +148,17 @@ impl Store for MemoryStore {
                 .cmp(&b.created_at)
                 .then_with(|| a.id.cmp(&b.id))
         });
-        out
+        Ok(out)
     }
 
-    async fn list_live(&self) -> Vec<ProvisionedThroughput> {
-        self.lock()
+    async fn list_live(&self) -> Result<Vec<ProvisionedThroughput>, StoreError> {
+        Ok(self
+            .lock()
             .by_id
             .values()
             .filter(|pt| pt.state.is_live())
             .cloned()
-            .collect()
+            .collect())
     }
 
     async fn update(
@@ -157,11 +179,16 @@ impl Store for MemoryStore {
         }
     }
 
-    async fn idempotency_get(&self, tenant: &str, key: &str) -> Option<IdempotencyRecord> {
-        self.lock()
+    async fn idempotency_get(
+        &self,
+        tenant: &str,
+        key: &str,
+    ) -> Result<Option<IdempotencyRecord>, StoreError> {
+        Ok(self
+            .lock()
             .idempotency
             .get(&(tenant.to_string(), key.to_string()))
-            .cloned()
+            .cloned())
     }
 
     async fn idempotency_put(
@@ -202,7 +229,7 @@ impl Store for MemoryStore {
         }
     }
 
-    async fn list_incidents(&self) -> Vec<RegionIncident> {
-        self.lock().incidents.clone()
+    async fn list_incidents(&self) -> Result<Vec<RegionIncident>, StoreError> {
+        Ok(self.lock().incidents.clone())
     }
 }

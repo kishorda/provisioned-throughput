@@ -6,13 +6,15 @@
 use std::sync::Arc;
 
 use axum::Router;
-use pt_telemetry::{Directory, ExclusionWindow, MemoryUsageStore, ReservationInfo, Telemetry};
+use pt_telemetry::{
+    Directory, DirectoryError, ExclusionWindow, MemoryUsageStore, ReservationInfo, Telemetry,
+};
 
 use crate::clock::Clock;
 use crate::config::TelemetryConfig;
 use crate::model::{EventKind, ProvisionedThroughput, RegionIncident, Sku};
 use crate::planner::CapacityPlanner;
-use crate::service::Service;
+use crate::service::{Service, ServiceError};
 use crate::store::Store;
 
 pub struct CpDirectory<S, P, C>(pub Arc<Service<S, P, C>>);
@@ -26,12 +28,24 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Directory for CpDirectory<S, P, C> 
         self.0.config.region_for_token(token).map(str::to_owned)
     }
 
-    async fn reservation(&self, tenant: &str, id: &str) -> Option<ReservationInfo> {
-        let pt = self.0.get(tenant, id).await.ok()?;
-        let incidents = self.0.incidents().await;
+    async fn reservation(
+        &self,
+        tenant: &str,
+        id: &str,
+    ) -> Result<Option<ReservationInfo>, DirectoryError> {
+        let pt = match self.0.get(tenant, id).await {
+            Ok(pt) => pt,
+            Err(ServiceError::NotFound) => return Ok(None),
+            Err(e) => return Err(DirectoryError(e.to_string())),
+        };
+        let incidents = self
+            .0
+            .incidents()
+            .await
+            .map_err(|e| DirectoryError(e.to_string()))?;
         let exclusions =
             exclusion_windows(&pt, &incidents, &self.0.config.telemetry, self.now_ms());
-        Some(ReservationInfo {
+        Ok(Some(ReservationInfo {
             exclusions,
             entitlement_wu_s: f64::from(pt.cus) * self.0.config.telemetry.wu_per_cu,
             id: pt.id,
@@ -41,7 +55,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Directory for CpDirectory<S, P, C> 
             monthly_price: pt.price.monthly,
             currency: pt.price.currency,
             shape: pt.shape,
-        })
+        }))
     }
 
     fn now_ms(&self) -> u64 {

@@ -31,6 +31,38 @@ pub struct ControlPlaneConfig {
     pub operators: Option<OperatorsConfig>,
     #[serde(default)]
     pub failover: FailoverConfig,
+    /// Durable store (ADR-017). Without it, state is in memory and lost on restart.
+    #[serde(default)]
+    pub store: Option<StoreConfig>,
+}
+
+/// A CockroachDB or PostgreSQL database.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoreConfig {
+    /// `postgres://user@host:port/db`. `PT_DATABASE_URL` overrides it, so passwords can stay
+    /// out of the file.
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default = "default_max_connections")]
+    pub max_connections: u32,
+    /// Apply pending migrations at startup.
+    #[serde(default = "default_true")]
+    pub migrate: bool,
+}
+
+impl StoreConfig {
+    /// The URL to connect to: `PT_DATABASE_URL`, else `url`.
+    pub fn resolved_url(&self) -> Option<String> {
+        std::env::var("PT_DATABASE_URL")
+            .ok()
+            .filter(|u| !u.is_empty())
+            .or_else(|| self.url.clone())
+    }
+}
+
+fn default_max_connections() -> u32 {
+    10
 }
 
 /// Automatic region-failure handling (docs/07 §4, ADR-014).

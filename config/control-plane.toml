@@ -23,6 +23,13 @@ retention_days = 35
 change_grace_minutes = 10      # SLA exclusion after activation, resizes, shape changes
 failover_window_minutes = 5    # multi-region SLA exclusion after a region incident starts
 
+# Durable store (ADR-017): CockroachDB in production, PostgreSQL works for development.
+# Without it, state is in memory and lost on restart. PT_DATABASE_URL overrides `url`.
+# [store]
+# url = "postgres://postgres@127.0.0.1:55432/pt"
+# max_connections = 10
+# migrate = true            # apply pending migrations at startup
+
 # Operator API for declaring region incidents (development key).
 [operators]
 api_key = "sk-operator-dev"

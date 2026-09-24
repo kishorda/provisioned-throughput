@@ -28,7 +28,7 @@ fn grace(m: u64) -> RotateKeyRequest {
 }
 
 async fn eu_west_deployment(svc: &Svc, id: &str) -> pt_entitlement::DeploymentEntitlement {
-    let snap = svc.snapshot("eu-west").await.unwrap();
+    let snap = svc.snapshot("eu-west").await.unwrap().unwrap();
     snap.deployments
         .into_iter()
         .find(|d| d.reservation == id)

@@ -163,11 +163,29 @@ stateDiagram-v2
 
 ## 5. Storage
 
-`Store` and `CapacityPlanner` are traits. The in-memory implementations back tests and
-local runs. The CockroachDB schema is in
-`crates/pt-control-plane/migrations/0001_provisioned_throughput.sql`. It has a partial
-unique index for live names, a lifecycle index on `(state, term_end)`, an append-only
-events table, and idempotency keys that expire after 7 days.
+`Store` and `CapacityPlanner` are traits ([ADR-017](adr/ADR-017-sql-control-plane-store.md)).
+
+- **`SqlStore`** (`sql.rs`) is the durable store. It uses the Postgres protocol:
+  CockroachDB in production, PostgreSQL for development. Configure it with `[store] url`
+  or `PT_DATABASE_URL`. Pending migrations from `migrations/` are applied at startup.
+- **`MemoryStore`** backs tests and runs without `[store]`. Its state is lost on restart.
+
+The schema (`0001_initial.sql`) is in the SQL both databases share:
+
+| Table | Holds |
+|-------|-------|
+| `provisioned_throughput` | One row per reservation. Nested values (regions, headroom, shape, policy, price) are JSONB. `version` is the ETag |
+| `deployments` | Ordered deployments per reservation. Ordinal 0 is the primary |
+| `api_keys` | SHA-256 hashes, never keys. At most one current key per deployment |
+| `provisioned_throughput_events` | The append-only audit and billing trail |
+| `idempotency_keys` | Keys older than 7 days are ignored and reusable |
+| `region_incidents` | At most one open incident per region |
+
+Partial unique indexes enforce live-name uniqueness and one open incident per region, even
+under races the service can't see. An update is one transaction guarded by
+`WHERE version = expected`. Reads are fallible: a store failure is 503 `store_unavailable`,
+never an empty result. The snapshot endpoint returns 503, so gateways keep their last
+snapshot. At startup, the planner's reserved capacity is rebuilt from live reservations.
 
 ## 6. Entitlement snapshots
 
@@ -228,8 +246,10 @@ Internal endpoints for regions and operators:
 
 ## 7. Not yet built
 
-- SQL store (CockroachDB) and a remote Capacity Planner client. The in-memory planner
-  counts CUs per region and model, regardless of tier.
+- A remote Capacity Planner client. The in-memory planner counts CUs per region and
+  model, regardless of tier, and is rebuilt from the store at startup. It's per-process,
+  so run one control-plane instance until planning moves into the database.
+- TLS to the database.
 - Rotating the snapshot signing key. Gateways trust one public key, so rotation needs
   support for more than one key.
 - Invoicing. Events record amounts, but nothing turns them into invoices yet.

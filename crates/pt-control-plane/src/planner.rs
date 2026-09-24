@@ -54,6 +54,11 @@ pub trait CapacityPlanner: Send + Sync + 'static {
 
     /// Unreserved CUs of `model` in `region`, or `None` if it isn't offered there.
     fn available_cus(&self, region: &str, model: &str) -> impl Future<Output = Option<u32>> + Send;
+
+    /// Re-establish capacity already sold (at startup, from the store). Never fails: if
+    /// configured capacity has shrunk below what's sold, the pool is overcommitted and
+    /// reports no availability, and new sales fail until it's fixed.
+    fn restore(&self, model: &str, shares: &[RegionShare]) -> impl Future<Output = ()> + Send;
 }
 
 #[derive(Debug)]
@@ -93,7 +98,7 @@ impl MemoryPlanner {
         let pools = self.pools.lock().unwrap_or_else(|e| e.into_inner());
         pools
             .get(&(region.to_string(), model.to_string()))
-            .map(|p| p.capacity - p.reserved)
+            .map(|p| p.capacity.saturating_sub(p.reserved))
     }
 
     fn check(
@@ -118,7 +123,7 @@ impl MemoryPlanner {
                     needed: shape.context_ceiling,
                 });
             }
-            let available = pool.capacity - pool.reserved;
+            let available = pool.capacity.saturating_sub(pool.reserved);
             if count_capacity && s.cus > available {
                 return Err(PlanError::CapacityUnavailable {
                     region: s.region.clone(),
@@ -170,5 +175,22 @@ impl CapacityPlanner for MemoryPlanner {
 
     async fn available_cus(&self, region: &str, model: &str) -> Option<u32> {
         self.available(region, model)
+    }
+
+    async fn restore(&self, model: &str, shares: &[RegionShare]) {
+        let mut pools = self.pools.lock().unwrap_or_else(|e| e.into_inner());
+        for s in shares {
+            match pools.get_mut(&(s.region.clone(), model.to_string())) {
+                Some(p) => {
+                    p.reserved += s.cus;
+                    if p.reserved > p.capacity {
+                        tracing::error!(region = %s.region, %model, reserved = p.reserved, capacity = p.capacity, "sold capacity exceeds configured capacity");
+                    }
+                }
+                None => {
+                    tracing::error!(region = %s.region, %model, "sold capacity in a pool that's no longer configured")
+                }
+            }
+        }
     }
 }

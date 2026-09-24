@@ -106,6 +106,25 @@ pub enum ServiceError {
     Conflict { code: &'static str, message: String },
     #[error("If-Match version {expected} doesn't match current version {current}")]
     PreconditionFailed { expected: u64, current: u64 },
+    /// The store is unreachable. Nothing was changed; retry.
+    #[error("{0}")]
+    Unavailable(String),
+}
+
+impl From<StoreError> for ServiceError {
+    fn from(e: StoreError) -> Self {
+        match e {
+            StoreError::NotFound(_) => ServiceError::NotFound,
+            StoreError::VersionConflict(_) => conflict(
+                "concurrent_modification",
+                "The reservation changed while this request ran. Fetch it and retry.",
+            ),
+            StoreError::AlreadyExists(what) => {
+                conflict("already_exists", format!("{what} already exists."))
+            }
+            StoreError::Unavailable(m) => ServiceError::Unavailable(m),
+        }
+    }
 }
 
 fn conflict(code: &'static str, message: impl Into<String>) -> ServiceError {
@@ -188,6 +207,19 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         &self.signer
     }
 
+    /// Rebuild the planner's reserved capacity from live reservations. Run once at startup,
+    /// before serving. Returns how many reservations were restored.
+    pub async fn restore_capacity(&self) -> Result<usize, StoreError> {
+        let live = self.store.list_live().await?;
+        for pt in &live {
+            self.planner.restore(&pt.model, &held(pt)).await;
+        }
+        if !live.is_empty() {
+            tracing::info!(reservations = live.len(), "restored reserved capacity");
+        }
+        Ok(live.len())
+    }
+
     /// Current entitlement version.
     pub fn entitlement_version(&self) -> u64 {
         *self.changes.borrow()
@@ -204,10 +236,11 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
     }
 
     /// Entitlements for `region`: every reservation serving there (active or pending
-    /// cancellation), with the region's CU share. `None` for an unknown region.
-    pub async fn snapshot(&self, region: &str) -> Option<Snapshot> {
+    /// cancellation), with the region's CU share. `Ok(None)` for an unknown region. A store
+    /// failure is an error, never an empty snapshot: gateways keep what they have.
+    pub async fn snapshot(&self, region: &str) -> Result<Option<Snapshot>, ServiceError> {
         if !self.config.regions.iter().any(|r| r.name == region) {
-            return None;
+            return Ok(None);
         }
         // Read the version before the data. A change in between is labelled with the older
         // version, so the gateway fetches again and never misses it.
@@ -215,11 +248,12 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         let mut live: Vec<_> = self
             .store
             .list_live()
-            .await
+            .await?
             .into_iter()
             .filter(|pt| matches!(pt.state, State::Active | State::PendingCancellation))
             .collect();
         live.sort_by(|a, b| a.id.cmp(&b.id));
+        let failovers = self.failovers(self.clock.now()).await?;
 
         let now = self.clock.now();
         let mut reservations = Vec::new();
@@ -266,14 +300,14 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                 });
             }
         }
-        Some(Snapshot {
+        Ok(Some(Snapshot {
             region: region.to_string(),
             version,
             generated_at: now.to_string(),
             reservations,
             deployments,
-            failovers: self.failovers(now).await,
-        })
+            failovers,
+        }))
     }
 
     /// Dormant failover entitlements that `region` holds for a Multi-region reservation.
@@ -304,13 +338,13 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
 
     /// Region failures that activate failover entitlements now: open incidents, and
     /// resolved ones still in their return ramp.
-    async fn failovers(&self, now: Timestamp) -> Vec<RegionFailover> {
+    async fn failovers(&self, now: Timestamp) -> Result<Vec<RegionFailover>, StoreError> {
         let ramp = self.return_ramp();
         let ms = |t: Timestamp| t.as_millisecond().max(0) as u64;
         let mut out: Vec<_> = self
             .store
             .list_incidents()
-            .await
+            .await?
             .into_iter()
             .filter(|i| i.ended_at.is_none_or(|e| e + ramp > now))
             .map(|i| RegionFailover {
@@ -322,7 +356,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
             })
             .collect();
         out.sort_by(|a, b| a.incident.cmp(&b.incident));
-        out
+        Ok(out)
     }
 
     pub async fn create(
@@ -333,7 +367,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
     ) -> Result<CreateOutcome, ServiceError> {
         let fingerprint = sha256_hex(&serde_json::to_vec(&req).expect("request serialises"));
         if let Some(key) = idempotency_key {
-            if let Some(rec) = self.store.idempotency_get(tenant, key).await {
+            if let Some(rec) = self.store.idempotency_get(tenant, key).await? {
                 if rec.fingerprint != fingerprint {
                     return Err(conflict(
                         "idempotency_key_reused",
@@ -343,7 +377,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                 let resource = self
                     .store
                     .get(tenant, &rec.resource_id)
-                    .await
+                    .await?
                     .ok_or(ServiceError::NotFound)?;
                 return Ok(CreateOutcome {
                     resource,
@@ -436,7 +470,14 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
 
         if let Err(e) = self.store.insert(pt.clone()).await {
             self.planner.release(&pt.model, &held(&pt)).await;
-            return Err(conflict("already_exists", e.to_string()));
+            return Err(match e {
+                // A concurrent create took the name (the store's live-name index).
+                StoreError::AlreadyExists(_) => conflict(
+                    "name_taken",
+                    format!("You already have a reservation named {}.", pt.name),
+                ),
+                other => other.into(),
+            });
         }
         if let Some(key) = idempotency_key {
             let rec = IdempotencyRecord {
@@ -459,7 +500,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
     pub async fn get(&self, tenant: &str, id: &str) -> Result<ProvisionedThroughput, ServiceError> {
         self.store
             .get(tenant, id)
-            .await
+            .await?
             .ok_or(ServiceError::NotFound)
     }
 
@@ -468,14 +509,15 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         tenant: &str,
         model: Option<&str>,
         include_inactive: bool,
-    ) -> Vec<ProvisionedThroughput> {
-        self.store
+    ) -> Result<Vec<ProvisionedThroughput>, ServiceError> {
+        Ok(self
+            .store
             .list(tenant)
-            .await
+            .await?
             .into_iter()
             .filter(|pt| include_inactive || pt.state.is_live())
             .filter(|pt| model.is_none_or(|m| pt.model == m))
-            .collect()
+            .collect())
     }
 
     pub async fn update(
@@ -538,14 +580,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
             }
             Err(e) => {
                 self.undo(&pt.model, &pt.shape, ops).await;
-                Err(match e {
-                    StoreError::VersionConflict(_) => conflict(
-                        "concurrent_modification",
-                        "The reservation changed while this update ran. Fetch it and retry.",
-                    ),
-                    StoreError::NotFound(_) => ServiceError::NotFound,
-                    other => conflict("store_error", other.to_string()),
-                })
+                Err(e.into())
             }
         }
     }
@@ -746,12 +781,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         };
         pt.version += 1;
         pt.updated_at = now;
-        self.store.update(pt.clone(), expected).await.map_err(|_| {
-            conflict(
-                "concurrent_modification",
-                "The reservation changed while this request ran. Retry.",
-            )
-        })?;
+        self.store.update(pt.clone(), expected).await?;
         if effect == DeleteEffect::CancelledNow {
             self.planner.release(&pt.model, &held(&pt)).await;
         }
@@ -768,12 +798,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
     ) -> Result<ProvisionedThroughput, ServiceError> {
         pt.version += 1;
         pt.updated_at = self.clock.now();
-        self.store.update(pt.clone(), expected).await.map_err(|_| {
-            conflict(
-                "concurrent_modification",
-                "The reservation changed while this request ran. Retry.",
-            )
-        })?;
+        self.store.update(pt.clone(), expected).await?;
         self.bump();
         Ok(pt)
     }
@@ -1099,7 +1124,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         description: String,
         source: IncidentSource,
     ) -> Result<RegionIncident, ServiceError> {
-        let open = self.store.list_incidents().await;
+        let open = self.store.list_incidents().await?;
         if let Some(o) = open
             .iter()
             .find(|i| i.region == region && i.ended_at.is_none())
@@ -1124,7 +1149,14 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         self.store
             .insert_incident(incident.clone())
             .await
-            .map_err(|e| conflict("already_exists", e.to_string()))?;
+            .map_err(|e| match e {
+                // Another declaration for the region won (one open incident per region).
+                StoreError::AlreadyExists(_) => conflict(
+                    "incident_open",
+                    format!("An incident is already open for {}.", incident.region),
+                ),
+                other => other.into(),
+            })?;
         // Snapshots carry open incidents, which activate failover entitlements.
         self.bump();
         tracing::warn!(id = %incident.id, region = %incident.region, ?source, "region incident declared");
@@ -1140,7 +1172,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         let mut incident = self
             .store
             .list_incidents()
-            .await
+            .await?
             .into_iter()
             .find(|i| i.id == id)
             .ok_or(ServiceError::NotFound)?;
@@ -1158,17 +1190,14 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
             });
         }
         incident.ended_at = Some(ended_at);
-        self.store
-            .update_incident(incident.clone())
-            .await
-            .map_err(|_| ServiceError::NotFound)?;
+        self.store.update_incident(incident.clone()).await?;
         self.bump();
         tracing::info!(id = %incident.id, region = %incident.region, "region incident resolved");
         Ok(incident)
     }
 
-    pub async fn incidents(&self) -> Vec<RegionIncident> {
-        self.store.list_incidents().await
+    pub async fn incidents(&self) -> Result<Vec<RegionIncident>, ServiceError> {
+        Ok(self.store.list_incidents().await?)
     }
 
     /// Record a gateway heartbeat for `region`.
@@ -1202,7 +1231,13 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         let statuses = self.region_statuses();
         let any_serving = statuses.iter().any(|s| s.health == Health::Serving);
         let recovery = SignedDuration::from_secs(self.config.failover.recovery_seconds as i64);
-        let incidents = self.store.list_incidents().await;
+        let incidents = match self.store.list_incidents().await {
+            Ok(i) => i,
+            Err(e) => {
+                tracing::warn!(error = %e, "failover check skipped");
+                return report;
+            }
+        };
         for s in &statuses {
             let open = incidents
                 .iter()
@@ -1260,10 +1295,10 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
     }
 
     /// DNS steering for every region and live reservation (docs/07 §3).
-    pub async fn steering(&self) -> Steering {
+    pub async fn steering(&self) -> Result<Steering, ServiceError> {
         let now = self.clock.now();
         let ramp = self.return_ramp();
-        let incidents = self.store.list_incidents().await;
+        let incidents = self.store.list_incidents().await?;
         let weights: std::collections::HashMap<String, (f64, Option<String>)> = self
             .config
             .regions
@@ -1292,7 +1327,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         let mut live: Vec<_> = self
             .store
             .list_live()
-            .await
+            .await?
             .into_iter()
             .filter(|pt| matches!(pt.state, State::Active | State::PendingCancellation))
             .collect();
@@ -1305,17 +1340,24 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                 targets: failover::reservation_targets(&self.config, pt, weight_of),
             })
             .collect();
-        Steering {
+        Ok(Steering {
             generated_at: now,
             regions,
             reservations,
-        }
+        })
     }
 
     /// Activate, renew, and end reservations that are due. Run periodically.
     pub async fn run_lifecycle(&self) -> LifecycleReport {
         let mut report = LifecycleReport::default();
-        for mut pt in self.store.list_live().await {
+        let live = match self.store.list_live().await {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!(error = %e, "lifecycle run skipped");
+                return report;
+            }
+        };
+        for mut pt in live {
             let now = self.clock.now();
             let expected = pt.version;
             let mut ops = Vec::new();
@@ -1359,8 +1401,11 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
             pt.version += 1;
             pt.updated_at = now;
             let (model, shape) = (pt.model.clone(), pt.shape);
-            if self.store.update(pt, expected).await.is_err() {
-                // A customer update won the race. Undo and pick it up on the next run.
+            if let Err(e) = self.store.update(pt, expected).await {
+                // Usually a customer update won the race. Undo and retry on the next run.
+                if matches!(e, StoreError::Unavailable(_)) {
+                    tracing::warn!(error = %e, "lifecycle update failed");
+                }
                 self.undo(&model, &shape, ops).await;
                 report.conflicts += 1;
             } else {
@@ -1444,7 +1489,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         let taken = self
             .store
             .list(tenant)
-            .await
+            .await?
             .iter()
             .any(|pt| pt.state.is_live() && pt.name == name && Some(pt.id.as_str()) != except);
         if taken {

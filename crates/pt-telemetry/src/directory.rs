@@ -46,6 +46,11 @@ impl ExclusionWindow {
     }
 }
 
+/// The directory couldn't answer (for example, its store is down). Retryable.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("directory unavailable: {0}")]
+pub struct DirectoryError(pub String);
+
 pub trait Directory: Send + Sync + 'static {
     /// Tenant owning a management API key.
     fn tenant_for_key(&self, key: &str) -> Option<String>;
@@ -58,7 +63,7 @@ pub trait Directory: Send + Sync + 'static {
         &self,
         tenant: &str,
         id: &str,
-    ) -> impl Future<Output = Option<ReservationInfo>> + Send;
+    ) -> impl Future<Output = Result<Option<ReservationInfo>, DirectoryError>> + Send;
 
     /// Current time, Unix milliseconds.
     fn now_ms(&self) -> u64;
