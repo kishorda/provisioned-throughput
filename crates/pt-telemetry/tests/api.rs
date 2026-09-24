@@ -195,6 +195,28 @@ async fn usage_report() {
 }
 
 #[tokio::test]
+async fn usage_can_be_filtered_by_deployment() {
+    let base = spawn().await;
+    let mut recs: Vec<_> = (0..3).map(|i| record(NOW_MS - 5_000 + i, None)).collect();
+    let mut staging = record(NOW_MS - 1_000, None);
+    staging.deployment = "dep-staging".into();
+    recs.push(staging);
+    ingest(&base, "region-eu-west", &recs).await;
+
+    let (_, all) = get(&base, "sk-acme", "/v1/provisioned-throughput/pt-1/usage").await;
+    assert_eq!(all["summary"]["requests"]["provisioned"], 4);
+    assert!(all.get("deployment").is_none());
+    let (_, one) = get(
+        &base,
+        "sk-acme",
+        "/v1/provisioned-throughput/pt-1/usage?deployment=dep-staging",
+    )
+    .await;
+    assert_eq!(one["summary"]["requests"]["provisioned"], 1);
+    assert_eq!(one["deployment"], "dep-staging");
+}
+
+#[tokio::test]
 async fn sla_report_uses_the_published_rules() {
     let base = spawn().await;
     // 200 fast requests in one window, then 100 slow ones in the next: 50% attainment.

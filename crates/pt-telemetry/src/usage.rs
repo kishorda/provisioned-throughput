@@ -154,6 +154,10 @@ pub struct ShapeReport {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct UsageReport {
     pub reservation: String,
+    /// Set when the report is filtered to one deployment. Utilisation is still measured
+    /// against the whole reservation's entitlement.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployment: Option<String>,
     pub from: String,
     pub to: String,
     pub granularity: &'static str,
@@ -199,6 +203,7 @@ pub fn report(
     let advice = advice(info, &summary, &shape);
     UsageReport {
         reservation: info.id.clone(),
+        deployment: None,
         from: rfc3339(from_ms),
         to: rfc3339(to_ms),
         granularity: granularity.as_str(),

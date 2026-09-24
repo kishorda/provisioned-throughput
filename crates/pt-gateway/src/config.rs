@@ -163,6 +163,9 @@ pub struct DeploymentConfig {
     pub api_key: String,
     #[serde(default)]
     pub boundary_policy: BoundaryPolicy,
+    /// Cap on this deployment's share of the reservation's entitlement, in (0, 1].
+    #[serde(default)]
+    pub max_share: Option<f64>,
 }
 
 #[derive(Debug, thiserror::Error)]

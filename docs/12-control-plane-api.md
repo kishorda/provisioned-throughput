@@ -25,6 +25,9 @@ separate from the inference keys that the gateway accepts.
 | `GET` | `/v1/provisioned-throughput/{id}` | 200 | Returns an `ETag` |
 | `PATCH` | `/v1/provisioned-throughput/{id}` | 200 | Supports `If-Match`. Only the fields sent change |
 | `DELETE` | `/v1/provisioned-throughput/{id}` | 202 mid-term, or 200 | Supports `If-Match` |
+| `GET`, `POST` | `/v1/provisioned-throughput/{id}/deployments` | 200, 201 | List, or add a deployment `{"name", "max_share"?}`. Returns its key once |
+| `GET`, `PATCH`, `DELETE` | `/v1/provisioned-throughput/{id}/deployments/{deployment}` | 200 | `PATCH {"name"?, "max_share"?}`; `"max_share": null` removes the cap |
+| `GET`, `POST`, `DELETE` | `/v1/provisioned-throughput/{id}/deployments/{deployment}/keys`, `…/keys/rotate`, `…/keys/{key_id}` | 200 | The key endpoints below, for one deployment |
 | `POST` | `/v1/provisioned-throughput/{id}/keys/rotate` | 200 | Returns a new inference key once. Body `{"grace_minutes"}` is optional. Supports `If-Match` |
 | `GET` | `/v1/provisioned-throughput/{id}/keys` | 200 | Key metadata: id, prefix, created, expires. Never secrets or hashes |
 | `DELETE` | `/v1/provisioned-throughput/{id}/keys/{key_id}` | 200 | Revoke a rotated-out key now. Supports `If-Match` |
@@ -90,6 +93,21 @@ Errors use the same shape as the gateway:
 
 Before the term starts, every change applies immediately. A request that mixes an increase
 with a region change is scheduled as a whole. Send the increase on its own to apply it now.
+
+**Deployments**
+- A reservation has 1–10 deployments, for example `prod` and `staging`. The first, named
+  `default`, is created with the reservation and is the *primary*. The reservation-level
+  key endpoints act on it.
+- All deployments draw from the reservation's one entitlement and share its boundary
+  policy and burst credit. Each has its own keys and name, unique within the reservation.
+- `max_share` (0 < share ≤ 1) caps a deployment at that fraction of the reservation's
+  entitlement at each gateway, so a noisy deployment can't starve the others. Requests
+  over the cap get 429 `deployment_cap_exhausted`, whatever the boundary policy; the cap
+  isn't extended by burst or spillover. A request the cap admits but the shared bucket
+  rejects is refunded to the cap.
+- Deleting a deployment revokes its keys with the next snapshot. The last deployment
+  can't be deleted (409 `last_deployment`); delete the reservation instead.
+- Usage reports can be filtered with `?deployment=`. The SLA stays per reservation.
 
 **Inference keys**
 - Every reservation has exactly one current key, shown once at creation or rotation. Only
@@ -197,7 +215,6 @@ sequenceDiagram
   counts CUs per region and model, regardless of tier.
 - Rotating the snapshot signing key. Gateways trust one public key, so rotation needs
   support for more than one key.
-- More than one deployment per reservation.
 - Invoicing. Events record amounts, but nothing turns them into invoices yet.
 
 ## Blog problems addressed

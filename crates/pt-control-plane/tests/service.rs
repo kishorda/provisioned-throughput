@@ -55,10 +55,10 @@ async fn create_reserves_capacity_and_starts_the_term() {
 
     let key = out.api_key.unwrap();
     assert!(key.starts_with("ptk_"));
-    assert_eq!(pt.api_keys.len(), 1);
-    assert_eq!(pt.api_keys[0].sha256, sha256_hex(key.as_bytes()));
-    assert!(pt.api_keys[0].is_current());
-    assert!(key.starts_with(&pt.api_keys[0].prefix));
+    assert_eq!(pt.primary().api_keys.len(), 1);
+    assert_eq!(pt.primary().api_keys[0].sha256, sha256_hex(key.as_bytes()));
+    assert!(pt.primary().api_keys[0].is_current());
+    assert!(key.starts_with(&pt.primary().api_keys[0].prefix));
 }
 
 #[tokio::test]

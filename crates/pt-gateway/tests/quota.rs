@@ -102,6 +102,7 @@ fn config(engine: &str, coordinator: &str, gateway_id: &str) -> GatewayConfig {
             reservation: "res-1".into(),
             api_key: KEY.into(),
             boundary_policy: Default::default(),
+            max_share: None,
         }],
     }
 }

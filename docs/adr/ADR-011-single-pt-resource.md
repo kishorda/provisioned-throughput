@@ -21,7 +21,7 @@ Commercial rules apply at the resource level:
 ## Consequences
 - ✅ One call gets a customer from nothing to a working endpoint.
 - ✅ The commitment model is enforced in one place.
-- ⚠️ Several endpoints sharing one reservation (for example, prod and staging keys) needs
-  a later API addition.
+- ✅ Several deployments can share one reservation (for example, prod and staging keys),
+  each with an optional cap (docs/12 §3). The single create call still gives one endpoint.
 - ✅ The inference key is shown once. Customers rotate keys with a grace period, or revoke
   them (docs/12 §3).

@@ -20,9 +20,9 @@ use tokio::sync::watch;
 use crate::clock::Clock;
 use crate::config::ControlPlaneConfig;
 use crate::model::{
-    total_cus, ApiKey, CreateRequest, DeclareIncident, Endpoint, Event, EventKind, PendingChanges,
-    ProvisionedThroughput, RegionIncident, RegionShare, ResolveIncident, RotateKeyRequest, State,
-    UpdateRequest,
+    total_cus, ApiKey, CreateDeploymentRequest, CreateRequest, DeclareIncident, Deployment,
+    Endpoint, Event, EventKind, PendingChanges, ProvisionedThroughput, RegionIncident, RegionShare,
+    ResolveIncident, RotateKeyRequest, State, UpdateDeploymentRequest, UpdateRequest,
 };
 use crate::planner::{CapacityPlanner, PlanError};
 use crate::pricing;
@@ -55,16 +55,40 @@ fn issue_key(now: Timestamp) -> (String, ApiKey) {
     (secret, key)
 }
 
-/// Remove keys whose grace period has ended. Returns the ids removed.
-fn prune_expired_keys(pt: &mut ProvisionedThroughput, now: Timestamp) -> Vec<String> {
-    let expired: Vec<String> = pt
-        .api_keys
-        .iter()
-        .filter(|k| k.expires_at.is_some_and(|e| e <= now))
-        .map(|k| k.id.clone())
-        .collect();
-    pt.api_keys.retain(|k| !expired.contains(&k.id));
-    expired
+/// Remove keys whose grace period has ended, recording a `KeyExpired` event for each.
+/// Returns whether anything was removed.
+fn prune_expired_keys(pt: &mut ProvisionedThroughput, now: Timestamp) -> bool {
+    let mut expired = Vec::new();
+    for d in &mut pt.deployments {
+        d.api_keys.retain(|k| {
+            let live = k.expires_at.is_none_or(|e| e > now);
+            if !live {
+                expired.push((d.id.clone(), k.id.clone()));
+            }
+            live
+        });
+    }
+    let any = !expired.is_empty();
+    for (deployment, key) in expired {
+        pt.events.push(Event {
+            at: now,
+            kind: EventKind::KeyExpired { deployment, key },
+        });
+    }
+    any
+}
+
+/// Deployments per reservation.
+const MAX_DEPLOYMENTS: usize = 10;
+
+fn validate_max_share(share: Option<f64>) -> Result<(), ServiceError> {
+    match share {
+        Some(s) if !(s > 0.0 && s <= 1.0) => Err(ServiceError::Validation {
+            field: "max_share".into(),
+            message: "max_share must be greater than 0 and at most 1.".into(),
+        }),
+        _ => Ok(()),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -203,28 +227,30 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                 profile: capacity.profile.clone(),
                 shape: pt.shape,
             });
-            deployments.push(DeploymentEntitlement {
-                id: pt.deployment_id.clone(),
-                reservation: pt.id.clone(),
-                api_key_sha256: pt
-                    .api_keys
-                    .iter()
-                    .find(|k| k.is_current())
-                    .map(|k| k.sha256.clone())
-                    .unwrap_or_default(),
-                previous_keys: pt
-                    .api_keys
-                    .iter()
-                    .filter_map(|k| {
-                        let expires = k.expires_at.filter(|e| *e > self.clock.now())?;
-                        Some(PreviousKey {
-                            api_key_sha256: k.sha256.clone(),
-                            expires_at_ms: expires.as_millisecond().max(0) as u64,
+            let now = self.clock.now();
+            for d in &pt.deployments {
+                let Some(current) = d.current_key() else {
+                    continue;
+                };
+                deployments.push(DeploymentEntitlement {
+                    id: d.id.clone(),
+                    reservation: pt.id.clone(),
+                    api_key_sha256: current.sha256.clone(),
+                    previous_keys: d
+                        .api_keys
+                        .iter()
+                        .filter_map(|k| {
+                            let expires = k.expires_at.filter(|e| *e > now)?;
+                            Some(PreviousKey {
+                                api_key_sha256: k.sha256.clone(),
+                                expires_at_ms: expires.as_millisecond().max(0) as u64,
+                            })
                         })
-                    })
-                    .collect(),
-                boundary_policy: pt.boundary_policy.clone(),
-            });
+                        .collect(),
+                    max_share: d.max_share,
+                    boundary_policy: pt.boundary_policy.clone(),
+                });
+            }
         }
         Some(Snapshot {
             region: region.to_string(),
@@ -328,9 +354,14 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
             auto_renew: req.auto_renew,
             state,
             pending_changes: None,
-            deployment_id: format!("dep-{}", &suffix[16..]),
             price,
-            api_keys: vec![key_record],
+            deployments: vec![Deployment {
+                id: format!("dep-{}", &suffix[16..]),
+                name: "default".into(),
+                max_share: None,
+                api_keys: vec![key_record],
+                created_at: now,
+            }],
             version: 1,
             created_at: now,
             updated_at: now,
@@ -655,13 +686,198 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         Ok((pt, effect))
     }
 
-    /// Issue a new inference key. The current key keeps working for the grace period (0
-    /// revokes it now). At most two rotated-out keys stay live; older ones are revoked.
-    /// Returns the updated resource and the new secret, which isn't stored.
+    /// Save `pt` if it's still at `expected`, then publish the change to gateways.
+    async fn persist(
+        &self,
+        mut pt: ProvisionedThroughput,
+        expected: u64,
+    ) -> Result<ProvisionedThroughput, ServiceError> {
+        pt.version += 1;
+        pt.updated_at = self.clock.now();
+        self.store.update(pt.clone(), expected).await.map_err(|_| {
+            conflict(
+                "concurrent_modification",
+                "The reservation changed while this request ran. Retry.",
+            )
+        })?;
+        self.bump();
+        Ok(pt)
+    }
+
+    /// Load a live reservation for a change, checking `If-Match`.
+    async fn load_live(
+        &self,
+        tenant: &str,
+        id: &str,
+        if_match: Option<u64>,
+    ) -> Result<ProvisionedThroughput, ServiceError> {
+        let pt = self.get(tenant, id).await?;
+        check_version(&pt, if_match)?;
+        if !pt.state.is_live() {
+            return Err(conflict(
+                "inactive",
+                "This reservation has ended and can't be changed.",
+            ));
+        }
+        Ok(pt)
+    }
+
+    /// Index of a deployment by id, or of the primary deployment when `None`.
+    fn deployment_index(
+        pt: &ProvisionedThroughput,
+        deployment: Option<&str>,
+    ) -> Result<usize, ServiceError> {
+        match deployment {
+            None => Ok(0),
+            Some(d) => pt
+                .deployments
+                .iter()
+                .position(|x| x.id == d)
+                .ok_or(ServiceError::NotFound),
+        }
+    }
+
+    fn ensure_deployment_name_free(
+        pt: &ProvisionedThroughput,
+        name: &str,
+        except: Option<&str>,
+    ) -> Result<(), ServiceError> {
+        validate::name(name)?;
+        if pt
+            .deployments
+            .iter()
+            .any(|d| d.name == name && Some(d.id.as_str()) != except)
+        {
+            return Err(conflict(
+                "name_taken",
+                format!("This reservation already has a deployment named {name}."),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Add a deployment with its own key. Returns the resource, the deployment, and its key.
+    pub async fn create_deployment(
+        &self,
+        tenant: &str,
+        id: &str,
+        if_match: Option<u64>,
+        req: CreateDeploymentRequest,
+    ) -> Result<(ProvisionedThroughput, Deployment, String), ServiceError> {
+        let mut pt = self.load_live(tenant, id, if_match).await?;
+        Self::ensure_deployment_name_free(&pt, &req.name, None)?;
+        validate_max_share(req.max_share)?;
+        if pt.deployments.len() >= MAX_DEPLOYMENTS {
+            return Err(conflict(
+                "too_many_deployments",
+                format!("A reservation can have at most {MAX_DEPLOYMENTS} deployments."),
+            ));
+        }
+        let expected = pt.version;
+        let now = self.clock.now();
+        let (secret, key) = issue_key(now);
+        let deployment = Deployment {
+            id: format!("dep-{}", &uuid::Uuid::new_v4().simple().to_string()[..16]),
+            name: req.name,
+            max_share: req.max_share,
+            api_keys: vec![key],
+            created_at: now,
+        };
+        pt.deployments.push(deployment.clone());
+        pt.events.push(Event {
+            at: now,
+            kind: EventKind::DeploymentCreated {
+                deployment: deployment.id.clone(),
+                name: deployment.name.clone(),
+                max_share: deployment.max_share,
+            },
+        });
+        let pt = self.persist(pt, expected).await?;
+        tracing::info!(id = %pt.id, %tenant, deployment = %deployment.id, "deployment created");
+        Ok((pt, deployment, secret))
+    }
+
+    /// Rename a deployment or change its cap. The cap applies at gateways with the next
+    /// snapshot.
+    pub async fn update_deployment(
+        &self,
+        tenant: &str,
+        id: &str,
+        deployment: &str,
+        if_match: Option<u64>,
+        req: UpdateDeploymentRequest,
+    ) -> Result<ProvisionedThroughput, ServiceError> {
+        let mut pt = self.load_live(tenant, id, if_match).await?;
+        let i = Self::deployment_index(&pt, Some(deployment))?;
+        if let Some(name) = &req.name {
+            Self::ensure_deployment_name_free(&pt, name, Some(deployment))?;
+        }
+        if let Some(share) = req.max_share {
+            validate_max_share(share)?;
+        }
+        let expected = pt.version;
+        let d = &mut pt.deployments[i];
+        let before = (d.name.clone(), d.max_share);
+        if let Some(name) = req.name {
+            d.name = name;
+        }
+        if let Some(share) = req.max_share {
+            d.max_share = share;
+        }
+        if (d.name.clone(), d.max_share) == before {
+            return Ok(pt);
+        }
+        let kind = EventKind::DeploymentUpdated {
+            deployment: d.id.clone(),
+            name: d.name.clone(),
+            max_share: d.max_share,
+        };
+        pt.events.push(Event {
+            at: self.clock.now(),
+            kind,
+        });
+        self.persist(pt, expected).await
+    }
+
+    /// Remove a deployment. Its keys stop working with the next snapshot. The last
+    /// deployment can't be deleted; delete the reservation instead.
+    pub async fn delete_deployment(
+        &self,
+        tenant: &str,
+        id: &str,
+        deployment: &str,
+        if_match: Option<u64>,
+    ) -> Result<ProvisionedThroughput, ServiceError> {
+        let mut pt = self.load_live(tenant, id, if_match).await?;
+        let i = Self::deployment_index(&pt, Some(deployment))?;
+        if pt.deployments.len() == 1 {
+            return Err(conflict(
+                "last_deployment",
+                "A reservation needs at least one deployment. Delete the reservation instead.",
+            ));
+        }
+        let expected = pt.version;
+        let removed = pt.deployments.remove(i);
+        pt.events.push(Event {
+            at: self.clock.now(),
+            kind: EventKind::DeploymentDeleted {
+                deployment: removed.id.clone(),
+            },
+        });
+        let pt = self.persist(pt, expected).await?;
+        tracing::info!(id = %pt.id, %tenant, deployment = %removed.id, "deployment deleted");
+        Ok(pt)
+    }
+
+    /// Issue a new inference key for a deployment (the primary when `None`). The current key
+    /// keeps working for the grace period (0 revokes it now). At most two rotated-out keys
+    /// stay live; older ones are revoked. Returns the resource and the new secret, which
+    /// isn't stored.
     pub async fn rotate_key(
         &self,
         tenant: &str,
         id: &str,
+        deployment: Option<&str>,
         if_match: Option<u64>,
         req: RotateKeyRequest,
     ) -> Result<(ProvisionedThroughput, String), ServiceError> {
@@ -672,44 +888,38 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                 message: format!("grace_minutes can be at most {MAX_KEY_GRACE_MINUTES} (7 days)."),
             });
         }
-        let mut pt = self.get(tenant, id).await?;
-        check_version(&pt, if_match)?;
-        if !pt.state.is_live() {
-            return Err(conflict(
-                "inactive",
-                "This reservation has ended and can't be changed.",
-            ));
-        }
+        let mut pt = self.load_live(tenant, id, if_match).await?;
+        let i = Self::deployment_index(&pt, deployment)?;
         let expected = pt.version;
         let now = self.clock.now();
-        for key in prune_expired_keys(&mut pt, now) {
-            pt.events.push(Event {
-                at: now,
-                kind: EventKind::KeyExpired { key },
-            });
-        }
+        prune_expired_keys(&mut pt, now);
 
         let (secret, new_key) = issue_key(now);
         let previous_expires_at =
             (grace > 0).then(|| now + SignedDuration::from_mins(grace as i64));
-        let current = pt.api_keys.iter_mut().find(|k| k.is_current());
-        let previous_id = current.as_ref().map(|k| k.id.clone()).unwrap_or_default();
-        match (current, previous_expires_at) {
-            (Some(k), Some(at)) => k.expires_at = Some(at),
-            (Some(_), None) => pt.api_keys.retain(|k| k.id != previous_id),
-            (None, _) => {}
+        let d = &mut pt.deployments[i];
+        let deployment_id = d.id.clone();
+        let previous_id = d.current_key().map(|k| k.id.clone()).unwrap_or_default();
+        match previous_expires_at {
+            Some(at) => {
+                if let Some(k) = d.api_keys.iter_mut().find(|k| k.is_current()) {
+                    k.expires_at = Some(at);
+                }
+            }
+            None => d.api_keys.retain(|k| k.id != previous_id),
         }
         // Keep the newest rotated-out keys only.
-        let mut previous: Vec<ApiKey> = pt.api_keys.drain(..).collect();
+        let mut previous: Vec<ApiKey> = d.api_keys.drain(..).collect();
         previous.sort_by_key(|k| std::cmp::Reverse(k.created_at));
         let revoked: Vec<ApiKey> = previous.split_off(MAX_PREVIOUS_KEYS.min(previous.len()));
-        pt.api_keys = previous;
-        pt.api_keys.push(new_key.clone());
-        pt.api_keys.sort_by_key(|k| k.created_at);
+        d.api_keys = previous;
+        d.api_keys.push(new_key.clone());
+        d.api_keys.sort_by_key(|k| k.created_at);
 
         pt.events.push(Event {
             at: now,
             kind: EventKind::KeyRotated {
+                deployment: deployment_id.clone(),
                 new_key: new_key.id.clone(),
                 previous_key: previous_id,
                 previous_expires_at,
@@ -718,19 +928,14 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         for k in revoked {
             pt.events.push(Event {
                 at: now,
-                kind: EventKind::KeyRevoked { key: k.id },
+                kind: EventKind::KeyRevoked {
+                    deployment: deployment_id.clone(),
+                    key: k.id,
+                },
             });
         }
-        pt.version += 1;
-        pt.updated_at = now;
-        self.store.update(pt.clone(), expected).await.map_err(|_| {
-            conflict(
-                "concurrent_modification",
-                "The reservation changed while this request ran. Retry.",
-            )
-        })?;
-        self.bump();
-        tracing::info!(id = %pt.id, %tenant, key = %new_key.id, grace, "inference key rotated");
+        let pt = self.persist(pt, expected).await?;
+        tracing::info!(id = %pt.id, %tenant, deployment = %deployment_id, key = %new_key.id, grace, "inference key rotated");
         Ok((pt, secret))
     }
 
@@ -739,40 +944,40 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         &self,
         tenant: &str,
         id: &str,
+        deployment: Option<&str>,
         key_id: &str,
         if_match: Option<u64>,
     ) -> Result<ProvisionedThroughput, ServiceError> {
         let mut pt = self.get(tenant, id).await?;
         check_version(&pt, if_match)?;
+        let i = Self::deployment_index(&pt, deployment)?;
         let expected = pt.version;
-        let now = self.clock.now();
-        let key = pt.api_keys.iter().find(|k| k.id == key_id).ok_or_else(|| {
-            ServiceError::Validation {
-                field: "key_id".into(),
-                message: format!("No live key {key_id} on this reservation."),
-            }
-        })?;
+        let d = &mut pt.deployments[i];
+        let key =
+            d.api_keys
+                .iter()
+                .find(|k| k.id == key_id)
+                .ok_or_else(|| ServiceError::Validation {
+                    field: "key_id".into(),
+                    message: format!("No live key {key_id} on this deployment."),
+                })?;
         if key.is_current() {
             return Err(conflict(
                 "current_key",
                 "The current key can't be revoked. Rotate with grace_minutes 0 to replace it immediately.",
             ));
         }
-        pt.api_keys.retain(|k| k.id != key_id);
+        d.api_keys.retain(|k| k.id != key_id);
+        let deployment_id = d.id.clone();
         pt.events.push(Event {
-            at: now,
-            kind: EventKind::KeyRevoked { key: key_id.into() },
+            at: self.clock.now(),
+            kind: EventKind::KeyRevoked {
+                deployment: deployment_id.clone(),
+                key: key_id.into(),
+            },
         });
-        pt.version += 1;
-        pt.updated_at = now;
-        self.store.update(pt.clone(), expected).await.map_err(|_| {
-            conflict(
-                "concurrent_modification",
-                "The reservation changed while this request ran. Retry.",
-            )
-        })?;
-        self.bump();
-        tracing::info!(id = %pt.id, %tenant, key = %key_id, "inference key revoked");
+        let pt = self.persist(pt, expected).await?;
+        tracing::info!(id = %pt.id, %tenant, deployment = %deployment_id, key = %key_id, "inference key revoked");
         Ok(pt)
     }
 
@@ -881,11 +1086,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
             let mut ops = Vec::new();
             let mut changed = false;
 
-            for key in prune_expired_keys(&mut pt, now) {
-                pt.events.push(Event {
-                    at: now,
-                    kind: EventKind::KeyExpired { key },
-                });
+            if prune_expired_keys(&mut pt, now) {
                 changed = true;
             }
             if pt.state == State::Scheduled && now >= pt.term_start {

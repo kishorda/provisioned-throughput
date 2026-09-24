@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::{Duration, Instant};
 
-use pt_admission::{LimiterConfig, OutputEstimator, ReservationLimiter};
+use pt_admission::{BoundaryPolicy, LimiterConfig, OutputEstimator, ReservationLimiter};
 use pt_core::{ApproxTokenCounter, PerformanceProfile, Shape, Tier, TokenCounter};
 use pt_entitlement::{sha256_hex, DeploymentEntitlement, ReservationEntitlement, Snapshot};
 use pt_quota::wire::{RenewResponse, ReservationDemand};
@@ -35,6 +35,20 @@ pub struct Deployment {
     pub id: String,
     pub reservation: Arc<Reservation>,
     estimator: Arc<Mutex<OutputEstimator>>,
+    /// Cap on this deployment's share of the reservation's entitlement.
+    pub max_share: Option<f64>,
+    /// With a cap, a limiter at `max_share` × the reservation's local rate, checked before
+    /// the reservation's own bucket. Over the cap is rejected; the reservation's boundary
+    /// policy doesn't apply to it.
+    pub cap: Option<ReservationLimiter>,
+}
+
+impl Deployment {
+    /// The rate the cap should enforce now.
+    fn cap_rate(&self) -> Option<f64> {
+        self.max_share
+            .map(|share| share * self.reservation.limiter.config().entitlement_wu_s)
+    }
 }
 
 impl Deployment {
@@ -94,6 +108,10 @@ impl Entitlements {
 
     pub fn reservations(&self) -> impl Iterator<Item = &Arc<Reservation>> {
         self.reservations.values()
+    }
+
+    pub fn deployments(&self) -> impl Iterator<Item = &Arc<Deployment>> {
+        self.by_deployment.values()
     }
 }
 
@@ -256,6 +274,7 @@ impl AppState {
                     reservation: d.reservation.clone(),
                     api_key_sha256: sha256_hex(d.api_key.as_bytes()),
                     previous_keys: vec![],
+                    max_share: d.max_share,
                     boundary_policy: d.boundary_policy.clone(),
                 })
                 .collect();
@@ -341,6 +360,21 @@ impl AppState {
             if diff > 1e-9 && diff >= 0.01 * current.max(target) {
                 r.limiter
                     .reconfigure(LimiterConfig::new(target), r.limiter.policy(), now);
+            }
+        }
+        self.refresh_caps(now);
+    }
+
+    /// Keep each deployment cap at `max_share` × its reservation's current local rate.
+    fn refresh_caps(&self, now: Instant) {
+        for d in self.entitlements().deployments() {
+            let (Some(cap), Some(target)) = (&d.cap, d.cap_rate()) else {
+                continue;
+            };
+            let current = cap.config().entitlement_wu_s;
+            let diff = (target - current).abs();
+            if diff > 1e-9 && diff >= 0.01 * current.max(target) {
+                cap.reconfigure(LimiterConfig::new(target), BoundaryPolicy::default(), now);
             }
         }
     }
@@ -481,10 +515,26 @@ impl AppState {
                         reservation.shape.output_p95,
                     )))
                 });
+            let previous = prev.by_deployment.get(&d.id);
+            let max_share = d.max_share.filter(|s| *s > 0.0 && *s <= 1.0);
+            let cap = max_share.map(|share| {
+                let config =
+                    LimiterConfig::new(share * reservation.limiter.config().entitlement_wu_s);
+                match previous.and_then(|p| p.cap.clone()) {
+                    // Keep the cap's bucket level across snapshots, as for reservations.
+                    Some(existing) => {
+                        existing.reconfigure(config, BoundaryPolicy::default(), now);
+                        existing
+                    }
+                    None => ReservationLimiter::new(config, BoundaryPolicy::default(), now),
+                }
+            });
             let dep = Arc::new(Deployment {
                 id: d.id.clone(),
                 reservation: Arc::clone(reservation),
                 estimator,
+                max_share,
+                cap,
             });
             view.by_key_hash
                 .insert(d.api_key_sha256.clone(), (Arc::clone(&dep), None));

@@ -449,6 +449,7 @@ async fn gateway_enforces_key_expiry_itself() {
                     expires_at_ms: now_ms + 60_000,
                 },
             ],
+            max_share: None,
             boundary_policy: Default::default(),
         }],
     };
@@ -460,4 +461,66 @@ async fn gateway_enforces_key_expiry_itself() {
         "expired before the next snapshot"
     );
     assert!(app.deployment_for_key("unknown").is_none());
+}
+
+#[tokio::test]
+async fn deployment_cap_protects_the_rest_of_the_reservation() {
+    let (cp, svc, _) = spawn_control_plane().await;
+    let engine = spawn_engine().await;
+    let cache = cache_path("caps");
+    let (gw, _) = spawn_gateway(gateway_config(
+        &cp,
+        &engine,
+        svc.signer().public_key_hex(),
+        &cache,
+    ))
+    .await;
+    let (id, prod) = create_pt(&cp, 1).await; // 1 CU in eu-west: 1,000 WU/s
+
+    let staging: Value = reqwest::Client::new()
+        .post(format!("{cp}/v1/provisioned-throughput/{id}/deployments"))
+        .bearer_auth(ADMIN)
+        .json(&json!({ "name": "staging", "max_share": 0.2 }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let staging_key = staging["api_key"].as_str().unwrap().to_string();
+    eventually("both keys work", || async {
+        status(&gw, &prod).await.0 == 200 && status(&gw, &staging_key).await.0 == 200
+    })
+    .await;
+    let (_, s) = status(&gw, &staging_key).await;
+    assert_eq!(s["deployment_max_share"], 0.2);
+    assert_eq!(s["deployment_cap_wu_per_s"], 200.0);
+    assert_eq!(s["reservation"], id, "same reservation as prod");
+    assert!(status(&gw, &prod).await.1["deployment_cap_wu_per_s"].is_null());
+
+    // About 508 WU each: 500 prompt tokens plus framing, 4 output tokens.
+    let big = |key: &str| {
+        reqwest::Client::new()
+            .post(format!("{gw}/v1/chat/completions"))
+            .bearer_auth(key)
+            .json(&json!({
+                "model": MODEL,
+                "max_tokens": 4,
+                "messages": [{ "role": "user", "content": "x".repeat(2_000) }],
+            }))
+            .send()
+    };
+    assert_eq!(
+        big(&staging_key).await.unwrap().status(),
+        200,
+        "a full cap admits one"
+    );
+    let r = big(&staging_key).await.unwrap();
+    assert_eq!(r.status(), 429);
+    assert_eq!(r.headers()["x-pt-reason"], "deployment_cap_exhausted");
+    assert!(r.headers().contains_key("retry-after"));
+    // Prod draws on the shared bucket, which staging's cap kept mostly free.
+    assert_eq!(big(&prod).await.unwrap().status(), 200);
+
+    let _ = std::fs::remove_file(cache);
 }

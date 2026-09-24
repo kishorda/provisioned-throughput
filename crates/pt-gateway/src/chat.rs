@@ -99,6 +99,7 @@ pub async fn chat_completions(
         app: app.clone(),
         dep: Arc::clone(&dep),
         ticket: None,
+        cap_ticket: None,
         request_id,
         session_id,
         received_at,
@@ -120,6 +121,28 @@ pub async fn chat_completions(
         continuation,
         received_at,
     };
+    // A capped deployment must fit within its share first (docs/12 §3). The cap's ticket is
+    // refunded if the reservation then rejects the request.
+    if let Some(cap) = &dep.cap {
+        let rejected = match cap.admit(&admit, None, Instant::now()) {
+            Decision::Admit(t) => {
+                settlement.cap_ticket = Some(t);
+                None
+            }
+            Decision::Reject { retry_after, .. } => Some(retry_after),
+            // A cap has no queue policy; treat anything else as a rejection.
+            Decision::Queue(_) => Some(Duration::from_secs(1)),
+        };
+        match rejected {
+            None => {}
+            Some(retry_after) => {
+                let reason = RejectReason::DeploymentCapExhausted;
+                settlement.outcome = Outcome::Rejected(reason);
+                settlement.emit(0.0, 0.0, TokenBreakdown::default(), Instant::now());
+                return reject_response(&settlement, reason, retry_after);
+            }
+        }
+    }
     let mut slot = None;
     let ticket = loop {
         match res.limiter.admit(&admit, slot.take(), Instant::now()) {
@@ -295,6 +318,8 @@ struct Settlement {
     app: AppState,
     dep: Arc<Deployment>,
     ticket: Option<AdmitTicket>,
+    /// Admission against the deployment's cap, if it has one.
+    cap_ticket: Option<AdmitTicket>,
     request_id: Uuid,
     session_id: Option<String>,
     received_at: Instant,
@@ -314,6 +339,10 @@ struct Settlement {
 impl Settlement {
     fn finish(&mut self) {
         let Some(ticket) = self.ticket.take() else {
+            // Rejected by the reservation after the cap admitted it: refund the cap.
+            if let (Some(cap), Some(t)) = (&self.dep.cap, self.cap_ticket.take()) {
+                cap.settle(t, 0.0, Instant::now());
+            }
             return;
         };
         let now = Instant::now();
@@ -345,6 +374,9 @@ impl Settlement {
             .profile
             .work_units(&WorkBreakdown::new(uncached, cached, decode, kv));
         res.limiter.settle(ticket, wu_actual, now);
+        if let (Some(cap), Some(t)) = (&self.dep.cap, self.cap_ticket.take()) {
+            cap.settle(t, wu_actual, now);
+        }
         if self.outcome == Outcome::Ok {
             self.dep.estimator().record(decode);
         }

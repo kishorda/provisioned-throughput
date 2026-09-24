@@ -45,14 +45,27 @@ async fn rotation_keeps_the_old_key_for_the_grace_period() {
     let old = created.api_key.unwrap();
     let id = created.resource.id;
 
-    let (pt, new) = svc.rotate_key(ACME, &id, Some(1), grace(30)).await.unwrap();
+    let (pt, new) = svc
+        .rotate_key(ACME, &id, None, Some(1), grace(30))
+        .await
+        .unwrap();
     assert_ne!(new, old);
     assert_eq!(pt.version, 2);
-    assert_eq!(pt.api_keys.len(), 2);
-    let current: Vec<_> = pt.api_keys.iter().filter(|k| k.is_current()).collect();
+    assert_eq!(pt.primary().api_keys.len(), 2);
+    let current: Vec<_> = pt
+        .primary()
+        .api_keys
+        .iter()
+        .filter(|k| k.is_current())
+        .collect();
     assert_eq!(current.len(), 1);
     assert_eq!(current[0].sha256, sha256_hex(new.as_bytes()));
-    let previous = pt.api_keys.iter().find(|k| !k.is_current()).unwrap();
+    let previous = pt
+        .primary()
+        .api_keys
+        .iter()
+        .find(|k| !k.is_current())
+        .unwrap();
     assert_eq!(
         previous.expires_at,
         Some(t0() + SignedDuration::from_mins(30))
@@ -79,7 +92,7 @@ async fn rotation_keeps_the_old_key_for_the_grace_period() {
     clock.advance(SignedDuration::from_mins(31));
     svc.run_lifecycle().await;
     let pt = svc.get(ACME, &id).await.unwrap();
-    assert_eq!(pt.api_keys.len(), 1);
+    assert_eq!(pt.primary().api_keys.len(), 1);
     assert!(pt
         .events
         .iter()
@@ -96,9 +109,12 @@ async fn zero_grace_replaces_the_key_immediately() {
         .unwrap()
         .resource
         .id;
-    let (pt, new) = svc.rotate_key(ACME, &id, None, grace(0)).await.unwrap();
-    assert_eq!(pt.api_keys.len(), 1);
-    assert_eq!(pt.api_keys[0].sha256, sha256_hex(new.as_bytes()));
+    let (pt, new) = svc
+        .rotate_key(ACME, &id, None, None, grace(0))
+        .await
+        .unwrap();
+    assert_eq!(pt.primary().api_keys.len(), 1);
+    assert_eq!(pt.primary().api_keys[0].sha256, sha256_hex(new.as_bytes()));
     assert!(eu_west_deployment(&svc, &id).await.previous_keys.is_empty());
 }
 
@@ -113,23 +129,29 @@ async fn at_most_two_previous_keys_and_revocation() {
         .id;
     for _ in 0..3 {
         clock.advance(SignedDuration::from_mins(1));
-        svc.rotate_key(ACME, &id, None, grace(60)).await.unwrap();
+        svc.rotate_key(ACME, &id, None, None, grace(60))
+            .await
+            .unwrap();
     }
     let pt = svc.get(ACME, &id).await.unwrap();
-    assert_eq!(pt.api_keys.len(), 3, "current + two previous");
+    assert_eq!(pt.primary().api_keys.len(), 3, "current + two previous");
     assert!(pt
         .events
         .iter()
         .any(|e| matches!(e.kind, EventKind::KeyRevoked { .. })));
 
     let current = pt
+        .primary()
         .api_keys
         .iter()
         .find(|k| k.is_current())
         .unwrap()
         .id
         .clone();
-    let err = svc.revoke_key(ACME, &id, &current, None).await.unwrap_err();
+    let err = svc
+        .revoke_key(ACME, &id, None, &current, None)
+        .await
+        .unwrap_err();
     assert!(matches!(
         err,
         ServiceError::Conflict {
@@ -139,16 +161,20 @@ async fn at_most_two_previous_keys_and_revocation() {
     ));
 
     let previous = pt
+        .primary()
         .api_keys
         .iter()
         .find(|k| !k.is_current())
         .unwrap()
         .id
         .clone();
-    let pt = svc.revoke_key(ACME, &id, &previous, None).await.unwrap();
-    assert_eq!(pt.api_keys.len(), 2);
+    let pt = svc
+        .revoke_key(ACME, &id, None, &previous, None)
+        .await
+        .unwrap();
+    assert_eq!(pt.primary().api_keys.len(), 2);
     let err = svc
-        .revoke_key(ACME, &id, &previous, None)
+        .revoke_key(ACME, &id, None, &previous, None)
         .await
         .unwrap_err();
     assert!(
@@ -167,17 +193,17 @@ async fn rotation_rules() {
         .resource
         .id;
     let err = svc
-        .rotate_key(ACME, &id, None, grace(10_081))
+        .rotate_key(ACME, &id, None, None, grace(10_081))
         .await
         .unwrap_err();
     assert!(matches!(err, ServiceError::Validation { .. }));
     let err = svc
-        .rotate_key(ACME, &id, Some(9), grace(1))
+        .rotate_key(ACME, &id, None, Some(9), grace(1))
         .await
         .unwrap_err();
     assert!(matches!(err, ServiceError::PreconditionFailed { .. }));
     assert_eq!(
-        svc.rotate_key(GLOBEX, &id, None, grace(1))
+        svc.rotate_key(GLOBEX, &id, None, None, grace(1))
             .await
             .unwrap_err(),
         ServiceError::NotFound
@@ -187,7 +213,10 @@ async fn rotation_rules() {
     svc.delete(ACME, &id, None).await.unwrap();
     clock.set(svc.get(ACME, &id).await.unwrap().term_end);
     svc.run_lifecycle().await;
-    let err = svc.rotate_key(ACME, &id, None, grace(1)).await.unwrap_err();
+    let err = svc
+        .rotate_key(ACME, &id, None, None, grace(1))
+        .await
+        .unwrap_err();
     assert!(matches!(
         err,
         ServiceError::Conflict {

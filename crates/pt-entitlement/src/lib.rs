@@ -54,6 +54,9 @@ pub struct DeploymentEntitlement {
     /// Keys replaced by a rotation that are still in their grace period.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub previous_keys: Vec<PreviousKey>,
+    /// Cap on this deployment's share of the reservation's entitlement, in (0, 1].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_share: Option<f64>,
     pub boundary_policy: BoundaryPolicy,
 }
 
@@ -192,6 +195,7 @@ mod tests {
                     api_key_sha256: sha256_hex(b"ptk_old"),
                     expires_at_ms: 1_800_000_000_000,
                 }],
+                max_share: Some(0.25),
                 boundary_policy: BoundaryPolicy::default(),
             }],
         }

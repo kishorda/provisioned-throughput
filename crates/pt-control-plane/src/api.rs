@@ -25,7 +25,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::clock::Clock;
-use crate::model::ProvisionedThroughput;
+use crate::model::{Deployment, ProvisionedThroughput};
 use crate::planner::{CapacityPlanner, PlanError};
 use crate::service::{DeleteEffect, Service, ServiceError};
 use crate::store::Store;
@@ -49,6 +49,7 @@ pub fn router<S: Store, P: CapacityPlanner, C: Clock>(svc: Svc<S, P, C>) -> Rout
             "/internal/v1/entitlements/{region}",
             get(entitlements::<S, P, C>),
         )
+        // Keys of the primary deployment (kept for clients of the single-deployment API).
         .route(
             "/v1/provisioned-throughput/{id}/keys",
             get(list_keys::<S, P, C>),
@@ -60,6 +61,29 @@ pub fn router<S: Store, P: CapacityPlanner, C: Clock>(svc: Svc<S, P, C>) -> Rout
         .route(
             "/v1/provisioned-throughput/{id}/keys/{key_id}",
             axum::routing::delete(revoke_key::<S, P, C>),
+        )
+        // Deployments.
+        .route(
+            "/v1/provisioned-throughput/{id}/deployments",
+            get(list_deployments::<S, P, C>).post(create_deployment::<S, P, C>),
+        )
+        .route(
+            "/v1/provisioned-throughput/{id}/deployments/{deployment}",
+            get(get_deployment::<S, P, C>)
+                .patch(update_deployment::<S, P, C>)
+                .delete(delete_deployment::<S, P, C>),
+        )
+        .route(
+            "/v1/provisioned-throughput/{id}/deployments/{deployment}/keys",
+            get(list_deployment_keys::<S, P, C>),
+        )
+        .route(
+            "/v1/provisioned-throughput/{id}/deployments/{deployment}/keys/rotate",
+            post(rotate_deployment_key::<S, P, C>),
+        )
+        .route(
+            "/v1/provisioned-throughput/{id}/deployments/{deployment}/keys/{key_id}",
+            axum::routing::delete(revoke_deployment_key::<S, P, C>),
         )
         .route(
             "/internal/v1/incidents",
@@ -269,48 +293,207 @@ async fn create<S: Store, P: CapacityPlanner, C: Clock>(
         .into_response())
 }
 
-/// `GET /v1/provisioned-throughput/{id}/keys`: key metadata, never secrets or hashes.
+fn find_deployment<'a>(
+    pt: &'a ProvisionedThroughput,
+    id: Option<&str>,
+) -> Result<&'a Deployment, ApiError> {
+    match id {
+        None => Ok(pt.primary()),
+        Some(d) => pt.deployments.iter().find(|x| x.id == d).ok_or_else(|| {
+            ApiError::new(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "No deployment with that id.",
+            )
+        }),
+    }
+}
+
+async fn keys_of<S: Store, P: CapacityPlanner, C: Clock>(
+    svc: &Service<S, P, C>,
+    headers: &HeaderMap,
+    id: &str,
+    deployment: Option<&str>,
+) -> Result<Response, ApiError> {
+    let tenant = tenant(svc, headers)?;
+    let pt = svc.get(&tenant, id).await?;
+    let d = find_deployment(&pt, deployment)?;
+    Ok((
+        [etag(&pt)],
+        Json(json!({ "deployment": d.id, "data": d.api_keys })),
+    )
+        .into_response())
+}
+
+async fn rotate<S: Store, P: CapacityPlanner, C: Clock>(
+    svc: &Service<S, P, C>,
+    headers: &HeaderMap,
+    id: &str,
+    deployment: Option<&str>,
+    body: &Bytes,
+) -> Result<Response, ApiError> {
+    let tenant = tenant(svc, headers)?;
+    let req = if body.is_empty() {
+        Default::default()
+    } else {
+        parse(body)?
+    };
+    let (pt, secret) = svc
+        .rotate_key(&tenant, id, deployment, if_match(headers)?, req)
+        .await?;
+    let mut out = serde_json::to_value(&pt).expect("resource serialises");
+    out["api_key"] = json!(secret);
+    Ok(([etag(&pt)], Json(out)).into_response())
+}
+
+async fn revoke<S: Store, P: CapacityPlanner, C: Clock>(
+    svc: &Service<S, P, C>,
+    headers: &HeaderMap,
+    id: &str,
+    deployment: Option<&str>,
+    key_id: &str,
+) -> Result<Response, ApiError> {
+    let tenant = tenant(svc, headers)?;
+    let pt = svc
+        .revoke_key(&tenant, id, deployment, key_id, if_match(headers)?)
+        .await?;
+    Ok(([etag(&pt)], Json(pt)).into_response())
+}
+
+/// `GET /v1/provisioned-throughput/{id}/keys`: the primary deployment's key metadata.
 async fn list_keys<S: Store, P: CapacityPlanner, C: Clock>(
     State(svc): State<Svc<S, P, C>>,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
-    let tenant = tenant(&svc, &headers)?;
-    let pt = svc.get(&tenant, &id).await?;
-    Ok(([etag(&pt)], Json(json!({ "data": pt.api_keys }))).into_response())
+    keys_of(&svc, &headers, &id, None).await
 }
 
-/// `POST /v1/provisioned-throughput/{id}/keys/rotate`: returns the resource and the new
-/// key, once.
+/// `POST /v1/provisioned-throughput/{id}/keys/rotate`: the primary deployment.
 async fn rotate_key<S: Store, P: CapacityPlanner, C: Clock>(
     State(svc): State<Svc<S, P, C>>,
     headers: HeaderMap,
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    let tenant = tenant(&svc, &headers)?;
-    let req = if body.is_empty() {
-        Default::default()
-    } else {
-        parse(&body)?
-    };
-    let (pt, secret) = svc
-        .rotate_key(&tenant, &id, if_match(&headers)?, req)
-        .await?;
-    let mut body = serde_json::to_value(&pt).expect("resource serialises");
-    body["api_key"] = json!(secret);
-    Ok(([etag(&pt)], Json(body)).into_response())
+    rotate(&svc, &headers, &id, None, &body).await
 }
 
-/// `DELETE /v1/provisioned-throughput/{id}/keys/{key_id}`: revoke a rotated-out key now.
+/// `DELETE /v1/provisioned-throughput/{id}/keys/{key_id}`: the primary deployment.
 async fn revoke_key<S: Store, P: CapacityPlanner, C: Clock>(
     State(svc): State<Svc<S, P, C>>,
     headers: HeaderMap,
     Path((id, key_id)): Path<(String, String)>,
 ) -> Result<Response, ApiError> {
+    revoke(&svc, &headers, &id, None, &key_id).await
+}
+
+async fn list_deployment_keys<S: Store, P: CapacityPlanner, C: Clock>(
+    State(svc): State<Svc<S, P, C>>,
+    headers: HeaderMap,
+    Path((id, deployment)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    keys_of(&svc, &headers, &id, Some(&deployment)).await
+}
+
+async fn rotate_deployment_key<S: Store, P: CapacityPlanner, C: Clock>(
+    State(svc): State<Svc<S, P, C>>,
+    headers: HeaderMap,
+    Path((id, deployment)): Path<(String, String)>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    rotate(&svc, &headers, &id, Some(&deployment), &body).await
+}
+
+async fn revoke_deployment_key<S: Store, P: CapacityPlanner, C: Clock>(
+    State(svc): State<Svc<S, P, C>>,
+    headers: HeaderMap,
+    Path((id, deployment, key_id)): Path<(String, String, String)>,
+) -> Result<Response, ApiError> {
+    revoke(&svc, &headers, &id, Some(&deployment), &key_id).await
+}
+
+/// `GET /v1/provisioned-throughput/{id}/deployments`
+async fn list_deployments<S: Store, P: CapacityPlanner, C: Clock>(
+    State(svc): State<Svc<S, P, C>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let tenant = tenant(&svc, &headers)?;
+    let pt = svc.get(&tenant, &id).await?;
+    Ok(([etag(&pt)], Json(json!({ "data": pt.deployments }))).into_response())
+}
+
+/// `POST /v1/provisioned-throughput/{id}/deployments`: returns the deployment and its key,
+/// once.
+async fn create_deployment<S: Store, P: CapacityPlanner, C: Clock>(
+    State(svc): State<Svc<S, P, C>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let tenant = tenant(&svc, &headers)?;
+    let req = parse(&body)?;
+    let (pt, deployment, secret) = svc
+        .create_deployment(&tenant, &id, if_match(&headers)?, req)
+        .await?;
+    let mut out = serde_json::to_value(&deployment).expect("deployment serialises");
+    out["api_key"] = json!(secret);
+    let location = format!(
+        "/v1/provisioned-throughput/{id}/deployments/{}",
+        deployment.id
+    );
+    Ok((
+        StatusCode::CREATED,
+        [
+            etag(&pt),
+            (
+                header::LOCATION,
+                HeaderValue::from_str(&location).expect("valid location"),
+            ),
+        ],
+        Json(out),
+    )
+        .into_response())
+}
+
+/// `GET /v1/provisioned-throughput/{id}/deployments/{deployment}`
+async fn get_deployment<S: Store, P: CapacityPlanner, C: Clock>(
+    State(svc): State<Svc<S, P, C>>,
+    headers: HeaderMap,
+    Path((id, deployment)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let tenant = tenant(&svc, &headers)?;
+    let pt = svc.get(&tenant, &id).await?;
+    let d = find_deployment(&pt, Some(&deployment))?;
+    Ok(([etag(&pt)], Json(d)).into_response())
+}
+
+/// `PATCH /v1/provisioned-throughput/{id}/deployments/{deployment}`
+async fn update_deployment<S: Store, P: CapacityPlanner, C: Clock>(
+    State(svc): State<Svc<S, P, C>>,
+    headers: HeaderMap,
+    Path((id, deployment)): Path<(String, String)>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let tenant = tenant(&svc, &headers)?;
+    let req = parse(&body)?;
+    let pt = svc
+        .update_deployment(&tenant, &id, &deployment, if_match(&headers)?, req)
+        .await?;
+    let d = find_deployment(&pt, Some(&deployment))?;
+    Ok(([etag(&pt)], Json(d)).into_response())
+}
+
+/// `DELETE /v1/provisioned-throughput/{id}/deployments/{deployment}`
+async fn delete_deployment<S: Store, P: CapacityPlanner, C: Clock>(
+    State(svc): State<Svc<S, P, C>>,
+    headers: HeaderMap,
+    Path((id, deployment)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
     let tenant = tenant(&svc, &headers)?;
     let pt = svc
-        .revoke_key(&tenant, &id, &key_id, if_match(&headers)?)
+        .delete_deployment(&tenant, &id, &deployment, if_match(&headers)?)
         .await?;
     Ok(([etag(&pt)], Json(pt)).into_response())
 }

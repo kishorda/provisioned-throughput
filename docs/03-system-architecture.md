@@ -145,11 +145,12 @@ erDiagram
     json shape
     enum sku "regional|multi_region|hw_pinned"
     date term_end
+    json boundary_policy "reject|queue|burst|spillover, shared by its deployments"
   }
   DEPLOYMENT {
     uuid id
-    enum boundary_policy "reject|queue|burst|spillover"
-    json burst_cfg
+    string name
+    float max_share "optional cap on the reservation's entitlement"
   }
   POOL_ALLOCATION {
     uuid pool

@@ -30,6 +30,8 @@ pub enum RejectReason {
     EntitlementExhausted,
     QueueDeadline,
     QueueFull,
+    /// The deployment reached its `max_share` of the reservation's entitlement.
+    DeploymentCapExhausted,
 }
 
 impl RejectReason {
@@ -38,6 +40,7 @@ impl RejectReason {
             RejectReason::EntitlementExhausted => "entitlement_exhausted",
             RejectReason::QueueDeadline => "queue_deadline",
             RejectReason::QueueFull => "queue_full",
+            RejectReason::DeploymentCapExhausted => "deployment_cap_exhausted",
         }
     }
 }

@@ -127,15 +127,31 @@ pub enum EventKind {
     },
     CancellationWithdrawn,
     KeyRotated {
+        deployment: String,
         new_key: String,
         previous_key: String,
         previous_expires_at: Option<Timestamp>,
     },
     KeyRevoked {
+        deployment: String,
         key: String,
     },
     KeyExpired {
+        deployment: String,
         key: String,
+    },
+    DeploymentCreated {
+        deployment: String,
+        name: String,
+        max_share: Option<f64>,
+    },
+    DeploymentUpdated {
+        deployment: String,
+        name: String,
+        max_share: Option<f64>,
+    },
+    DeploymentDeleted {
+        deployment: String,
     },
     Renewed {
         term_start: Timestamp,
@@ -166,13 +182,11 @@ pub struct ProvisionedThroughput {
     pub state: State,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_changes: Option<PendingChanges>,
-    /// Data-plane deployment id; the gateway's `x-pt-deployment`.
-    pub deployment_id: String,
     pub endpoints: Vec<Endpoint>,
     pub price: Price,
-    /// Inference API keys: exactly one current key (no expiry), plus up to two rotated-out
-    /// keys in their grace period. Secrets are only returned when a key is issued.
-    pub api_keys: Vec<ApiKey>,
+    /// Deployments sharing this reservation's entitlement, each with its own keys and an
+    /// optional cap. The first is the primary, created with the reservation.
+    pub deployments: Vec<Deployment>,
     pub version: u64,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
@@ -292,4 +306,65 @@ pub struct RotateKeyRequest {
     /// 0 revokes it immediately.
     #[serde(default)]
     pub grace_minutes: Option<u64>,
+}
+
+/// An endpoint identity on a reservation: its own keys and an optional cap on its share of
+/// the reservation's entitlement. All deployments of a reservation draw from one bucket and
+/// share its boundary policy.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Deployment {
+    /// Data-plane deployment id; the gateway's `x-pt-deployment`.
+    pub id: String,
+    /// Unique within the reservation, for example `prod` or `staging`.
+    pub name: String,
+    /// At most this fraction of the reservation's entitlement, in (0, 1]. `None` means no
+    /// cap: the deployment can use whatever the others leave.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_share: Option<f64>,
+    /// Exactly one current key (no expiry), plus up to two rotated-out keys in their grace
+    /// period. Secrets are only returned when a key is issued.
+    pub api_keys: Vec<ApiKey>,
+    pub created_at: Timestamp,
+}
+
+impl Deployment {
+    pub fn current_key(&self) -> Option<&ApiKey> {
+        self.api_keys.iter().find(|k| k.is_current())
+    }
+}
+
+impl ProvisionedThroughput {
+    /// The deployment the reservation was created with (or the oldest remaining one).
+    pub fn primary(&self) -> &Deployment {
+        &self.deployments[0]
+    }
+}
+
+/// `POST /v1/provisioned-throughput/{id}/deployments`
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateDeploymentRequest {
+    pub name: String,
+    #[serde(default)]
+    pub max_share: Option<f64>,
+}
+
+/// `PATCH /v1/provisioned-throughput/{id}/deployments/{deployment}`. Omitted fields are
+/// unchanged; `"max_share": null` removes the cap.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateDeploymentRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default, deserialize_with = "present")]
+    pub max_share: Option<Option<f64>>,
+}
+
+/// Distinguish an absent field (`None`) from an explicit `null` (`Some(None)`).
+fn present<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
 }

@@ -51,10 +51,16 @@ async fn full_lifecycle_over_http() {
     assert!(v["api_key"].as_str().unwrap().starts_with("ptk_"));
     assert!(v.get("api_key_sha256").is_none());
     assert!(
-        v["api_keys"][0].get("sha256").is_none(),
+        v["deployments"][0]["api_keys"][0].get("sha256").is_none(),
         "hashes are never returned"
     );
-    assert_eq!(v["api_keys"][0]["prefix"].as_str().unwrap().len(), 12);
+    assert_eq!(
+        v["deployments"][0]["api_keys"][0]["prefix"]
+            .as_str()
+            .unwrap()
+            .len(),
+        12
+    );
     assert_eq!(v["state"], "active");
     assert_eq!(v["price"]["monthly"], 10 * BASE * 3 / 2);
 
@@ -327,7 +333,7 @@ async fn entitlement_snapshots_are_signed_and_long_poll() {
     assert_eq!(r.cus, 4, "only this region's share");
     assert_eq!(r.profile, "llama-4-maverick.b200.trtllm-1.2.tp8");
     let d = &snap.deployments[0];
-    assert_eq!(d.id, out.resource.deployment_id);
+    assert_eq!(d.id, out.resource.primary().id);
     assert_eq!(
         d.api_key_sha256,
         pt_entitlement::sha256_hex(out.api_key.unwrap().as_bytes())

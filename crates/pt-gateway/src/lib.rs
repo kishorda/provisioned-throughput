@@ -72,6 +72,8 @@ async fn status(State(app): State<AppState>, headers: HeaderMap) -> Response {
         "entitlement_wu_per_s": res.entitlement_wu_s,
         "local_share_wu_per_s": s.entitlement_wu_s,
         "quota": quota.as_str(),
+        "deployment_max_share": dep.max_share,
+        "deployment_cap_wu_per_s": dep.cap.as_ref().map(|c| c.config().entitlement_wu_s),
         "bucket_wu": s.level_wu,
         "burst_credit_wu": s.burst_credit_wu,
         "queued_wu": s.queued_wu,

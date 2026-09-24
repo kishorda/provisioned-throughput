@@ -96,6 +96,14 @@ curl -s http://127.0.0.1:8090/v1/provisioned-throughput/<id>/keys -H 'Authorizat
 curl -s -X DELETE http://127.0.0.1:8090/v1/provisioned-throughput/<id>/keys/<key_id> -H 'Authorization: Bearer sk-admin-acme-dev'
 ```
 
+Add deployments that share the reservation, each with its own keys and an optional cap (docs/12 §3):
+
+```sh
+curl -s -X POST http://127.0.0.1:8090/v1/provisioned-throughput/<id>/deployments \
+  -H 'Authorization: Bearer sk-admin-acme-dev' -d '{"name":"staging","max_share":0.2}'
+# staging's own api_key; at most 20% of the entitlement; 429 deployment_cap_exhausted above it
+```
+
 Operators declare region incidents, which the SLA report excludes (docs/09 §5):
 
 ```sh

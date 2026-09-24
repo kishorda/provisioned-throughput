@@ -98,6 +98,7 @@ fn config(setup: Setup, engine_url: &str, payg_url: Option<&str>) -> GatewayConf
             reservation: "res-1".into(),
             api_key: KEY.into(),
             boundary_policy: setup.policy,
+            max_share: None,
         }],
     }
 }
@@ -395,4 +396,51 @@ async fn status_reports_entitlement() {
     assert_eq!(v["deployment"], "dep-1");
     assert_eq!(v["tier"], "interactive");
     assert_eq!(v["entitlement_wu_per_s"], 100_000.0);
+}
+
+#[tokio::test]
+async fn cap_is_refunded_when_the_shared_bucket_rejects() {
+    let e = spawn_engine("main", 1, 1, 50).await;
+    let mut cfg = config(tight(BoundaryPolicy::default()), &e.url, None);
+    cfg.deployments.push(DeploymentConfig {
+        id: "dep-staging".into(),
+        reservation: "res-1".into(),
+        api_key: "sk-staging".into(),
+        boundary_policy: BoundaryPolicy::default(),
+        max_share: Some(1.0),
+    });
+    let sink = Arc::new(MemorySink::default());
+    let app = AppState::new(&cfg, sink.clone()).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gw = format!("http://{}", listener.local_addr().unwrap());
+    let routes = router(app.clone());
+    tokio::spawn(async move { axum::serve(listener, routes).await });
+
+    // Prod uses up the shared 20 WU/s bucket (one 56 WU request from a full bucket).
+    assert_eq!(
+        chat(&gw, hello(50, false)).send().await.unwrap().status(),
+        200
+    );
+    let cap_level = || {
+        let d = app.deployment_for_key("sk-staging").unwrap();
+        d.cap.as_ref().unwrap().status(Instant::now()).level_wu
+    };
+    let full = cap_level();
+
+    // Staging's own cap has room, but the shared bucket doesn't.
+    let r = reqwest::Client::new()
+        .post(format!("{gw}/v1/chat/completions"))
+        .bearer_auth("sk-staging")
+        .json(&hello(50, false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 429);
+    assert_eq!(r.headers()["x-pt-reason"], "entitlement_exhausted");
+    wait_for_records(&sink, 2).await;
+    assert!(
+        (cap_level() - full).abs() < 1.0,
+        "cap refunded: {} vs {full}",
+        cap_level()
+    );
 }

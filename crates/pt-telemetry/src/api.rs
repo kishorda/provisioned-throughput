@@ -158,6 +158,8 @@ struct RangeQuery {
     from: Option<String>,
     to: Option<String>,
     granularity: Option<String>,
+    /// Only this deployment's requests (usage report only).
+    deployment: Option<String>,
 }
 
 fn parse_ms(field: &str, value: &str) -> Result<u64, ApiError> {
@@ -243,8 +245,13 @@ async fn usage_report<U: UsageStore, D: Directory>(
             format!("That range and granularity give more than {MAX_BUCKETS} points. Use a coarser granularity."),
         ));
     }
-    let records = tel.store.range(&info.tenant, &info.id, from, to).await;
-    Ok(Json(usage::report(&info, &records, from, to, granularity)).into_response())
+    let mut records = tel.store.range(&info.tenant, &info.id, from, to).await;
+    if let Some(d) = &q.deployment {
+        records.retain(|r| r.record.deployment == *d);
+    }
+    let mut report = usage::report(&info, &records, from, to, granularity);
+    report.deployment = q.deployment.clone();
+    Ok(Json(report).into_response())
 }
 
 #[derive(Deserialize)]
