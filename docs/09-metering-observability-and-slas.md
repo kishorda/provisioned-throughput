@@ -78,7 +78,9 @@ The blog notes that latency differs by vantage point. We publish exactly one:
   customer-initiated changes (for example, a resize in progress).
 - **Attainment:** percentage of eligible windows meeting both TTFT and TPOT targets. The
   commitment is **99.8%** per month (N2).
-- **Service credits** are a percentage of that month's fee for the affected reservation:
+- **Service credits** are a percentage of that month's fee for the affected reservation.
+  They're applied automatically as a credit line on that month's invoice
+  ([12 §7](12-control-plane-api.md#7-invoices)):
 
   | Monthly attainment | Credit |
   |--------------------|--------|

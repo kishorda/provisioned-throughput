@@ -431,7 +431,11 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         if state == State::Active {
             events.push(Event {
                 at: now,
-                kind: EventKind::Activated,
+                kind: EventKind::Activated {
+                    cus: Some(cus),
+                    tier: Some(req.tier),
+                    monthly: Some(price.monthly),
+                },
             });
         }
         let pt = ProvisionedThroughput {
@@ -658,7 +662,9 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                     ops.push(PlanOp::Reserved(extra));
                     pt.failover_headroom = headroom;
                     let per_cu = self.price(&pt.tier, pt.isolation, 1).per_cu_monthly;
+                    let mut running = pt.cus;
                     for d in deltas {
+                        running += d.cus;
                         let from = pt
                             .regions
                             .iter()
@@ -679,6 +685,8 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                                 from,
                                 to: from + d.cus,
                                 prorated_charge: charge,
+                                cus: Some(running),
+                                monthly: Some(per_cu * u64::from(running)),
                             },
                         );
                     }
@@ -1368,9 +1376,15 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
             }
             if pt.state == State::Scheduled && now >= pt.term_start {
                 pt.state = State::Active;
+                // Lifecycle events carry the moment they took effect, not when this loop
+                // noticed, so invoices and SLA grace windows line up with the term.
                 pt.events.push(Event {
-                    at: now,
-                    kind: EventKind::Activated,
+                    at: pt.term_start,
+                    kind: EventKind::Activated {
+                        cus: Some(pt.cus),
+                        tier: Some(pt.tier),
+                        monthly: Some(pt.price.monthly),
+                    },
                 });
                 report.activated += 1;
                 changed = true;
@@ -1389,7 +1403,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                     pt.state = State::Ended;
                     pt.pending_changes = None;
                     pt.events.push(Event {
-                        at: now,
+                        at: pt.term_end,
                         kind: EventKind::Ended,
                     });
                     report.ended += 1;
@@ -1444,11 +1458,15 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
             if let Some(t) = pending.tier {
                 pt.tier = t;
             }
+            let monthly = self
+                .price(&pt.tier, pt.isolation, total_cus(&pt.regions))
+                .monthly;
             pt.events.push(Event {
-                at: now,
+                at: pt.term_end,
                 kind: EventKind::ChangeApplied {
                     tier: pt.tier,
                     regions: pt.regions.clone(),
+                    monthly: Some(monthly),
                 },
             });
         }
@@ -1458,7 +1476,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         pt.endpoints = self.endpoints(&pt.regions);
         pt.price = self.price(&pt.tier, pt.isolation, pt.cus);
         pt.events.push(Event {
-            at: now,
+            at: pt.term_start,
             kind: EventKind::Renewed {
                 term_start: pt.term_start,
                 term_end: pt.term_end,

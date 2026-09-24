@@ -244,7 +244,29 @@ Internal endpoints for regions and operators:
 | `GET` | `/internal/v1/steering` | Operator key | DNS weights per region and per reservation |
 | `GET`, `POST` | `/internal/v1/incidents`, `…/{id}/resolve` | Operator key | Region incidents. Each has `source`: `operator` or `automatic` |
 
-## 7. Not yet built
+## 7. Invoices
+
+One invoice per tenant per calendar month (UTC), in arrears
+([ADR-018](adr/ADR-018-monthly-invoices.md)). The code is in `billing.rs` and `billing_api.rs`.
+
+| Method | Path | Returns |
+|--------|------|---------|
+| `GET` | `/v1/invoices` | Final invoices, newest first, plus drafts for the current month and for the previous one until it's final |
+| `GET` | `/v1/invoices/{period}` | One month (`2026-10`): the final invoice, or a draft. 404 for future months and for older months that were never finalised |
+
+| Line | Amount |
+|------|--------|
+| `reservation_fee` | Monthly price × (seconds billable in the month ÷ seconds in the month), one line per rate. A full month bills exactly the monthly price |
+| `spillover` | Tokens of spillover requests that ran × the model's PAYG price per million tokens (`[[payg_prices]]`), for input, cached input, and output. Burst is free |
+| `sla_credit` | −(that month's fee for the reservation × the SLA credit %). Added once the month has ended |
+
+The rate timeline comes from events (`Activated`, `CapacityIncreased`, `ChangeApplied`,
+`Renewed`, `Ended`, `Cancelled`), which record the monthly price in force. Lifecycle events
+carry the time they took effect, not when the loop ran. `finalize_grace_hours` (48) after a
+month ends, the invoice is stored and never changes. Invoices show `subtotal`, `credits`,
+and `total`, in minor units.
+
+## 8. Not yet built
 
 - A remote Capacity Planner client. The in-memory planner counts CUs per region and
   model, regardless of tier, and is rebuilt from the store at startup. It's per-process,
@@ -252,9 +274,10 @@ Internal endpoints for regions and operators:
 - TLS to the database.
 - Rotating the snapshot signing key. Gateways trust one public key, so rotation needs
   support for more than one key.
-- Invoicing. Events record amounts, but nothing turns them into invoices yet.
+- Invoice adjustments, taxes, and payment collection. Final invoices are immutable, but
+  there's no adjustment line for corrections yet.
 - Pricing for failover headroom. It's reserved but not billed (open question in
   [11 §4](11-roadmap-risks-open-questions.md#4-product-decisions)).
 
 ## Blog problems addressed
-P4 (customer-facing unit), P5 (tier), P6 (term, renewal, re-rating at renewal), P12 (boundary policy). See [traceability](01-requirements-and-traceability.md#2-traceability-matrix).
+P4 (customer-facing unit), P5 (tier), P6 (term, renewal, re-rating at renewal), P12 (boundary policy), P19 (SLA credits applied on invoices). See [traceability](01-requirements-and-traceability.md#2-traceability-matrix).

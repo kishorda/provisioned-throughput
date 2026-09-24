@@ -11,6 +11,25 @@ lifecycle_interval_secs = 60
 currency = "USD"
 base_cu_price_per_month_cents = 150000  # one Standard CU for one month
 
+# PAYG list prices, in cents per million tokens. Spillover is billed at these.
+# Placeholders until PM sets them.
+[[payg_prices]]
+model = "llama-4-maverick"
+input_per_mtok = 27
+cached_input_per_mtok = 7
+output_per_mtok = 85
+
+[[payg_prices]]
+model = "qwen3-32b"
+input_per_mtok = 10
+cached_input_per_mtok = 3
+output_per_mtok = 30
+
+# Monthly invoices (ADR-018): calendar months, in arrears, finalised after a grace period.
+[billing]
+finalize_grace_hours = 48
+finalize_interval_secs = 3600
+
 # Signs entitlement snapshots. A development key only: production reads it from a
 # secret store. The matching public key goes in each gateway's [entitlements] section.
 [entitlements]

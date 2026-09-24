@@ -33,7 +33,7 @@ Every problem raised in the blog maps to at least one requirement and one design
 | P16 | Isolation strategies: dedicated, shared, or hybrid | R16: Tiered pool model | Shared-provisioned, dedicated with backfill, PAYG, spare | [05 §6](05-isolation-and-scheduling.md#6-pool-tiers-hybrid-isolation) |
 | P17 | Provisioned traffic must preempt on-demand traffic | R17: Strict priority classes | `provisioned > burst > spillover/PAYG`; failover preempts PAYG on hot spares | [05 §2](05-isolation-and-scheduling.md#2-priority-classes), [13 §2](13-tenant-aware-routing.md#2-algorithms) |
 | P18 | Observability is a customer-facing product feature | R18: Per-deployment utilisation, latency, throttles, cache hits | Customer telemetry API and dashboards | [09 §3](09-metering-observability-and-slas.md#3-customer-facing-observability) |
-| P19 | Latency depends on the vantage point; the SLA needs a precise definition | R19: One published measurement point, percentile, window, and exclusions | Gateway-measured SLA spec | [09 §4](09-metering-observability-and-slas.md#4-sla-definition), [ADR-010](adr/ADR-010-sla-at-gateway.md) |
+| P19 | Latency depends on the vantage point; the SLA needs a precise definition | R19: One published measurement point, percentile, window, and exclusions | Gateway-measured SLA spec; credits applied on monthly invoices | [09 §4](09-metering-observability-and-slas.md#4-sla-definition), [ADR-010](adr/ADR-010-sla-at-gateway.md), [12 §7](12-control-plane-api.md#7-invoices) |
 | P20 | Build product and engine together | R20: Product constructs (CU, shape, tier) are first-class in engine config | CRDs carry the product model end to end | [08 §2](08-kubernetes-and-dynamo-integration.md#2-custom-resources) |
 
 ## 3. Functional requirements (summary)

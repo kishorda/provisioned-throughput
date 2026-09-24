@@ -34,6 +34,50 @@ pub struct ControlPlaneConfig {
     /// Durable store (ADR-017). Without it, state is in memory and lost on restart.
     #[serde(default)]
     pub store: Option<StoreConfig>,
+    /// PAYG list prices. Spillover is billed at these (docs/11 §4). Every model needs one.
+    #[serde(default)]
+    pub payg_prices: Vec<PaygPrice>,
+    #[serde(default)]
+    pub billing: BillingConfig,
+}
+
+/// A model's PAYG list price, in minor currency units per million tokens.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PaygPrice {
+    pub model: String,
+    pub input_per_mtok: u64,
+    pub cached_input_per_mtok: u64,
+    pub output_per_mtok: u64,
+}
+
+/// Monthly invoicing (docs/12 §7, ADR-018).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BillingConfig {
+    /// A month's invoice is finalised this long after the month ends, so late usage
+    /// records (gateway buffers, retries) are included.
+    #[serde(default = "default_finalize_grace_hours")]
+    pub finalize_grace_hours: u64,
+    /// How often to look for invoices to finalise.
+    #[serde(default = "default_finalize_interval_secs")]
+    pub finalize_interval_secs: u64,
+}
+
+impl Default for BillingConfig {
+    fn default() -> Self {
+        Self {
+            finalize_grace_hours: default_finalize_grace_hours(),
+            finalize_interval_secs: default_finalize_interval_secs(),
+        }
+    }
+}
+
+fn default_finalize_grace_hours() -> u64 {
+    48
+}
+fn default_finalize_interval_secs() -> u64 {
+    3_600
 }
 
 /// A CockroachDB or PostgreSQL database.
@@ -336,6 +380,27 @@ impl ControlPlaneConfig {
                 }
             }
         }
+        let mut priced = HashSet::new();
+        for p in &self.payg_prices {
+            if self.model(&p.model).is_none() {
+                return invalid(format!("PAYG price for unknown model {}", p.model));
+            }
+            if !priced.insert(p.model.as_str()) {
+                return invalid(format!("duplicate PAYG price for {}", p.model));
+            }
+        }
+        if let Some(m) = self.models.iter().find(|m| !priced.contains(m.id.as_str())) {
+            return invalid(format!(
+                "model {} has no [[payg_prices]] entry, so its spillover can't be billed",
+                m.id
+            ));
+        }
+        if self.telemetry.retention_days * 24 < self.billing.finalize_grace_hours + 24 * 31 {
+            return invalid(
+                "telemetry.retention_days must keep usage until invoices are finalised (a month plus billing.finalize_grace_hours)"
+                    .into(),
+            );
+        }
         let f = &self.failover;
         if f.heartbeat_timeout_seconds == 0 || f.recovery_seconds == 0 || f.check_interval_ms == 0 {
             return invalid(
@@ -392,6 +457,10 @@ impl ControlPlaneConfig {
 
     pub fn profile(&self, name: &str) -> Option<&pt_core::PerformanceProfile> {
         self.profiles.iter().find(|p| p.name == name)
+    }
+
+    pub fn payg_price(&self, model: &str) -> Option<&PaygPrice> {
+        self.payg_prices.iter().find(|p| p.model == model)
     }
 
     pub fn region(&self, name: &str) -> Option<&RegionConfig> {

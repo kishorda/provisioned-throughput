@@ -96,12 +96,27 @@ pub enum EventKind {
         cus: u32,
         monthly: u64,
     },
-    Activated,
+    /// Billing starts. The rate fields record what was active; older events may lack them.
+    Activated {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cus: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tier: Option<Tier>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        monthly: Option<u64>,
+    },
     CapacityIncreased {
         region: String,
         from: u32,
         to: u32,
+        /// What the increase commits to for the rest of the term. Invoices bill it month by
+        /// month through `monthly`.
         prorated_charge: u64,
+        /// Total CUs and monthly price after the increase.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cus: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        monthly: Option<u64>,
     },
     ChangeScheduled {
         tier: Option<Tier>,
@@ -110,6 +125,9 @@ pub enum EventKind {
     ChangeApplied {
         tier: Tier,
         regions: Vec<RegionShare>,
+        /// Monthly price after the change.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        monthly: Option<u64>,
     },
     ScheduledChangeFailed {
         reason: String,

@@ -76,6 +76,7 @@ The design rests on six decisions:
 | [015](adr/ADR-015-failover-payg-preemption.md) | Fence, then preempt, PAYG on hot spares during failover (refines 006, 013) |
 | [016](adr/ADR-016-warm-spare-loading.md) | Load warm spares from snapshot failover demand (refines 006, 014) |
 | [017](adr/ADR-017-sql-control-plane-store.md) | A Postgres-protocol store for the control plane (CockroachDB in production) |
+| [018](adr/ADR-018-monthly-invoices.md) | Calendar-month invoices in arrears, finalised and stored |
 
 ## Glossary
 

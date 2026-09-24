@@ -121,6 +121,15 @@ curl -s http://127.0.0.1:8090/internal/v1/regions  -H 'Authorization: Bearer sk-
 curl -s http://127.0.0.1:8090/internal/v1/steering -H 'Authorization: Bearer sk-operator-dev'   # DNS weights
 ```
 
+Invoices are monthly and in arrears (docs/12 §7, ADR-018). They cover reservation fees
+prorated by the second, spillover at the model's PAYG price, and SLA credits. The current
+month is a draft. Each month is finalised and stored 48 hours after it ends:
+
+```sh
+curl -s http://127.0.0.1:8090/v1/invoices -H 'Authorization: Bearer sk-admin-acme-dev'           # finals + drafts
+curl -s http://127.0.0.1:8090/v1/invoices/2026-10 -H 'Authorization: Bearer sk-admin-acme-dev'   # one month
+```
+
 Quotes size a reservation before buying, or recommend a resize from real usage (docs/02 §5):
 
 ```sh

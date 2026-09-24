@@ -48,7 +48,7 @@ async fn store(name: &str) -> Option<SqlStore> {
         .await
         .unwrap();
     let store = SqlStore::from_pool(pool);
-    assert_eq!(store.migrate().await.unwrap(), [1]);
+    assert_eq!(store.migrate().await.unwrap(), [1, 2]);
     assert!(store.migrate().await.unwrap().is_empty(), "idempotent");
     Some(store)
 }
@@ -319,4 +319,49 @@ async fn an_unreachable_store_never_publishes_empty_entitlements() {
     // Background loops skip the run instead of acting on "nothing".
     assert_eq!(svc.run_lifecycle().await, Default::default());
     assert!(svc.run_failover().await.declared.is_empty());
+}
+
+#[tokio::test]
+async fn final_invoices_are_stored_once_and_survive_a_restart() {
+    let Some(db) = store("invoices").await else {
+        return;
+    };
+    let clock = ManualClock::new("2026-10-11T00:00:00Z".parse().unwrap());
+    let svc = service(db.clone(), &clock).await;
+    svc.create(ACME, None, request("agents", &[("eu-west", 2)]))
+        .await
+        .unwrap();
+    clock.set("2026-11-05T00:00:00Z".parse().unwrap());
+    let (_, tel) = app(svc.clone());
+    let stored = pt_control_plane::billing::finalize_due(&svc, &tel)
+        .await
+        .unwrap();
+    assert_eq!(stored.len(), 1);
+    let first = stored[0].clone();
+    assert!(matches!(
+        db.insert_invoice(first.clone()).await,
+        Err(StoreError::AlreadyExists(_))
+    ));
+
+    drop(svc);
+    let svc = service(db.clone(), &clock).await;
+    let (_, tel) = app(svc.clone());
+    assert_eq!(
+        db.get_invoice(ACME, "2026-10").await.unwrap(),
+        Some(first.clone())
+    );
+    assert_eq!(
+        db.list_invoices(ACME).await.unwrap(),
+        std::slice::from_ref(&first)
+    );
+    assert!(db.list_invoices(GLOBEX).await.unwrap().is_empty());
+    // The stored invoice is served, and nothing is finalised twice.
+    let served = pt_control_plane::billing::invoice(&svc, &tel, ACME, "2026-10")
+        .await
+        .unwrap();
+    assert_eq!(served, first);
+    assert!(pt_control_plane::billing::finalize_due(&svc, &tel)
+        .await
+        .unwrap()
+        .is_empty());
 }

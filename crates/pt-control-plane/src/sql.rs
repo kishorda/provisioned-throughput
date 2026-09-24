@@ -28,12 +28,19 @@ use sqlx::types::Json;
 use sqlx::{Postgres, Row, Transaction};
 use time::OffsetDateTime;
 
+use crate::billing::Invoice;
 use crate::model::{ApiKey, Deployment, Event, ProvisionedThroughput, RegionIncident};
 use crate::store::{IdempotencyRecord, Store, StoreError};
 
 /// Migrations in order. Never edit one that has shipped; add a new file.
-const MIGRATIONS: &[(i64, &str, &str)] =
-    &[(1, "initial", include_str!("../migrations/0001_initial.sql"))];
+const MIGRATIONS: &[(i64, &str, &str)] = &[
+    (1, "initial", include_str!("../migrations/0001_initial.sql")),
+    (
+        2,
+        "invoices",
+        include_str!("../migrations/0002_invoices.sql"),
+    ),
+];
 
 /// Idempotency keys older than this are ignored and may be reused.
 const IDEMPOTENCY_TTL: &str = "7 days";
@@ -607,6 +614,46 @@ impl Store for SqlStore {
             return Err(StoreError::NotFound(incident.id));
         }
         Ok(())
+    }
+
+    async fn insert_invoice(&self, invoice: Invoice) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO invoices (id, tenant, period, total, currency, finalized_at, document)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(&invoice.id)
+        .bind(&invoice.tenant)
+        .bind(&invoice.period)
+        .bind(invoice.total)
+        .bind(&invoice.currency)
+        .bind(invoice.finalized_at.map(to_db))
+        .bind(json(&invoice))
+        .execute(&self.pool)
+        .await
+        .map_err(|e| classify(e, &invoice.id))?;
+        Ok(())
+    }
+
+    async fn get_invoice(&self, tenant: &str, period: &str) -> Result<Option<Invoice>, StoreError> {
+        let doc: Option<Json<Value>> =
+            sqlx::query_scalar("SELECT document FROM invoices WHERE tenant = $1 AND period = $2")
+                .bind(tenant)
+                .bind(period)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(unavailable)?;
+        doc.map(|d| from_json(d, "invoice")).transpose()
+    }
+
+    async fn list_invoices(&self, tenant: &str) -> Result<Vec<Invoice>, StoreError> {
+        let docs: Vec<Json<Value>> = sqlx::query_scalar(
+            "SELECT document FROM invoices WHERE tenant = $1 ORDER BY period DESC",
+        )
+        .bind(tenant)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(unavailable)?;
+        docs.into_iter().map(|d| from_json(d, "invoice")).collect()
     }
 
     async fn list_incidents(&self) -> Result<Vec<RegionIncident>, StoreError> {

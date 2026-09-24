@@ -101,7 +101,7 @@ pub fn exclusion_windows(
         .iter()
         .filter_map(|e| {
             let reason = match e.kind {
-                EventKind::Activated => "activation",
+                EventKind::Activated { .. } => "activation",
                 EventKind::CapacityIncreased { .. } => "resize",
                 EventKind::ShapeUpdated => "shape_change",
                 EventKind::ChangeApplied { .. } => "scheduled_change",
@@ -229,7 +229,14 @@ mod tests {
                     "2026-10-01T00:00:00Z",
                     EventKind::Created { cus: 4, monthly: 0 },
                 ),
-                ("2026-10-01T00:00:00Z", EventKind::Activated),
+                (
+                    "2026-10-01T00:00:00Z",
+                    EventKind::Activated {
+                        cus: None,
+                        tier: None,
+                        monthly: None,
+                    },
+                ),
                 ("2026-10-05T12:00:00Z", EventKind::BoundaryPolicyUpdated),
                 (
                     "2026-10-07T09:00:00Z",
@@ -238,6 +245,8 @@ mod tests {
                         from: 2,
                         to: 4,
                         prorated_charge: 0,
+                        cus: None,
+                        monthly: None,
                     },
                 ),
             ],

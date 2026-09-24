@@ -94,6 +94,23 @@ async fn serve<S: Store>(
     });
 
     let (routes, telemetry) = app(svc.clone());
+
+    // Finalise last month's invoices once its grace period has passed (ADR-018).
+    let (billing_svc, billing_tel) = (svc.clone(), telemetry.clone());
+    let every = Duration::from_secs(svc.config.billing.finalize_interval_secs);
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(every);
+        loop {
+            tick.tick().await;
+            match pt_control_plane::billing::finalize_due(&billing_svc, &billing_tel).await {
+                Ok(done) if !done.is_empty() => {
+                    tracing::info!(invoices = done.len(), "finalised invoices")
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error = %e, "invoice finalisation failed; retrying later"),
+            }
+        }
+    });
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(3_600));
         loop {

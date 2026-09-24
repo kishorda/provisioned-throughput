@@ -46,3 +46,7 @@ The PM answered the open questions on 2026-09-23.
 **Open:** how is the Multi-region SKU priced? Its failover headroom is reserved in the
 paired region from 2026-09-24 ([ADR-014](adr/ADR-014-automatic-region-failover.md)), so a
 Multi-region reservation holds up to twice its CUs. Today it's priced like a Regional one.
+
+**Open:** what are the PAYG list prices that spillover is billed at? Invoices use
+per-model prices per million tokens (`[[payg_prices]]`, ADR-018). The configured values
+are placeholders.

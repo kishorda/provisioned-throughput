@@ -4,6 +4,8 @@
 //! is a capacity reservation plus one data-plane deployment with an inference API key.
 
 pub mod api;
+pub mod billing;
+pub mod billing_api;
 pub mod clock;
 pub mod config;
 pub mod failover;
@@ -34,7 +36,14 @@ pub fn app<S: store::Store, P: planner::CapacityPlanner, C: Clock>(
 ) -> (axum::Router, Arc<telemetry::CpTelemetry<S, P, C>>) {
     let (telemetry_routes, tel) = telemetry::telemetry(svc.clone());
     let quotes = quote_api::router(svc.clone(), tel.clone());
-    (api::router(svc).merge(telemetry_routes).merge(quotes), tel)
+    let invoices = billing_api::router(svc.clone(), tel.clone());
+    (
+        api::router(svc)
+            .merge(telemetry_routes)
+            .merge(quotes)
+            .merge(invoices),
+        tel,
+    )
 }
 
 /// A service backed by the in-memory store and planner.

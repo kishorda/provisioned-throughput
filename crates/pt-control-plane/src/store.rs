@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Mutex;
 
+use crate::billing::Invoice;
 use crate::model::{ProvisionedThroughput, RegionIncident};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -92,6 +93,25 @@ pub trait Store: Send + Sync + 'static {
     fn list_incidents(
         &self,
     ) -> impl Future<Output = Result<Vec<RegionIncident>, StoreError>> + Send;
+
+    /// Store a final invoice. Fails if the tenant already has one for the period: final
+    /// invoices never change.
+    fn insert_invoice(
+        &self,
+        invoice: Invoice,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    fn get_invoice(
+        &self,
+        tenant: &str,
+        period: &str,
+    ) -> impl Future<Output = Result<Option<Invoice>, StoreError>> + Send;
+
+    /// A tenant's final invoices, newest first.
+    fn list_invoices(
+        &self,
+        tenant: &str,
+    ) -> impl Future<Output = Result<Vec<Invoice>, StoreError>> + Send;
 }
 
 #[derive(Default)]
@@ -99,6 +119,7 @@ struct Inner {
     by_id: HashMap<String, ProvisionedThroughput>,
     idempotency: HashMap<(String, String), IdempotencyRecord>,
     incidents: Vec<RegionIncident>,
+    invoices: HashMap<(String, String), Invoice>,
 }
 
 #[derive(Default)]
@@ -231,5 +252,35 @@ impl Store for MemoryStore {
 
     async fn list_incidents(&self) -> Result<Vec<RegionIncident>, StoreError> {
         Ok(self.lock().incidents.clone())
+    }
+
+    async fn insert_invoice(&self, invoice: Invoice) -> Result<(), StoreError> {
+        let mut inner = self.lock();
+        let k = (invoice.tenant.clone(), invoice.period.clone());
+        if inner.invoices.contains_key(&k) {
+            return Err(StoreError::AlreadyExists(invoice.id));
+        }
+        inner.invoices.insert(k, invoice);
+        Ok(())
+    }
+
+    async fn get_invoice(&self, tenant: &str, period: &str) -> Result<Option<Invoice>, StoreError> {
+        Ok(self
+            .lock()
+            .invoices
+            .get(&(tenant.to_string(), period.to_string()))
+            .cloned())
+    }
+
+    async fn list_invoices(&self, tenant: &str) -> Result<Vec<Invoice>, StoreError> {
+        let mut out: Vec<_> = self
+            .lock()
+            .invoices
+            .values()
+            .filter(|i| i.tenant == tenant)
+            .cloned()
+            .collect();
+        out.sort_by(|a, b| b.period.cmp(&a.period));
+        Ok(out)
     }
 }
