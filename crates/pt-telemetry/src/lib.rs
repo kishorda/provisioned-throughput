@@ -10,6 +10,8 @@
 //! them. The store is in-memory for now, behind [`store::UsageStore`].
 
 pub mod api;
+pub mod backend;
+pub mod clickhouse;
 pub mod directory;
 pub mod sessions;
 pub mod sla;
@@ -17,8 +19,9 @@ pub mod stats;
 pub mod store;
 pub mod usage;
 
+pub use backend::UsageBackend;
 pub use directory::{Directory, DirectoryError, ExclusionWindow, ReservationInfo};
-pub use store::{MemoryUsageStore, UsageStore};
+pub use store::{MemoryUsageStore, UsageError, UsageStore};
 
 /// Store plus directory: everything the API needs.
 pub struct Telemetry<U, D> {

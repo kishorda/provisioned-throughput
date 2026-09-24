@@ -42,6 +42,13 @@ retention_days = 35
 change_grace_minutes = 10      # SLA exclusion after activation, resizes, shape changes
 failover_window_minutes = 5    # multi-region SLA exclusion after a region incident starts
 
+# Durable usage records (ADR-019). Without this, usage is in memory and lost on restart.
+# PT_CLICKHOUSE_URL overrides url; PT_CLICKHOUSE_PASSWORD keeps the password out of files.
+# [telemetry.clickhouse]
+# url = "http://127.0.0.1:18123"
+# database = "pt"
+# user = "default"
+
 # Durable store (ADR-017): CockroachDB in production, PostgreSQL works for development.
 # Without it, state is in memory and lost on restart. PT_DATABASE_URL overrides `url`.
 # [store]

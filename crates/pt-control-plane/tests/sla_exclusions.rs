@@ -156,7 +156,10 @@ async fn multi_region_failover_and_resize_are_excluded() {
     let mut recs = requests(&id, hours(1), false);
     recs.extend(requests(&id, hours(2), true));
     recs.extend(requests(&id, hours(4), true));
-    tel.store.append("eu-central", recs, ms(hours(5))).await;
+    tel.store
+        .append("eu-central", recs, ms(hours(5)))
+        .await
+        .unwrap();
 
     let before = sla(&base, &id).await;
     assert_eq!(before["windows_met"], 1, "{before}");
@@ -221,14 +224,16 @@ async fn regional_outage_excludes_only_the_failed_region() {
     // Slow in both regions during an eu-west outage.
     tel.store
         .append("eu-west", requests(&id, hours(2), true), ms(hours(3)))
-        .await;
+        .await
+        .unwrap();
     tel.store
         .append(
             "us-east",
             requests(&id, hours(2) + SignedDuration::from_mins(10), true),
             ms(hours(3)),
         )
-        .await;
+        .await
+        .unwrap();
 
     svc.clock.set(hours(3));
     post(

@@ -251,7 +251,9 @@ Follow-ups from the roadmap in docs/11:
   the engine's counts, so this affects only the admission estimate.
 - **Prefix-cache index at the gateway.** Estimates assume no cache hits; settlement
   refunds the difference.
-- **Redpanda/ClickHouse.** Usage goes to JSONL and/or the control plane's in-memory telemetry store (35-day retention).
+- **Redpanda.** Gateways push usage to the control plane, which writes it to ClickHouse
+  (ADR-019), or keeps it in memory when ClickHouse isn't configured. There's no Redpanda
+  stage, and usage and SLA aggregation runs in Rust rather than ClickHouse SQL.
 - **Region failover gaps.** Steering is an API; no GeoDNS/anycast controller consumes it.
   Router `hot_spare` flags are configured, not rendered by the capacity controller.
   There's no weight-prefetch DaemonSet, so loaded warm spares start cold. Preempted PAYG isn't metered.
@@ -259,8 +261,8 @@ Follow-ups from the roadmap in docs/11:
 - **Signing-key rotation.** Gateways trust a single snapshot public key.
 - **Control-plane scale-out.** State is durable in SQL (ADR-017), but the capacity planner
   and region health are per-process, so run one control-plane instance. The planner counts
-  CUs per region and model, regardless of tier. The database connection has no TLS yet,
-  and usage records are still in memory until ClickHouse.
+  CUs per region and model, regardless of tier. The connections to the database and to
+  ClickHouse have no TLS yet.
 - **Dynamo router extensions** (tenant WFQ, KV budgets) and the engine KV-budget adapter (P1).
 - **Controller gaps:** no leader election (run one replica), no drain workflow beyond
   PDBs, and no Dynamo Planner floor integration. The controller owns `replicas` on the

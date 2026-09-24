@@ -103,7 +103,7 @@ The code is in `crates/pt-telemetry`, served by the control plane. Gateways push
 ```mermaid
 flowchart LR
   GW[Regional gateways] -->|"batched usage records, region token"| ING[POST /internal/v1/usage]
-  ING --> ST[(UsageStore: in-memory now, ClickHouse later)]
+  ING --> ST[(UsageStore: ClickHouse, or in-memory)]
   C[Customer, management key] --> Q[usage / sla / sessions endpoints]
   Q --> ST
   Q --> DIR[Control-plane directory: tier, CUs, shape, price]
@@ -160,7 +160,13 @@ flowchart LR
 **Limits**
 - The report uses the reservation's current tier, CUs, and price. A tier change at
   renewal applies to the whole month in which it's viewed.
-- Records are kept in memory for 35 days (`[telemetry] retention_days`).
+- Records are stored in ClickHouse when `[telemetry.clickhouse]` (or `PT_CLICKHOUSE_URL`)
+  is set ([ADR-019](adr/ADR-019-clickhouse-usage-store.md)). Otherwise they're in memory and
+  lost on restart. Either way they're kept for `[telemetry] retention_days` (35), as a
+  ClickHouse TTL. A store outage makes ingest and reports return 503, never "no usage":
+  gateways retry their batches, and invoices wait.
+- Gateways push to the control plane, which writes to ClickHouse. The Redpanda stage of
+  the pipeline in §2 isn't built.
 - Usage records include `session_id`. They carry no prompt or completion content.
 
 ## Blog problems addressed

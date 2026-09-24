@@ -34,7 +34,15 @@ use store::MemoryStore;
 pub fn app<S: store::Store, P: planner::CapacityPlanner, C: Clock>(
     svc: Arc<Service<S, P, C>>,
 ) -> (axum::Router, Arc<telemetry::CpTelemetry<S, P, C>>) {
-    let (telemetry_routes, tel) = telemetry::telemetry(svc.clone());
+    app_with_usage(svc, pt_telemetry::UsageBackend::default())
+}
+
+/// [`app`] with usage records in `usage` (in memory, or ClickHouse: ADR-019).
+pub fn app_with_usage<S: store::Store, P: planner::CapacityPlanner, C: Clock>(
+    svc: Arc<Service<S, P, C>>,
+    usage: pt_telemetry::UsageBackend,
+) -> (axum::Router, Arc<telemetry::CpTelemetry<S, P, C>>) {
+    let (telemetry_routes, tel) = telemetry::telemetry(svc.clone(), usage);
     let quotes = quote_api::router(svc.clone(), tel.clone());
     let invoices = billing_api::router(svc.clone(), tel.clone());
     (

@@ -15,7 +15,9 @@ use pt_control_plane::clock::SystemClock;
 use pt_control_plane::planner::MemoryPlanner;
 use pt_control_plane::sql::SqlStore;
 use pt_control_plane::store::Store;
-use pt_control_plane::{app, in_memory, with_store, ControlPlaneConfig, Service};
+use pt_control_plane::{app_with_usage, in_memory, with_store, ControlPlaneConfig, Service};
+use pt_telemetry::clickhouse::ClickHouseUsageStore;
+use pt_telemetry::UsageBackend;
 use pt_telemetry::UsageStore;
 
 #[tokio::main]
@@ -93,7 +95,25 @@ async fn serve<S: Store>(
         }
     });
 
-    let (routes, telemetry) = app(svc.clone());
+    let usage = match svc.config.telemetry.resolved_clickhouse() {
+        Some(ch) => {
+            let store = ClickHouseUsageStore::new(ch, svc.config.telemetry.retention_days)
+                .context("configuring ClickHouse")?;
+            store
+                .migrate()
+                .await
+                .context("creating the ClickHouse usage table")?;
+            UsageBackend::ClickHouse(store)
+        }
+        None => {
+            tracing::warn!(
+                "no [telemetry.clickhouse] configured: usage is in memory and lost on restart"
+            );
+            UsageBackend::default()
+        }
+    };
+    tracing::info!(usage = usage.kind(), "usage store");
+    let (routes, telemetry) = app_with_usage(svc.clone(), usage);
 
     // Finalise last month's invoices once its grace period has passed (ADR-018).
     let (billing_svc, billing_tel) = (svc.clone(), telemetry.clone());
@@ -116,12 +136,14 @@ async fn serve<S: Store>(
         loop {
             tick.tick().await;
             let now = pt_telemetry::Directory::now_ms(&telemetry.directory);
-            let removed = telemetry
+            match telemetry
                 .store
                 .prune(now.saturating_sub(retention_ms))
-                .await;
-            if removed > 0 {
-                tracing::info!(removed, "pruned old usage records");
+                .await
+            {
+                Ok(0) => {}
+                Ok(removed) => tracing::info!(removed, "pruned old usage records"),
+                Err(e) => tracing::warn!(error = %e, "usage pruning failed; retrying next hour"),
             }
         }
     });

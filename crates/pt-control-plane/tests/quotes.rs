@@ -200,7 +200,7 @@ async fn reservation_history_becomes_a_resize_recommendation() {
             r
         })
         .collect();
-    tel.store.append("eu-west", records, now).await;
+    tel.store.append("eu-west", records, now).await.unwrap();
 
     let (code, v) = quote(&base, ACME_KEY, json!({ "from_reservation": pt.id })).await;
     assert_eq!(code, 200, "{v}");

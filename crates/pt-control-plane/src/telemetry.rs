@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use pt_telemetry::{
-    Directory, DirectoryError, ExclusionWindow, MemoryUsageStore, ReservationInfo, Telemetry,
+    Directory, DirectoryError, ExclusionWindow, ReservationInfo, Telemetry, UsageBackend,
 };
 
 use crate::clock::Clock;
@@ -63,14 +63,15 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Directory for CpDirectory<S, P, C> 
     }
 }
 
-pub type CpTelemetry<S, P, C> = Telemetry<MemoryUsageStore, CpDirectory<S, P, C>>;
+pub type CpTelemetry<S, P, C> = Telemetry<UsageBackend, CpDirectory<S, P, C>>;
 
-/// Telemetry for `svc`, with its routes.
+/// Telemetry for `svc` over `usage`, with its routes.
 pub fn telemetry<S: Store, P: CapacityPlanner, C: Clock>(
     svc: Arc<Service<S, P, C>>,
+    usage: UsageBackend,
 ) -> (Router, Arc<CpTelemetry<S, P, C>>) {
     let tel = Arc::new(Telemetry {
-        store: MemoryUsageStore::default(),
+        store: usage,
         directory: CpDirectory(svc),
     });
     (pt_telemetry::api::router(tel.clone()), tel)

@@ -24,25 +24,33 @@ pub struct IngestResult {
     pub duplicates: usize,
 }
 
+/// The usage store couldn't be reached or failed. Retryable. Never treat it as "no usage":
+/// invoices and SLA credits would silently lose data.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("usage store unavailable: {0}")]
+pub struct UsageError(pub String);
+
 pub trait UsageStore: Send + Sync + 'static {
+    /// Store records, skipping any whose `request_id` is already stored.
     fn append(
         &self,
         region: &str,
         records: Vec<UsageRecord>,
         now_ms: u64,
-    ) -> impl Future<Output = IngestResult> + Send;
+    ) -> impl Future<Output = Result<IngestResult, UsageError>> + Send;
 
-    /// One reservation's records in `[from_ms, to_ms)`, oldest first.
+    /// One reservation's records in `[from_ms, to_ms)`, oldest first, each `request_id`
+    /// once.
     fn range(
         &self,
         tenant: &str,
         reservation: &str,
         from_ms: u64,
         to_ms: u64,
-    ) -> impl Future<Output = Vec<StoredRecord>> + Send;
+    ) -> impl Future<Output = Result<Vec<StoredRecord>, UsageError>> + Send;
 
-    /// Drop records older than `before_ms`. Returns how many were removed.
-    fn prune(&self, before_ms: u64) -> impl Future<Output = usize> + Send;
+    /// Drop records older than `before_ms`. Returns how many were removed, if known.
+    fn prune(&self, before_ms: u64) -> impl Future<Output = Result<usize, UsageError>> + Send;
 }
 
 #[derive(Default)]
@@ -73,7 +81,12 @@ impl MemoryUsageStore {
 }
 
 impl UsageStore for MemoryUsageStore {
-    async fn append(&self, region: &str, records: Vec<UsageRecord>, now_ms: u64) -> IngestResult {
+    async fn append(
+        &self,
+        region: &str,
+        records: Vec<UsageRecord>,
+        now_ms: u64,
+    ) -> Result<IngestResult, UsageError> {
         let mut inner = self.lock();
         let mut result = IngestResult::default();
         for record in records {
@@ -102,7 +115,7 @@ impl UsageStore for MemoryUsageStore {
             );
             result.accepted += 1;
         }
-        result
+        Ok(result)
     }
 
     async fn range(
@@ -111,21 +124,21 @@ impl UsageStore for MemoryUsageStore {
         reservation: &str,
         from_ms: u64,
         to_ms: u64,
-    ) -> Vec<StoredRecord> {
+    ) -> Result<Vec<StoredRecord>, UsageError> {
         let inner = self.lock();
         let Some(list) = inner.by_reservation.get(reservation) else {
-            return vec![];
+            return Ok(vec![]);
         };
         let start = list.partition_point(|r| r.at_ms < from_ms);
         let end = list.partition_point(|r| r.at_ms < to_ms);
-        list[start..end]
+        Ok(list[start..end]
             .iter()
             .filter(|r| r.record.tenant == tenant)
             .cloned()
-            .collect()
+            .collect())
     }
 
-    async fn prune(&self, before_ms: u64) -> usize {
+    async fn prune(&self, before_ms: u64) -> Result<usize, UsageError> {
         let mut inner = self.lock();
         let mut removed = 0;
         for list in inner.by_reservation.values_mut() {
@@ -135,6 +148,6 @@ impl UsageStore for MemoryUsageStore {
         }
         inner.by_reservation.retain(|_, l| !l.is_empty());
         inner.seen.retain(|_, at| *at >= before_ms);
-        removed
+        Ok(removed)
     }
 }

@@ -411,7 +411,8 @@ where
                     now.saturating_sub(u64::from(days) * 86_400_000),
                     now,
                 )
-                .await;
+                .await
+                .map_err(|e| ServiceError::Unavailable(e.to_string()))?;
             let mut by_region: BTreeMap<String, Vec<TraceEntry>> = BTreeMap::new();
             for s in &records {
                 let r = &s.record;

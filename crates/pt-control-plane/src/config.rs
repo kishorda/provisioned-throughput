@@ -186,6 +186,33 @@ pub struct TelemetryConfig {
     /// starts, while traffic fails over (docs/07 §4).
     #[serde(default = "default_failover_window_minutes")]
     pub failover_window_minutes: u64,
+    /// Durable usage records (ADR-019). Without it, usage is in memory and lost on restart,
+    /// along with the month's spillover charges and SLA data. `PT_CLICKHOUSE_URL`
+    /// overrides `url`.
+    #[serde(default)]
+    pub clickhouse: Option<pt_telemetry::clickhouse::ClickHouseConfig>,
+}
+
+impl TelemetryConfig {
+    /// ClickHouse settings with `PT_CLICKHOUSE_URL` applied, or `None` for in-memory usage.
+    pub fn resolved_clickhouse(&self) -> Option<pt_telemetry::clickhouse::ClickHouseConfig> {
+        let env = std::env::var("PT_CLICKHOUSE_URL")
+            .ok()
+            .filter(|u| !u.is_empty());
+        match (&self.clickhouse, env) {
+            (Some(c), Some(url)) => {
+                Some(pt_telemetry::clickhouse::ClickHouseConfig { url, ..c.clone() })
+            }
+            (Some(c), None) => Some(c.clone()),
+            (None, Some(url)) => Some(pt_telemetry::clickhouse::ClickHouseConfig {
+                url,
+                database: "pt".into(),
+                user: "default".into(),
+                password: None,
+            }),
+            (None, None) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -209,6 +236,7 @@ impl Default for TelemetryConfig {
             retention_days: default_retention_days(),
             change_grace_minutes: default_change_grace_minutes(),
             failover_window_minutes: default_failover_window_minutes(),
+            clickhouse: None,
         }
     }
 }

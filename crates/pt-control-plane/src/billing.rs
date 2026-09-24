@@ -387,7 +387,8 @@ pub async fn compute<S: Store, P: CapacityPlanner, C: Clock>(
         let records = telemetry
             .store
             .range(tenant, &pt.id, ms(start), ms(end))
-            .await;
+            .await
+            .map_err(|e| ServiceError::Unavailable(e.to_string()))?;
         if let Some(price) = config.payg_price(&pt.model) {
             lines.extend(spillover_lines(&pt, &records, price, start, end));
         }

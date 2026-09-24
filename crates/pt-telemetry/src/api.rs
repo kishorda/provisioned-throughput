@@ -126,8 +126,19 @@ async fn ingest<U: UsageStore, D: Directory>(
     let result = tel
         .store
         .append(&region, batch.records, tel.directory.now_ms())
-        .await;
+        .await
+        .map_err(unavailable)?;
     Ok((StatusCode::ACCEPTED, Json(result)).into_response())
+}
+
+/// A usage-store failure: 503, so gateways retry their batch and customers retry reads.
+fn unavailable(e: crate::store::UsageError) -> ApiError {
+    tracing::error!(error = %e, "usage store unavailable");
+    error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "store_unavailable",
+        "Usage data is unavailable. Retry shortly.",
+    )
 }
 
 /// Authenticate the tenant and load the reservation.
@@ -257,7 +268,11 @@ async fn usage_report<U: UsageStore, D: Directory>(
             format!("That range and granularity give more than {MAX_BUCKETS} points. Use a coarser granularity."),
         ));
     }
-    let mut records = tel.store.range(&info.tenant, &info.id, from, to).await;
+    let mut records = tel
+        .store
+        .range(&info.tenant, &info.id, from, to)
+        .await
+        .map_err(unavailable)?;
     if let Some(d) = &q.deployment {
         records.retain(|r| r.record.deployment == *d);
     }
@@ -288,7 +303,11 @@ async fn sla_report<U: UsageStore, D: Directory>(
         ));
     };
     let period_end = end.min(now.max(start));
-    let records = tel.store.range(&info.tenant, &info.id, start, end).await;
+    let records = tel
+        .store
+        .range(&info.tenant, &info.id, start, end)
+        .await
+        .map_err(unavailable)?;
     let report = sla::report(&info, &records, &month, (start, period_end), now >= end);
     Ok(Json(report).into_response())
 }
@@ -301,7 +320,11 @@ async fn session_report<U: UsageStore, D: Directory>(
 ) -> Result<Response, ApiError> {
     let info = reservation(&tel, &headers, &id).await?;
     let (from, to) = range(&q, tel.directory.now_ms())?;
-    let records = tel.store.range(&info.tenant, &info.id, from, to).await;
+    let records = tel
+        .store
+        .range(&info.tenant, &info.id, from, to)
+        .await
+        .map_err(unavailable)?;
     sessions::report(&session, &records)
         .map(|r| Json(r).into_response())
         .ok_or_else(|| {

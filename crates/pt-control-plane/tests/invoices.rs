@@ -176,7 +176,7 @@ async fn a_month_of_fees_spillover_and_credits_is_invoiced_and_finalised() {
     );
     rejected[0].outcome = Outcome::Rejected(pt_core::RejectReason::EntitlementExhausted);
     usage.extend(rejected);
-    tel.store.append("eu-west", usage, ms(t)).await;
+    tel.store.append("eu-west", usage, ms(t)).await.unwrap();
 
     // Mid-month: a draft up to now, without a credit yet.
     svc.clock.set(at("2026-10-16T00:00:00Z"));
@@ -233,7 +233,8 @@ async fn a_month_of_fees_spillover_and_credits_is_invoiced_and_finalised() {
             ),
             ms(at("2026-11-03T01:00:00Z")),
         )
-        .await;
+        .await
+        .unwrap();
     let (_, fin) = get(&base, "/v1/invoices/2026-10", ACME_KEY).await;
     assert_eq!(fin["status"], "final");
     assert_eq!(fin["total"], inv["total"]);
