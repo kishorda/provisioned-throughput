@@ -46,6 +46,11 @@ pub struct EntitlementSourceConfig {
     pub token: String,
     /// Control plane's Ed25519 public key (hex). Unsigned or mis-signed snapshots are rejected.
     pub public_key: String,
+    /// More trusted keys, during a signing-key rotation (docs/12 §6, ADR-020). Add the new
+    /// key here before the control plane switches to it, and remove the old one once every
+    /// gateway reports the new key id.
+    #[serde(default)]
+    pub extra_public_keys: Vec<String>,
     /// Last-known-good snapshot, so the gateway serves through control-plane outages and
     /// restarts. Strongly recommended.
     #[serde(default)]
@@ -131,6 +136,12 @@ fn default_fallback_decay_secs() -> f64 {
 }
 
 impl EntitlementSourceConfig {
+    /// Every trusted public key: `public_key` then `extra_public_keys`.
+    pub fn trusted_keys(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.public_key.as_str())
+            .chain(self.extra_public_keys.iter().map(String::as_str))
+    }
+
     pub fn heartbeat_url(&self) -> String {
         format!(
             "{}/internal/v1/heartbeats",
@@ -233,8 +244,11 @@ impl GatewayConfig {
                         .into(),
                 );
             }
-            if pt_entitlement::SnapshotVerifier::from_hex(&e.public_key).is_err() {
-                return invalid("entitlements.public_key must be a 32-byte hex Ed25519 key".into());
+            if pt_entitlement::SnapshotVerifier::from_hex_list(e.trusted_keys()).is_err() {
+                return invalid(
+                    "entitlements.public_key and extra_public_keys must be 32-byte hex Ed25519 keys"
+                        .into(),
+                );
             }
             if e.wait_secs > 60 {
                 return invalid("entitlements.wait_secs can be at most 60".into());

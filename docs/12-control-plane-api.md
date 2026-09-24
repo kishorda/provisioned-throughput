@@ -220,7 +220,20 @@ sequenceDiagram
   version is read before the data, so a change made during generation is never labelled
   as already seen. Gateways apply only newer versions for their own region.
 - **Trust.** The control plane signs the exact body with Ed25519, and gateways hold only
-  the public key. Pull tokens are per region, and a token for another region gets 403.
+  public keys. Pull tokens are per region, and a token for another region gets 403.
+- **Key rotation** ([ADR-020](adr/ADR-020-signing-key-rotation.md)). Each snapshot names its
+  key in `x-pt-key-id`: the first 16 hex characters of the SHA-256 of the public key.
+  Verifiers trust a set of keys: gateways use `public_key` plus `extra_public_keys`, and the
+  capacity controller a comma-separated `PT_SNAPSHOT_PUBLIC_KEY`. To rotate:
+  1. `pt-control-plane keygen`, then add the new public key to every verifier.
+  2. Restart the control plane with the new `signing_key`. A restart always publishes a
+     newer version, so every verifier fetches a snapshot signed by the new key and
+     rewrites its cache.
+  3. When `GET /internal/v1/regions` shows every gateway's `snapshot_key_ids` on the new
+     id, remove the old public key.
+
+  A gateway that missed step 1 refuses the new snapshots (`signed by key …, which isn't
+  trusted`) and keeps serving its cached one.
 - **Gateway apply.** A new view is swapped in atomically. Each reservation's limiter is
   reconfigured in place, so the bucket level, debt, burst credit, and in-flight
   settlements carry over. Deployments keep their output estimators. Reservations whose
@@ -272,8 +285,7 @@ and `total`, in minor units.
   model, regardless of tier, and is rebuilt from the store at startup. It's per-process,
   so run one control-plane instance until planning moves into the database.
 - TLS to the database.
-- Rotating the snapshot signing key. Gateways trust one public key, so rotation needs
-  support for more than one key.
+- Signing in a KMS or secret store. The signing key is read from configuration.
 - Invoice adjustments, taxes, and payment collection. Final invoices are immutable, but
   there's no adjustment line for corrections yet.
 

@@ -55,6 +55,7 @@ impl HeartbeatClient {
                 "gateway_id": self.gateway_id,
                 "serving": serving,
                 "snapshot_version": app.entitlements().version,
+                "key_id": app.entitlements().key_id.clone(),
             }))
             .send()
             .await?

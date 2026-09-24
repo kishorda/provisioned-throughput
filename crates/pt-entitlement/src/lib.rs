@@ -6,6 +6,11 @@
 //! versioned so a gateway never goes backwards.
 //!
 //! The signature covers the exact snapshot bytes. Gateways verify the bytes, then parse them.
+//!
+//! **Key rotation (ADR-020).** Each key has an id: the first 16 hex characters of the
+//! SHA-256 of its public key, so ids can't be mistyped. The control plane signs with one
+//! key and sends its id in [`KEY_ID_HEADER`]. Verifiers trust a set of public keys, so a new
+//! key can be trusted before it's used and an old one removed after.
 
 use ed25519_dalek::{Signer, Verifier};
 use pt_admission::BoundaryPolicy;
@@ -15,6 +20,14 @@ use sha2::{Digest, Sha256};
 
 /// HTTP header carrying the hex Ed25519 signature of the response body.
 pub const SIGNATURE_HEADER: &str = "x-pt-signature";
+
+/// HTTP header naming the key that signed the body (see [`key_id`]).
+pub const KEY_ID_HEADER: &str = "x-pt-key-id";
+
+/// A public key's id: the first 16 hex characters of its SHA-256.
+pub fn key_id(public_key: &ed25519_dalek::VerifyingKey) -> String {
+    sha256_hex(public_key.as_bytes())[..16].to_string()
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -147,6 +160,10 @@ pub enum Error {
     BadSignatureEncoding,
     #[error("signature does not match")]
     BadSignature,
+    #[error("signed by key {0}, which isn't trusted")]
+    UnknownKey(String),
+    #[error("no trusted keys configured")]
+    NoKeys,
     #[error("snapshot is not valid JSON: {0}")]
     Parse(#[from] serde_json::Error),
 }
@@ -154,9 +171,9 @@ pub enum Error {
 /// Held by the control plane only.
 pub struct SnapshotSigner(ed25519_dalek::SigningKey);
 
-/// Distributed to every region.
+/// Distributed to every region: the public keys a verifier trusts, by id.
 #[derive(Debug, Clone)]
-pub struct SnapshotVerifier(ed25519_dalek::VerifyingKey);
+pub struct SnapshotVerifier(Vec<(String, ed25519_dalek::VerifyingKey)>);
 
 impl SnapshotSigner {
     /// From a 32-byte hex seed.
@@ -183,6 +200,11 @@ impl SnapshotSigner {
         encode_hex(self.0.verifying_key().as_bytes())
     }
 
+    /// This key's id, sent in [`KEY_ID_HEADER`].
+    pub fn key_id(&self) -> String {
+        key_id(&self.0.verifying_key())
+    }
+
     /// Serialise and sign. Returns (body, hex signature).
     pub fn sign(&self, snapshot: &Snapshot) -> (Vec<u8>, String) {
         let body = serde_json::to_vec(snapshot).expect("snapshot serialises");
@@ -192,24 +214,70 @@ impl SnapshotSigner {
 }
 
 impl SnapshotVerifier {
+    /// Trust one public key (hex).
     pub fn from_hex(public_key: &str) -> Result<Self, Error> {
-        let bytes: [u8; 32] = decode_hex(public_key.trim())
-            .and_then(|b| b.try_into().ok())
-            .ok_or(Error::BadKey(32))?;
-        ed25519_dalek::VerifyingKey::from_bytes(&bytes)
-            .map(Self)
-            .map_err(|_| Error::BadKey(32))
+        Self::from_hex_list([public_key])
     }
 
-    /// Check `signature` over `body`, then parse it.
+    /// Trust several public keys (hex), for example the current key and the next one
+    /// during a rotation.
+    pub fn from_hex_list<'a>(keys: impl IntoIterator<Item = &'a str>) -> Result<Self, Error> {
+        let mut out: Vec<(String, ed25519_dalek::VerifyingKey)> = Vec::new();
+        for k in keys {
+            let bytes: [u8; 32] = decode_hex(k.trim())
+                .and_then(|b| b.try_into().ok())
+                .ok_or(Error::BadKey(32))?;
+            let key =
+                ed25519_dalek::VerifyingKey::from_bytes(&bytes).map_err(|_| Error::BadKey(32))?;
+            let id = key_id(&key);
+            if !out.iter().any(|(i, _)| *i == id) {
+                out.push((id, key));
+            }
+        }
+        if out.is_empty() {
+            return Err(Error::NoKeys);
+        }
+        Ok(Self(out))
+    }
+
+    /// Ids of the trusted keys.
+    pub fn key_ids(&self) -> Vec<String> {
+        self.0.iter().map(|(id, _)| id.clone()).collect()
+    }
+
+    /// Check `signature` over `body` with any trusted key, then parse it.
     pub fn verify(&self, body: &[u8], signature: &str) -> Result<Snapshot, Error> {
+        self.verify_with(body, signature, None).map(|(s, _)| s)
+    }
+
+    /// Check `signature` over `body` with the key named by `key_id`, or with any trusted
+    /// key when it's `None` (a control plane from before key ids). Returns the snapshot and
+    /// the id of the key that verified it.
+    pub fn verify_with(
+        &self,
+        body: &[u8],
+        signature: &str,
+        key_id: Option<&str>,
+    ) -> Result<(Snapshot, String), Error> {
         let sig: [u8; 64] = decode_hex(signature.trim())
             .and_then(|b| b.try_into().ok())
             .ok_or(Error::BadSignatureEncoding)?;
-        self.0
-            .verify(body, &ed25519_dalek::Signature::from_bytes(&sig))
-            .map_err(|_| Error::BadSignature)?;
-        Ok(serde_json::from_slice(body)?)
+        let sig = ed25519_dalek::Signature::from_bytes(&sig);
+        let candidates: Vec<&(String, ed25519_dalek::VerifyingKey)> = match key_id {
+            Some(id) => {
+                let found: Vec<_> = self.0.iter().filter(|(i, _)| i == id.trim()).collect();
+                if found.is_empty() {
+                    return Err(Error::UnknownKey(id.trim().to_string()));
+                }
+                found
+            }
+            None => self.0.iter().collect(),
+        };
+        let (id, _) = candidates
+            .into_iter()
+            .find(|(_, k)| k.verify(body, &sig).is_ok())
+            .ok_or(Error::BadSignature)?;
+        Ok((serde_json::from_slice(body)?, id.clone()))
     }
 }
 
@@ -340,6 +408,53 @@ mod tests {
             Err(Error::BadSignatureEncoding)
         ));
         assert!(SnapshotSigner::from_hex("abcd").is_err());
+    }
+
+    #[test]
+    fn several_trusted_keys_and_key_ids() {
+        let (old_seed, old_pub) = SnapshotSigner::generate();
+        let (new_seed, new_pub) = SnapshotSigner::generate();
+        let old = SnapshotSigner::from_hex(&old_seed).unwrap();
+        let new = SnapshotSigner::from_hex(&new_seed).unwrap();
+        assert_eq!(old.key_id().len(), 16);
+        assert_ne!(old.key_id(), new.key_id());
+
+        // During a rotation, both are trusted.
+        let both = SnapshotVerifier::from_hex_list([old_pub.as_str(), new_pub.as_str()]).unwrap();
+        assert_eq!(both.key_ids(), [old.key_id(), new.key_id()]);
+        for signer in [&old, &new] {
+            let (body, sig) = signer.sign(&snapshot());
+            let (s, id) = both
+                .verify_with(&body, &sig, Some(&signer.key_id()))
+                .unwrap();
+            assert_eq!((s, id), (snapshot(), signer.key_id()));
+            // Without an id (an older control plane), any trusted key is tried.
+            assert_eq!(
+                both.verify_with(&body, &sig, None).unwrap().1,
+                signer.key_id()
+            );
+        }
+
+        // After it, the old key is no longer trusted.
+        let only_new = SnapshotVerifier::from_hex(&new_pub).unwrap();
+        let (body, sig) = old.sign(&snapshot());
+        assert!(matches!(
+            only_new.verify_with(&body, &sig, Some(&old.key_id())),
+            Err(Error::UnknownKey(id)) if id == old.key_id()
+        ));
+        assert!(matches!(
+            only_new.verify_with(&body, &sig, None),
+            Err(Error::BadSignature)
+        ));
+        // A key id that doesn't match the signature fails.
+        assert!(matches!(
+            both.verify_with(&body, &sig, Some(&new.key_id())),
+            Err(Error::BadSignature)
+        ));
+        assert!(matches!(
+            SnapshotVerifier::from_hex_list(Vec::<&str>::new()),
+            Err(Error::NoKeys)
+        ));
     }
 
     #[test]

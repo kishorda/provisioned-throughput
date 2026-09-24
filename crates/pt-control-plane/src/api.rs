@@ -684,6 +684,10 @@ async fn entitlements<S: Store, P: CapacityPlanner, C: Clock>(
                 header::HeaderName::from_static(pt_entitlement::SIGNATURE_HEADER),
                 HeaderValue::from_str(&signature).expect("hex signature"),
             ),
+            (
+                header::HeaderName::from_static(pt_entitlement::KEY_ID_HEADER),
+                HeaderValue::from_str(&svc.signer().key_id()).expect("hex key id"),
+            ),
         ],
         body,
     )

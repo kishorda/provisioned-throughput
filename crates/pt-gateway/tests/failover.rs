@@ -54,6 +54,7 @@ fn gateway_config(cp: &str, engine: &str, public_key: String) -> GatewayConfig {
             region: "eu-central".into(),
             token: "region-token-eu-central-dev".into(),
             public_key,
+            extra_public_keys: vec![],
             cache_path: None,
             wait_secs: 5,
             heartbeat_interval_ms: 50,

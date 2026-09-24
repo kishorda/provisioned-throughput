@@ -180,8 +180,12 @@ curl -s 127.0.0.1:8095/v1/leases -H 'Authorization: Bearer quota-token-eu-west-d
 `listen` port and `cache_path`.
 
 The gateway caches the last snapshot in `entitlements-eu-west.json`, and keeps serving from
-it if the control plane is down. `pt-control-plane keygen` makes a new signing key pair. The
-keys in `config/` are for development only.
+it if the control plane is down. `pt-control-plane keygen` makes a new signing key pair and
+prints its key id. To rotate without an outage, add the new public key to every gateway's
+`extra_public_keys` (and the controller's `PT_SNAPSHOT_PUBLIC_KEY`, comma-separated),
+restart the control plane with the new `signing_key`, then remove the old key once
+`/internal/v1/regions` shows no gateway on its id (docs/12 §6, ADR-020). The keys in
+`config/` are for development only.
 
 ## Tenant-aware router
 
@@ -258,7 +262,7 @@ Follow-ups from the roadmap in docs/11:
   Router `hot_spare` flags are configured, not rendered by the capacity controller.
   There's no weight-prefetch DaemonSet, so loaded warm spares start cold. Preempted PAYG isn't metered.
   Failover activation needs the control plane.
-- **Signing-key rotation.** Gateways trust a single snapshot public key.
+- **Signing in a KMS.** The snapshot signing key is read from configuration.
 - **Control-plane scale-out.** State is durable in SQL (ADR-017), but the capacity planner
   and region health are per-process, so run one control-plane instance. The planner counts
   CUs per region and model, regardless of tier. The connections to the database and to

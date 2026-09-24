@@ -91,6 +91,7 @@ fn gateway_config(
             region: "eu-west".into(),
             token: "region-token-eu-west-dev".into(),
             public_key,
+            extra_public_keys: vec![],
             cache_path: Some(cache.into()),
             wait_secs: 5,
             heartbeat_interval_ms: 0,
@@ -296,8 +297,9 @@ async fn untrusted_snapshots_are_rejected() {
     let app = AppState::new(&config, Arc::new(MemorySink::default())).unwrap();
     let client = SnapshotClient::new(config.entitlements.clone().unwrap()).unwrap();
     let err = client.poll_once(&app, false).await.unwrap_err();
+    // The key id names the control plane's key, which this gateway doesn't trust.
     assert!(
-        matches!(err, SyncError::Verify(pt_entitlement::Error::BadSignature)),
+        matches!(err, SyncError::Verify(pt_entitlement::Error::UnknownKey(ref id)) if *id == svc.signer().key_id()),
         "{err}"
     );
     assert!(app.deployment_for_key(&key).is_none());

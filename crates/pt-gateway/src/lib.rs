@@ -44,6 +44,7 @@ async fn entitlements(State(app): State<AppState>) -> Json<serde_json::Value> {
         "region": region,
         "version": e.version,
         "generated_at": e.generated_at,
+        "key_id": e.key_id,
         "applied_secs_ago": e.applied_at.elapsed().as_secs(),
         "reservations": e.reservation_count(),
         "deployments": e.deployment_count(),

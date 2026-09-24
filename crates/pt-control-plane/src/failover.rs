@@ -9,7 +9,7 @@
 //! - **Steering.** DNS weights per region and per reservation, from incidents rather than
 //!   raw health, so operator-declared incidents drain regions too.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 
 use jiff::{SignedDuration, Timestamp};
@@ -118,11 +118,19 @@ pub struct RegionStatus {
     /// Start of the current unbroken run of serving heartbeats.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub serving_since: Option<Timestamp>,
+    /// Gateways reporting within the heartbeat timeout, by the key that signed their
+    /// current snapshot (`unknown` if they didn't say). A rotation's old key can be removed
+    /// once no gateway reports it.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub snapshot_key_ids: BTreeMap<String, usize>,
 }
+
+/// A gateway's last heartbeat: when, whether it was serving, and its snapshot's key.
+type GatewaySeen = (Timestamp, bool, Option<String>);
 
 #[derive(Debug, Default)]
 struct Seen {
-    gateways: HashMap<String, (Timestamp, bool)>,
+    gateways: HashMap<String, GatewaySeen>,
     last_serving: Option<Timestamp>,
     serving_since: Option<Timestamp>,
 }
@@ -138,10 +146,10 @@ impl RegionHealth {
         let mut all = self.regions.lock().unwrap_or_else(|e| e.into_inner());
         let seen = all.entry(region.to_string()).or_default();
         seen.gateways
-            .insert(hb.gateway_id.clone(), (now, hb.serving));
+            .insert(hb.gateway_id.clone(), (now, hb.serving, hb.key_id.clone()));
         // Forget gateways long gone, so the map stays small as pods churn.
         seen.gateways
-            .retain(|_, (at, _)| now.duration_since(*at) <= timeout * 10);
+            .retain(|_, (at, _, _)| now.duration_since(*at) <= timeout * 10);
         if hb.serving {
             let broken = seen
                 .last_serving
@@ -163,14 +171,20 @@ impl RegionHealth {
                 serving_gateways: 0,
                 last_serving_at: None,
                 serving_since: None,
+                snapshot_key_ids: BTreeMap::new(),
             };
         };
-        let recent: Vec<bool> = seen
+        let recent: Vec<&GatewaySeen> = seen
             .gateways
             .values()
-            .filter(|(at, _)| now.duration_since(*at) <= timeout)
-            .map(|(_, serving)| *serving)
+            .filter(|(at, _, _)| now.duration_since(*at) <= timeout)
             .collect();
+        let mut snapshot_key_ids = BTreeMap::new();
+        for (_, _, key) in &recent {
+            *snapshot_key_ids
+                .entry(key.clone().unwrap_or_else(|| "unknown".into()))
+                .or_default() += 1;
+        }
         let serving = seen
             .last_serving
             .is_some_and(|t| now.duration_since(t) <= timeout);
@@ -182,9 +196,10 @@ impl RegionHealth {
                 Health::Down
             },
             gateways: recent.len(),
-            serving_gateways: recent.iter().filter(|s| **s).count(),
+            serving_gateways: recent.iter().filter(|(_, s, _)| *s).count(),
             last_serving_at: seen.last_serving,
             serving_since: seen.serving_since.filter(|_| serving),
+            snapshot_key_ids,
         }
     }
 }

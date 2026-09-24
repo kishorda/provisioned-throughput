@@ -301,6 +301,10 @@ pub struct Heartbeat {
     pub serving: bool,
     #[serde(default)]
     pub snapshot_version: u64,
+    /// Key that signed the gateway's current snapshot. Shows when every gateway has moved
+    /// to a new key, so the old one can be removed.
+    #[serde(default)]
+    pub key_id: Option<String>,
 }
 
 /// `POST /internal/v1/incidents`

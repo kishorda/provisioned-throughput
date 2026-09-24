@@ -121,12 +121,20 @@ async fn follower_turns_a_region_failure_into_pool_demand() {
     // Snapshots signed by another key, or for another region, are refused.
     let (_, other_key) = pt_entitlement::SnapshotSigner::generate();
     let (wrong_key, _) = SnapshotFollower::new(SnapshotSource {
-        public_key: other_key,
+        public_key: other_key.clone(),
         cache_path: None,
         ..source.clone()
     })
     .unwrap();
     assert!(wrong_key.poll_once(false).await.is_err());
+    // During a rotation, several comma-separated keys are trusted.
+    let (both, _) = SnapshotFollower::new(SnapshotSource {
+        public_key: format!("{other_key}, {}", source.public_key),
+        cache_path: None,
+        ..source.clone()
+    })
+    .unwrap();
+    assert!(both.poll_once(false).await.unwrap());
     let (wrong_region, _) = SnapshotFollower::new(SnapshotSource {
         region: "eu-west".into(),
         cache_path: None,

@@ -39,6 +39,7 @@ spec:
             - name: PT_REGION_TOKEN
               valueFrom:
                 secretKeyRef: { name: pt-region, key: token }
+            # Comma-separated during a signing-key rotation (ADR-020).
             - name: PT_SNAPSHOT_PUBLIC_KEY
               valueFrom:
                 secretKeyRef: { name: pt-region, key: snapshot-public-key }

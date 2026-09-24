@@ -31,8 +31,13 @@ async fn main() -> anyhow::Result<()> {
     let arg = std::env::args().nth(1);
     if arg.as_deref() == Some("keygen") {
         let (seed, public) = pt_entitlement::SnapshotSigner::generate();
+        let id = pt_entitlement::SnapshotSigner::from_hex(&seed)?.key_id();
+        println!("# key id {id}. To rotate (docs/12 §6): add public_key to the verifiers'");
+        println!("# extra_public_keys, then switch signing_key, then remove the old key.");
         println!("signing_key = \"{seed}\"   # control plane [entitlements]");
-        println!("public_key  = \"{public}\"   # gateway [entitlements]");
+        println!(
+            "public_key  = \"{public}\"   # gateway [entitlements] and PT_SNAPSHOT_PUBLIC_KEY"
+        );
         return Ok(());
     }
     let path = arg.unwrap_or_else(|| "config/control-plane.toml".into());

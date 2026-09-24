@@ -14,6 +14,8 @@ region = "eu-west"
 token = "region-token-eu-west-dev"
 # Public half of the development signing key in config/control-plane.toml.
 public_key = "b51da0aa7183df2b9a9ac31f26e8f856fd8b818d1118cdb87c9253afe13bb164"
+# During a signing-key rotation, the next key's public half (docs/12 §6, ADR-020).
+# extra_public_keys = ["<new public key>"]
 cache_path = "entitlements-eu-west.json"
 wait_secs = 30
 # Heartbeats let the control plane detect a region failure (docs/07 §4). The gateway

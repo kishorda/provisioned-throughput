@@ -284,3 +284,64 @@ impl Store for MemoryStore {
         Ok(out)
     }
 }
+
+/// A shared store, so several service instances can use one (for example, a control plane
+/// restarted with a new signing key in tests).
+impl<T: Store> Store for std::sync::Arc<T> {
+    async fn insert(&self, pt: ProvisionedThroughput) -> Result<(), StoreError> {
+        (**self).insert(pt).await
+    }
+    async fn get(
+        &self,
+        tenant: &str,
+        id: &str,
+    ) -> Result<Option<ProvisionedThroughput>, StoreError> {
+        (**self).get(tenant, id).await
+    }
+    async fn list(&self, tenant: &str) -> Result<Vec<ProvisionedThroughput>, StoreError> {
+        (**self).list(tenant).await
+    }
+    async fn list_live(&self) -> Result<Vec<ProvisionedThroughput>, StoreError> {
+        (**self).list_live().await
+    }
+    async fn update(
+        &self,
+        pt: ProvisionedThroughput,
+        expected_version: u64,
+    ) -> Result<(), StoreError> {
+        (**self).update(pt, expected_version).await
+    }
+    async fn idempotency_get(
+        &self,
+        tenant: &str,
+        key: &str,
+    ) -> Result<Option<IdempotencyRecord>, StoreError> {
+        (**self).idempotency_get(tenant, key).await
+    }
+    async fn idempotency_put(
+        &self,
+        tenant: &str,
+        key: &str,
+        record: IdempotencyRecord,
+    ) -> Result<(), StoreError> {
+        (**self).idempotency_put(tenant, key, record).await
+    }
+    async fn insert_incident(&self, incident: RegionIncident) -> Result<(), StoreError> {
+        (**self).insert_incident(incident).await
+    }
+    async fn update_incident(&self, incident: RegionIncident) -> Result<(), StoreError> {
+        (**self).update_incident(incident).await
+    }
+    async fn list_incidents(&self) -> Result<Vec<RegionIncident>, StoreError> {
+        (**self).list_incidents().await
+    }
+    async fn insert_invoice(&self, invoice: Invoice) -> Result<(), StoreError> {
+        (**self).insert_invoice(invoice).await
+    }
+    async fn get_invoice(&self, tenant: &str, period: &str) -> Result<Option<Invoice>, StoreError> {
+        (**self).get_invoice(tenant, period).await
+    }
+    async fn list_invoices(&self, tenant: &str) -> Result<Vec<Invoice>, StoreError> {
+        (**self).list_invoices(tenant).await
+    }
+}

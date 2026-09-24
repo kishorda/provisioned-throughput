@@ -11,7 +11,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use pt_entitlement::{SnapshotVerifier, SIGNATURE_HEADER};
+use pt_entitlement::{SnapshotVerifier, KEY_ID_HEADER, SIGNATURE_HEADER};
 use serde::{Deserialize, Serialize};
 
 use crate::config::EntitlementSourceConfig;
@@ -23,6 +23,9 @@ use crate::state::{AppState, ApplyError};
 struct CachedSnapshot {
     signature: String,
     body: String,
+    /// Absent in caches written before key ids.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    key_id: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -49,7 +52,7 @@ pub struct SnapshotClient {
 
 impl SnapshotClient {
     pub fn new(config: EntitlementSourceConfig) -> Result<Self, SyncError> {
-        let verifier = SnapshotVerifier::from_hex(&config.public_key)?;
+        let verifier = SnapshotVerifier::from_hex_list(config.trusted_keys())?;
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(config.wait_secs + 10))
             .build()?;
@@ -72,11 +75,13 @@ impl SnapshotClient {
         };
         let cached: CachedSnapshot = serde_json::from_str(&text)
             .map_err(|e| SyncError::Cache(format!("parsing {path}: {e}")))?;
-        let snapshot = self
-            .verifier
-            .verify(cached.body.as_bytes(), &cached.signature)?;
-        let report = app.apply_snapshot(&snapshot)?;
-        tracing::info!(version = report.version, reservations = report.reservations, %path, "loaded cached entitlements");
+        let (snapshot, key_id) = self.verifier.verify_with(
+            cached.body.as_bytes(),
+            &cached.signature,
+            cached.key_id.as_deref(),
+        )?;
+        let report = app.apply_signed_snapshot(&snapshot, Some(&key_id))?;
+        tracing::info!(version = report.version, reservations = report.reservations, %key_id, %path, "loaded cached entitlements");
         Ok(Some(report.version))
     }
 
@@ -106,9 +111,16 @@ impl SnapshotClient {
             .and_then(|v| v.to_str().ok())
             .ok_or(SyncError::MissingSignature)?
             .to_string();
+        let key_id = resp
+            .headers()
+            .get(KEY_ID_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
         let body = resp.bytes().await?;
-        let snapshot = self.verifier.verify(&body, &signature)?;
-        let report = match app.apply_snapshot(&snapshot) {
+        let (snapshot, key_id) = self
+            .verifier
+            .verify_with(&body, &signature, key_id.as_deref())?;
+        let report = match app.apply_signed_snapshot(&snapshot, Some(&key_id)) {
             Ok(r) => r,
             // Same content under an older or equal version: nothing to do.
             Err(ApplyError::Stale { .. }) => return Ok(None),
@@ -119,6 +131,7 @@ impl SnapshotClient {
             reservations = report.reservations,
             deployments = report.deployments,
             skipped = report.skipped.len(),
+            %key_id,
             "applied entitlement snapshot"
         );
         if let Some(path) = &self.config.cache_path {
@@ -126,6 +139,7 @@ impl SnapshotClient {
                 signature,
                 body: String::from_utf8(body.to_vec())
                     .map_err(|e| SyncError::Cache(e.to_string()))?,
+                key_id: Some(key_id),
             };
             if let Err(e) = write_atomic(
                 Path::new(path),

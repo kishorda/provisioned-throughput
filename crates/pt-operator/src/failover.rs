@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pt_crds::PoolAllocationSpec;
-use pt_entitlement::{failover_cus, Snapshot, SnapshotVerifier, SIGNATURE_HEADER};
+use pt_entitlement::{failover_cus, Snapshot, SnapshotVerifier, KEY_ID_HEADER, SIGNATURE_HEADER};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
@@ -64,7 +64,8 @@ pub struct SnapshotSource {
     pub control_plane_url: String,
     pub region: String,
     pub token: String,
-    /// Ed25519 public key (hex).
+    /// Trusted Ed25519 public keys (hex), comma-separated during a signing-key rotation
+    /// (ADR-020).
     pub public_key: String,
     /// Last-known-good cache, so a restart during a control-plane outage still knows about
     /// an active failover.
@@ -106,6 +107,8 @@ pub enum FollowError {
 struct Cached {
     signature: String,
     body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    key_id: Option<String>,
 }
 
 /// Follows the region's snapshot and publishes each newer one.
@@ -118,7 +121,13 @@ pub struct SnapshotFollower {
 
 impl SnapshotFollower {
     pub fn new(source: SnapshotSource) -> Result<(Self, SnapshotRx), FollowError> {
-        let verifier = SnapshotVerifier::from_hex(&source.public_key)?;
+        let verifier = SnapshotVerifier::from_hex_list(
+            source
+                .public_key
+                .split(',')
+                .map(str::trim)
+                .filter(|k| !k.is_empty()),
+        )?;
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(source.wait_secs + 10))
             .build()?;
@@ -139,8 +148,13 @@ impl SnapshotFollower {
     }
 
     /// Verify, check the region and version, publish, and cache.
-    fn accept(&self, body: &[u8], signature: &str) -> Result<bool, FollowError> {
-        let snap = self.verifier.verify(body, signature)?;
+    fn accept(
+        &self,
+        body: &[u8],
+        signature: &str,
+        key_id: Option<&str>,
+    ) -> Result<bool, FollowError> {
+        let (snap, key_id) = self.verifier.verify_with(body, signature, key_id)?;
         if snap.region != self.source.region {
             return Err(FollowError::WrongRegion(snap.region));
         }
@@ -150,6 +164,7 @@ impl SnapshotFollower {
         tracing::info!(
             version = snap.version,
             failovers = snap.failovers.len(),
+            %key_id,
             "entitlement snapshot"
         );
         self.tx.send_replace(Some(Arc::new(snap)));
@@ -157,6 +172,7 @@ impl SnapshotFollower {
             let cached = Cached {
                 signature: signature.into(),
                 body: String::from_utf8_lossy(body).into_owned(),
+                key_id: Some(key_id),
             };
             let tmp = path.with_extension("tmp");
             let written = std::fs::write(&tmp, serde_json::to_vec(&cached).unwrap_or_default())
@@ -178,7 +194,7 @@ impl SnapshotFollower {
         };
         match serde_json::from_str::<Cached>(&text) {
             Ok(c) => self
-                .accept(c.body.as_bytes(), &c.signature)
+                .accept(c.body.as_bytes(), &c.signature, c.key_id.as_deref())
                 .unwrap_or(false),
             Err(_) => false,
         }
@@ -213,8 +229,13 @@ impl SnapshotFollower {
             .and_then(|v| v.to_str().ok())
             .ok_or(FollowError::MissingSignature)?
             .to_string();
+        let key_id = resp
+            .headers()
+            .get(KEY_ID_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
         let body = resp.bytes().await?;
-        self.accept(&body, &signature)
+        self.accept(&body, &signature, key_id.as_deref())
     }
 
     /// Follow forever. Errors keep the last snapshot.

@@ -78,6 +78,7 @@ The design rests on six decisions:
 | [017](adr/ADR-017-sql-control-plane-store.md) | A Postgres-protocol store for the control plane (CockroachDB in production) |
 | [018](adr/ADR-018-monthly-invoices.md) | Calendar-month invoices in arrears, finalised and stored |
 | [019](adr/ADR-019-clickhouse-usage-store.md) | Usage records in ClickHouse, behind a fallible store |
+| [020](adr/ADR-020-signing-key-rotation.md) | Rotate snapshot signing keys with key ids and trusted sets (refines 007) |
 
 ## Glossary
 

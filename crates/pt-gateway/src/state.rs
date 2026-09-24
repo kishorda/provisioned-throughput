@@ -94,6 +94,8 @@ pub struct Entitlements {
     /// When the control plane generated the snapshot (RFC 3339). Survives cache reloads,
     /// so it shows how stale the entitlements really are.
     pub generated_at: Option<String>,
+    /// The key that signed the snapshot (ADR-020).
+    pub key_id: Option<String>,
     /// Key hash → deployment, and when the key stops working (rotated-out keys only).
     by_key_hash: HashMap<String, (Arc<Deployment>, Option<u64>)>,
     by_deployment: HashMap<String, Arc<Deployment>>,
@@ -119,6 +121,7 @@ impl Entitlements {
             source,
             applied_at: Instant::now(),
             generated_at: None,
+            key_id: None,
             by_key_hash: HashMap::new(),
             by_deployment: HashMap::new(),
             reservations: HashMap::new(),
@@ -433,6 +436,15 @@ impl AppState {
 
     /// Replace the entitlements with `snapshot`, if it's for this region and newer.
     pub fn apply_snapshot(&self, snapshot: &Snapshot) -> Result<ApplyReport, ApplyError> {
+        self.apply_signed_snapshot(snapshot, None)
+    }
+
+    /// [`Self::apply_snapshot`], recording the id of the key that signed it.
+    pub fn apply_signed_snapshot(
+        &self,
+        snapshot: &Snapshot,
+        key_id: Option<&str>,
+    ) -> Result<ApplyReport, ApplyError> {
         let current = self.entitlements();
         let region = match &current.source {
             EntitlementSource::Static => return Err(ApplyError::StaticConfig),
@@ -460,6 +472,7 @@ impl AppState {
             &snapshot.failovers,
         );
         view.generated_at = Some(snapshot.generated_at.clone());
+        view.key_id = key_id.map(str::to_owned);
         let mut slot = self.current.write().unwrap_or_else(|e| e.into_inner());
         // Another apply may have won while this one was building.
         if slot.version >= snapshot.version {

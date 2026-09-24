@@ -280,13 +280,14 @@ async fn fetch_snapshot(
         return (status, None, tag);
     }
     let sig = h(&r, pt_entitlement::SIGNATURE_HEADER).to_string();
+    let key_id = h(&r, pt_entitlement::KEY_ID_HEADER).to_string();
     let body = r.bytes().await.unwrap();
-    let public = pt_entitlement::SnapshotSigner::from_hex(&config().entitlements.signing_key)
+    let signer =
+        pt_entitlement::SnapshotSigner::from_hex(&config().entitlements.signing_key).unwrap();
+    assert_eq!(key_id, signer.key_id(), "the signing key's id is sent");
+    let (snap, _) = pt_entitlement::SnapshotVerifier::from_hex(&signer.public_key_hex())
         .unwrap()
-        .public_key_hex();
-    let snap = pt_entitlement::SnapshotVerifier::from_hex(&public)
-        .unwrap()
-        .verify(&body, &sig)
+        .verify_with(&body, &sig, Some(&key_id))
         .expect("signature verifies");
     (status, Some(snap), tag)
 }

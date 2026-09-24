@@ -37,6 +37,7 @@ fn beat(svc: &Svc, region: &str, gateway: &str, serving: bool) {
             gateway_id: gateway.into(),
             serving,
             snapshot_version: 1,
+            key_id: None,
         },
     );
 }

@@ -96,6 +96,7 @@ async fn gateway_usage_reaches_customer_reports() {
             region: "eu-west".into(),
             token: REGION_TOKEN.into(),
             public_key: svc.signer().public_key_hex(),
+            extra_public_keys: vec![],
             cache_path: None,
             wait_secs: 5,
             heartbeat_interval_ms: 0,
