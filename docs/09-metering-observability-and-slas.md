@@ -165,6 +165,9 @@ flowchart LR
   lost on restart. Either way they're kept for `[telemetry] retention_days` (35), as a
   ClickHouse TTL. A store outage makes ingest and reports return 503, never "no usage":
   gateways retry their batches, and invoices wait.
+- A remote ClickHouse must be reached over `https://` (with `ca_cert` for a private CA,
+  and `client_cert`/`client_key` for mutual TLS), or startup fails
+  ([ADR-021](adr/ADR-021-database-tls.md)).
 - Gateways push to the control plane, which writes to ClickHouse. The Redpanda stage of
   the pipeline in §2 isn't built.
 - Usage records include `session_id`. They carry no prompt or completion content.

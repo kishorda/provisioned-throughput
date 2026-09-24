@@ -46,6 +46,6 @@ credits.
   columns.
 - ⚠️ The existence check before insert is a read per batch, and a race can store a
   duplicate row until merges collapse it. Reads are correct either way.
-- ⚠️ No TLS to ClickHouse: run it on a private network.
+- TLS to ClickHouse: see [ADR-021](ADR-021-database-tls.md).
 - ⚠️ Without Redpanda, the control plane's ingest API is on the metering path. Gateways
   buffer 100,000 records and retry while it's down.

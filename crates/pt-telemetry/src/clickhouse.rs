@@ -38,6 +38,52 @@ pub struct ClickHouseConfig {
     /// Prefer `PT_CLICKHOUSE_PASSWORD` over putting it in a file.
     #[serde(default)]
     pub password: Option<String>,
+    /// PEM file of the CA that signed ClickHouse's certificate, for an `https://` URL with a
+    /// private CA. Public roots are always trusted.
+    #[serde(default)]
+    pub ca_cert: Option<String>,
+    /// PEM files for mutual TLS: the client certificate (chain) and its private key.
+    #[serde(default)]
+    pub client_cert: Option<String>,
+    #[serde(default)]
+    pub client_key: Option<String>,
+    /// Allow `http://` to a non-loopback host. Off by default (ADR-021).
+    #[serde(default)]
+    pub allow_insecure_transport: bool,
+}
+
+impl Default for ClickHouseConfig {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            database: default_database(),
+            user: default_user(),
+            password: None,
+            ca_cert: None,
+            client_cert: None,
+            client_key: None,
+            allow_insecure_transport: false,
+        }
+    }
+}
+
+/// Whether `url` protects the connection well enough: `https`, a loopback host, or
+/// `allow_insecure`.
+pub fn check_transport(url: &str, allow_insecure: bool) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid ClickHouse URL: {e}"))?;
+    let loopback = parsed.host_str().is_some_and(|h| {
+        let h = h.trim_start_matches('[').trim_end_matches(']');
+        h.eq_ignore_ascii_case("localhost")
+            || h.parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    });
+    if parsed.scheme() == "https" || loopback || allow_insecure {
+        Ok(())
+    } else {
+        Err(format!(
+            "ClickHouse at {url} isn't reached over TLS. Use an https:// URL (with ca_cert for a private CA), or set allow_insecure_transport = true"
+        ))
+    }
 }
 
 fn default_database() -> String {
@@ -73,11 +119,37 @@ fn outcome_str(o: &Outcome) -> &'static str {
 }
 
 impl ClickHouseUsageStore {
+    /// Checks the transport policy and loads any CA and client certificates.
     pub fn new(config: ClickHouseConfig, retention_days: u64) -> Result<Self, UsageError> {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .map_err(|e| UsageError(e.to_string()))?;
+        check_transport(&config.url, config.allow_insecure_transport).map_err(UsageError)?;
+        let read = |path: &str| {
+            std::fs::read(path).map_err(|e| UsageError(format!("reading {path}: {e}")))
+        };
+        let mut builder = reqwest::Client::builder()
+            .use_rustls_tls()
+            .timeout(Duration::from_secs(30));
+        if let Some(ca) = &config.ca_cert {
+            let cert = reqwest::Certificate::from_pem(&read(ca)?)
+                .map_err(|e| UsageError(format!("{ca}: {e}")))?;
+            builder = builder.add_root_certificate(cert);
+        }
+        match (&config.client_cert, &config.client_key) {
+            (Some(cert), Some(key)) => {
+                let mut pem = read(cert)?;
+                pem.push(b'\n');
+                pem.extend(read(key)?);
+                let identity = reqwest::Identity::from_pem(&pem)
+                    .map_err(|e| UsageError(format!("client certificate: {e}")))?;
+                builder = builder.identity(identity);
+            }
+            (None, None) => {}
+            _ => {
+                return Err(UsageError(
+                    "set both client_cert and client_key, or neither".into(),
+                ))
+            }
+        }
+        let http = builder.build().map_err(|e| UsageError(e.to_string()))?;
         Ok(Self {
             config,
             retention_days,
@@ -338,5 +410,38 @@ impl UsageStore for ClickHouseUsageStore {
     /// Retention is the table TTL (`retention_days`), so there's nothing to do here.
     async fn prune(&self, _before_ms: u64) -> Result<usize, UsageError> {
         Ok(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transport_policy() {
+        let ok = |u: &str| check_transport(u, false).is_ok();
+        assert!(ok("http://127.0.0.1:8123"), "loopback");
+        assert!(ok("http://localhost:8123"));
+        assert!(ok("http://[::1]:8123"));
+        assert!(ok("https://clickhouse.internal:8443"));
+        assert!(!ok("http://clickhouse.internal:8123"));
+        assert!(!ok("http://10.0.0.7:8123"));
+        assert!(
+            check_transport("http://10.0.0.7:8123", true).is_ok(),
+            "explicitly allowed"
+        );
+        assert!(check_transport("not a url", true).is_err());
+        // Refused at construction, before any request.
+        let insecure = ClickHouseConfig {
+            url: "http://10.0.0.7:8123".into(),
+            ..Default::default()
+        };
+        assert!(ClickHouseUsageStore::new(insecure, 35).is_err());
+        let half_mtls = ClickHouseConfig {
+            url: "https://ch.internal".into(),
+            client_cert: Some("/nonexistent.pem".into()),
+            ..Default::default()
+        };
+        assert!(ClickHouseUsageStore::new(half_mtls, 35).is_err());
     }
 }

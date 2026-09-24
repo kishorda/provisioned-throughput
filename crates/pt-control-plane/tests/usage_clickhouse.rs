@@ -76,6 +76,7 @@ async fn usage_survives_a_restart_and_is_invoiced() {
         database: format!("pt_test_cp_{}", uuid::Uuid::new_v4().simple()),
         user: "default".into(),
         password: None,
+        ..Default::default()
     };
     let clickhouse = || {
         let s = ClickHouseUsageStore::new(ch.clone(), 35).unwrap();
@@ -154,6 +155,7 @@ async fn an_unreachable_usage_store_fails_loudly() {
             database: "pt".into(),
             user: "default".into(),
             password: None,
+            ..Default::default()
         },
         35,
     )

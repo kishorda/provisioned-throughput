@@ -168,6 +168,10 @@ stateDiagram-v2
 - **`SqlStore`** (`sql.rs`) is the durable store. It uses the Postgres protocol:
   CockroachDB in production, PostgreSQL for development. Configure it with `[store] url`
   or `PT_DATABASE_URL`. Pending migrations from `migrations/` are applied at startup.
+  For a remote database, the URL must ask for verified TLS, for example
+  `?sslmode=verify-full&sslrootcert=/etc/pt/db-ca.pem`, plus `sslcert`/`sslkey` for client
+  certificates. Otherwise startup fails, unless `[store] allow_insecure_transport = true`
+  ([ADR-021](adr/ADR-021-database-tls.md)).
 - **`MemoryStore`** backs tests and runs without `[store]`. Its state is lost on restart.
 
 The schema (`0001_initial.sql`) is in the SQL both databases share:
@@ -284,7 +288,6 @@ and `total`, in minor units.
 - A remote Capacity Planner client. The in-memory planner counts CUs per region and
   model, regardless of tier, and is rebuilt from the store at startup. It's per-process,
   so run one control-plane instance until planning moves into the database.
-- TLS to the database.
 - Signing in a KMS or secret store. The signing key is read from configuration.
 - Invoice adjustments, taxes, and payment collection. Final invoices are immutable, but
   there's no adjustment line for corrections yet.

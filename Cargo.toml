@@ -42,9 +42,9 @@ kube = { version = "4.2", default-features = false }
 # Plain HTTP only: engines are reached inside the cluster. Avoids TLS C build deps.
 reqwest = { version = "0.12", default-features = false, features = ["stream", "json"] }
 serde = { version = "1", features = ["derive"] }
-# Control-plane store over the Postgres protocol (CockroachDB or PostgreSQL). No TLS
-# feature: it would pull in a C-built TLS stack. Run the database on a private network.
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "json", "time"] }
+# Control-plane store over the Postgres protocol (CockroachDB or PostgreSQL). TLS uses
+# rustls with the ring provider, which builds without cmake (ADR-021).
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "json", "time", "tls-rustls-ring-webpki"] }
 serde_json = "1"
 serde_yaml = "0.9"
 sha2 = "0.10"

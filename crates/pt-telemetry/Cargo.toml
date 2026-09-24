@@ -10,7 +10,8 @@ rust-version.workspace = true
 pt-core.workspace = true
 axum.workspace = true
 jiff.workspace = true
-reqwest.workspace = true
+# rustls with ring for https to ClickHouse (ADR-021).
+reqwest = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

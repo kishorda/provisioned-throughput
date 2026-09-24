@@ -44,13 +44,18 @@ failover_window_minutes = 5    # multi-region SLA exclusion after a region incid
 
 # Durable usage records (ADR-019). Without this, usage is in memory and lost on restart.
 # PT_CLICKHOUSE_URL overrides url; PT_CLICKHOUSE_PASSWORD keeps the password out of files.
+# A remote ClickHouse must use https:// (ADR-021). ca_cert is for a private CA;
+# client_cert/client_key enable mutual TLS.
 # [telemetry.clickhouse]
 # url = "http://127.0.0.1:18123"
 # database = "pt"
 # user = "default"
+# ca_cert = "/etc/pt/clickhouse-ca.pem"
 
 # Durable store (ADR-017): CockroachDB in production, PostgreSQL works for development.
 # Without it, state is in memory and lost on restart. PT_DATABASE_URL overrides `url`.
+# A remote database must use verified TLS (ADR-021), for example
+#   postgres://pt@db.internal:26257/pt?sslmode=verify-full&sslrootcert=/etc/pt/db-ca.pem
 # [store]
 # url = "postgres://postgres@127.0.0.1:55432/pt"
 # max_connections = 10

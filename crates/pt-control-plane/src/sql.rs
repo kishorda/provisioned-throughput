@@ -12,6 +12,11 @@
 //!   timeouts, serialization retries, undecodable rows) is `Unavailable`, which the API
 //!   reports as 503 and the snapshot endpoint never turns into an empty snapshot.
 //!
+//! **Transport (ADR-021).** TLS is rustls with the ring provider, configured through the
+//! standard URL parameters: `sslmode=verify-full&sslrootcert=/path/ca.pem`, plus `sslcert`
+//! and `sslkey` for client certificates. [`check_transport`] refuses a non-loopback host
+//! without verified TLS unless explicitly allowed.
+//!
 //! Timestamps are stored at microsecond precision. The service's `SystemClock` truncates to
 //! microseconds, so a resource reads back exactly as it was written.
 
@@ -23,7 +28,7 @@ use pt_core::TermMonths;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
-use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
+use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions, PgRow, PgSslMode};
 use sqlx::types::Json;
 use sqlx::{Postgres, Row, Transaction};
 use time::OffsetDateTime;
@@ -109,6 +114,16 @@ impl SqlStore {
             .await
             .map_err(unavailable)?;
         Ok(Self { pool })
+    }
+
+    /// [`check_transport`], then [`Self::connect`].
+    pub async fn connect_checked(
+        url: &str,
+        max_connections: u32,
+        allow_insecure_transport: bool,
+    ) -> Result<Self, StoreError> {
+        check_transport(url, allow_insecure_transport).map_err(StoreError::Unavailable)?;
+        Self::connect(url, max_connections).await
     }
 
     pub fn from_pool(pool: PgPool) -> Self {
@@ -267,6 +282,34 @@ impl SqlStore {
         let rows = q.fetch_all(&self.pool).await.map_err(unavailable)?;
         self.assemble(rows).await
     }
+}
+
+/// Whether `url` protects the connection well enough: verified TLS (`sslmode=verify-ca` or
+/// `verify-full`), a loopback host, a Unix socket, or `allow_insecure`. `require` isn't
+/// enough: it encrypts but doesn't check who's answering.
+pub fn check_transport(url: &str, allow_insecure: bool) -> Result<(), String> {
+    use std::str::FromStr;
+    let opts = PgConnectOptions::from_str(url).map_err(|e| format!("invalid database URL: {e}"))?;
+    let verified = matches!(
+        opts.get_ssl_mode(),
+        PgSslMode::VerifyCa | PgSslMode::VerifyFull
+    );
+    let local = opts.get_socket().is_some() || is_loopback(opts.get_host());
+    if verified || local || allow_insecure {
+        Ok(())
+    } else {
+        Err(format!(
+            "the database at {} isn't reached over verified TLS. Add sslmode=verify-full&sslrootcert=<ca.pem> to the URL, or set [store] allow_insecure_transport = true",
+            opts.get_host()
+        ))
+    }
+}
+
+fn is_loopback(host: &str) -> bool {
+    let h = host.trim_start_matches('[').trim_end_matches(']');
+    h.eq_ignore_ascii_case("localhost")
+        || h.parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 fn pt_from_row(r: PgRow) -> Result<ProvisionedThroughput, StoreError> {
@@ -664,5 +707,36 @@ impl Store for SqlStore {
             .into_iter()
             .map(incident_from_row)
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transport_policy() {
+        let ok = |u: &str| check_transport(u, false).is_ok();
+        assert!(ok("postgres://u@127.0.0.1:5432/pt"), "loopback");
+        assert!(ok("postgres://u@localhost/pt"));
+        assert!(ok("postgres://u@[::1]:5432/pt"));
+        assert!(ok(
+            "postgres://u@db.internal/pt?sslmode=verify-full&sslrootcert=/ca.pem"
+        ));
+        assert!(ok("postgres://u@db.internal/pt?sslmode=verify-ca"));
+        assert!(
+            !ok("postgres://u@db.internal/pt"),
+            "sqlx defaults to prefer"
+        );
+        assert!(
+            !ok("postgres://u@db.internal/pt?sslmode=require"),
+            "unverified"
+        );
+        assert!(!ok("postgres://u@10.0.0.5/pt?sslmode=disable"));
+        assert!(
+            check_transport("postgres://u@10.0.0.5/pt", true).is_ok(),
+            "explicitly allowed"
+        );
+        assert!(check_transport("not a url", true).is_err());
     }
 }

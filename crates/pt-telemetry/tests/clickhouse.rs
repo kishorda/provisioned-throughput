@@ -16,6 +16,7 @@ fn config(name: &str) -> Option<ClickHouseConfig> {
         database: format!("pt_test_{name}_{}", uuid::Uuid::new_v4().simple()),
         user: "default".into(),
         password: None,
+        ..Default::default()
     })
 }
 
@@ -193,6 +194,7 @@ async fn an_unreachable_server_is_an_error_not_empty_usage() {
             database: "pt".into(),
             user: "default".into(),
             password: None,
+            ..Default::default()
         },
         35,
     )
@@ -204,4 +206,37 @@ async fn an_unreachable_server_is_an_error_not_empty_usage() {
     let r = record("acme", "pt-1", 1, TrafficClass::Provisioned);
     assert!(s.append("eu-west", vec![r], 1).await.is_err());
     assert!(s.migrate().await.is_err());
+}
+
+/// HTTPS to ClickHouse with a private CA (ADR-021). Set `CLICKHOUSE_TEST_TLS_URL` (for
+/// example `https://127.0.0.1:18443`) and `PT_TEST_TLS_DIR` (with `ca.pem` and `rogue.pem`).
+#[tokio::test]
+async fn https_with_a_private_ca() {
+    let (Ok(url), Ok(dir)) = (
+        std::env::var("CLICKHOUSE_TEST_TLS_URL"),
+        std::env::var("PT_TEST_TLS_DIR"),
+    ) else {
+        eprintln!("CLICKHOUSE_TEST_TLS_URL or PT_TEST_TLS_DIR not set; skipping");
+        return;
+    };
+    let config = |ca: Option<&str>| ClickHouseConfig {
+        url: url.clone(),
+        database: format!("pt_test_tls_{}", uuid::Uuid::new_v4().simple()),
+        ca_cert: ca.map(|f| format!("{dir}/{f}")),
+        ..Default::default()
+    };
+
+    let s = ClickHouseUsageStore::new(config(Some("ca.pem")), 35).unwrap();
+    s.migrate().await.unwrap();
+    let r = record("acme", "pt-1", 1_790_000_000_000, TrafficClass::Provisioned);
+    s.append("eu-west", vec![r.clone()], 0).await.unwrap();
+    let got = s.range("acme", "pt-1", 0, u64::MAX / 2).await.unwrap();
+    assert_eq!(got[0].record, r);
+
+    // Without the private CA, or with the wrong one, the server isn't trusted.
+    for ca in [None, Some("rogue.pem")] {
+        let s = ClickHouseUsageStore::new(config(ca), 35).unwrap();
+        let err = s.migrate().await.unwrap_err();
+        assert!(err.0.contains("clickhouse"), "{err}");
+    }
 }

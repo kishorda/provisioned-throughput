@@ -93,6 +93,10 @@ pub struct StoreConfig {
     /// Apply pending migrations at startup.
     #[serde(default = "default_true")]
     pub migrate: bool,
+    /// Allow a connection to a non-loopback host without verified TLS
+    /// (`sslmode=verify-ca` or `verify-full`). Off by default (ADR-021).
+    #[serde(default)]
+    pub allow_insecure_transport: bool,
 }
 
 impl StoreConfig {
@@ -209,6 +213,7 @@ impl TelemetryConfig {
                 database: "pt".into(),
                 user: "default".into(),
                 password: None,
+                ..Default::default()
             }),
             (None, None) => None,
         }

@@ -45,9 +45,13 @@ async fn main() -> anyhow::Result<()> {
     match config.store.as_ref().and_then(|s| s.resolved_url()) {
         Some(url) => {
             let store_cfg = config.store.clone().expect("checked above");
-            let store = SqlStore::connect(&url, store_cfg.max_connections)
-                .await
-                .context("connecting to the control-plane database")?;
+            let store = SqlStore::connect_checked(
+                &url,
+                store_cfg.max_connections,
+                store_cfg.allow_insecure_transport,
+            )
+            .await
+            .context("connecting to the control-plane database")?;
             if store_cfg.migrate {
                 store.migrate().await.context("applying migrations")?;
             }

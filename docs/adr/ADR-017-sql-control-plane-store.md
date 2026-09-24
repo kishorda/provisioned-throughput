@@ -16,7 +16,7 @@ returned `Vec`. With a real database, an outage would read as "no reservations",
 snapshot endpoint would publish empty entitlements that make every gateway drop every key.
 
 ## Decision
-- **One SQL store, `SqlStore`, over the Postgres protocol** (sqlx, no TLS feature).
+- **One SQL store, `SqlStore`, over the Postgres protocol** (sqlx; TLS added in ADR-021).
   CockroachDB in production and PostgreSQL for development and tests run the same
   queries.
 - **Portable schema.** The unused migrations are consolidated into `0001_initial.sql`,
@@ -54,7 +54,6 @@ snapshot endpoint would publish empty entitlements that make every gateway drop 
 - ⚠️ If a commit fails ambiguously (the connection drops during COMMIT), the service undoes
   its planner changes even if the write landed. The next restart's `restore_capacity`
   corrects it.
-- ⚠️ No TLS to the database yet: run it on a private network. Adding TLS means choosing
-  a rustls provider that builds without cmake (ring), as the operator does.
+- TLS to the database: see [ADR-021](ADR-021-database-tls.md).
 - ⚠️ Idempotency keys older than 7 days are ignored and reusable, but only deleted by
   CockroachDB's row-level TTL. On PostgreSQL they need a periodic delete.
