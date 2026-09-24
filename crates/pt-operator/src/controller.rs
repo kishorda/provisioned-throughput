@@ -1,7 +1,8 @@
 //! The Regional Capacity Controller loop (docs/03 §2.2, docs/08 §2).
 //!
 //! Primary resource: `ModelPool`. It also reacts to changes in the pool's `PoolAllocation`s
-//! and `PerformanceProfile`, and to its owned `DynamoGraphDeployment` and PDBs.
+//! and `PerformanceProfile`, to its owned `DynamoGraphDeployment` and PDBs, and, with a
+//! snapshot source, to every new entitlement snapshot (failover demand, docs/07 §4).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,10 +19,15 @@ use kube::{Client, Resource, ResourceExt};
 use pt_crds::{labels, ModelPool, PerformanceProfile, PoolAllocation};
 use serde_json::json;
 
+use crate::failover::failover_extra;
+pub use crate::failover::SnapshotRx;
 use crate::plan::{self, PoolInput};
 
 /// Resync even without changes, to repair drift in children.
 const RESYNC: Duration = Duration::from_secs(300);
+/// Resync while a failover is active, so the return ramp and the release of warm spares
+/// are applied promptly.
+const FAILOVER_RESYNC: Duration = Duration::from_secs(30);
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -36,6 +42,7 @@ pub enum Error {
 pub struct Ctx {
     pub client: Client,
     pub dgd: ApiResource,
+    pub snapshot: Option<SnapshotRx>,
 }
 
 pub fn dgd_resource() -> ApiResource {
@@ -46,10 +53,17 @@ pub fn dgd_resource() -> ApiResource {
     ))
 }
 
-pub async fn run(client: Client) -> anyhow::Result<()> {
+pub async fn run(client: Client, snapshot: Option<SnapshotRx>) -> anyhow::Result<()> {
     let ctx = Arc::new(Ctx {
         client: client.clone(),
         dgd: dgd_resource(),
+        snapshot: snapshot.clone(),
+    });
+    // Every new snapshot may start, move, or end a failover: reconcile all pools.
+    let snapshots = futures::stream::unfold(snapshot, |rx| async move {
+        let mut rx = rx?;
+        rx.changed().await.ok()?;
+        Some(((), Some(rx)))
     });
     let pools = Api::<ModelPool>::all(client.clone());
     let allocations = Api::<PoolAllocation>::all(client.clone());
@@ -62,6 +76,7 @@ pub async fn run(client: Client) -> anyhow::Result<()> {
     let controller = Controller::new(pools, watcher::Config::default());
     let pool_store = controller.store();
     controller
+        .reconcile_all_on(snapshots)
         .owns_with(dgds, ctx.dgd.clone(), owned.clone())
         .owns(pdbs, owned)
         .watches(
@@ -115,6 +130,9 @@ async fn reconcile(pool: Arc<ModelPool>, ctx: Arc<Ctx>) -> Result<Action, Error>
         .filter(|a| a.spec.pool == name)
         .map(|a| a.spec)
         .collect();
+    let snapshot = ctx.snapshot.as_ref().and_then(|rx| rx.borrow().clone());
+    let now_ms = k8s_openapi::jiff::Timestamp::now().as_millisecond().max(0) as u64;
+    let extra = failover_extra(snapshot.as_deref(), &allocations, now_ms);
     let profile = Api::<PerformanceProfile>::all(client.clone())
         .get_opt(&pool.spec.profile_ref)
         .await?;
@@ -131,6 +149,7 @@ async fn reconcile(pool: Arc<ModelPool>, ctx: Arc<Ctx>) -> Result<Action, Error>
         &input,
         profile.as_ref().map(|p| &p.spec),
         &allocations,
+        &extra,
         &now_rfc3339(),
     );
 
@@ -178,10 +197,18 @@ async fn reconcile(pool: Arc<ModelPool>, ctx: Arc<Ctx>) -> Result<Action, Error>
         namespace = %ns,
         allocations = plan.status.allocations,
         desired = plan.status.desired_replicas.total,
+        failover_wu_per_sec = plan.status.failover_wu_per_sec,
+        warm_spares_loaded = plan.status.warm_spares_loaded.total,
         applied = plan.children.is_some(),
         "reconciled"
     );
-    Ok(Action::requeue(RESYNC))
+    let failover =
+        plan.status.failover_wu_per_sec > 0.0 || plan.status.warm_spares_loaded.total > 0;
+    Ok(Action::requeue(if failover {
+        FAILOVER_RESYNC
+    } else {
+        RESYNC
+    }))
 }
 
 fn error_policy(pool: Arc<ModelPool>, err: &Error, _ctx: Arc<Ctx>) -> Action {

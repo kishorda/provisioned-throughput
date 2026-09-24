@@ -12,6 +12,20 @@
 //! WU/s at each tier's SLO, so demand is converted to replica-equivalents per allocation
 //! before summing. Disaggregated pools size prefill and decode separately, splitting demand
 //! by `prefillShare`.
+//!
+//! **Failover** ([`size_with_failover`], docs/07 §4). While a region failover is active,
+//! the pool's allocations carry extra demand. The pool is sized with it, and the increase
+//! in the floor is absorbed first by hot spares (already serving; the router preempts
+//! their PAYG), then by loading warm spares:
+//!
+//! ```text
+//! needed_warm = max(0, floor_failover − floor − hot_spares)      # per role
+//! loaded      = min(needed_warm, warm_spares), never below the previous loaded count
+//! desired     = floor + failure_k + maintenance_slots + hot_spares + loaded
+//! minAvail    = min(floor_failover + failure_k, desired − maintenance_slots)
+//! ```
+//!
+//! Loaded warm spares are held until the failover ends, so the ramp-down doesn't churn GPUs.
 
 use pt_core::cost::TierCapacity;
 use pt_core::Tier;
@@ -44,6 +58,10 @@ pub struct Sizing {
     pub allocated_wu_per_sec: f64,
     /// `desired` exceeded `maxReplicas` and was capped.
     pub shortfall: Option<Shortfall>,
+    /// Warm spares loaded for an active failover. Included in `desired`.
+    pub warm_loaded: RoleReplicas,
+    /// Replicas the failover needs beyond hot and warm spares (per role, summed).
+    pub failover_shortfall: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,7 +180,14 @@ pub fn size(
         min_available,
         allocated_wu_per_sec: allocated,
         shortfall: None,
+        warm_loaded: RoleReplicas::default(),
+        failover_shortfall: 0,
     };
+    apply_max_replicas(pool, &mut sizing);
+    Ok(sizing)
+}
+
+fn apply_max_replicas(pool: &ModelPoolSpec, sizing: &mut Sizing) {
     if let Some(max) = pool.max_replicas {
         if sizing.desired.total > max {
             sizing.shortfall = Some(Shortfall {
@@ -172,6 +197,83 @@ pub fn size(
             sizing.desired = cap_total(sizing.desired, max);
         }
     }
+}
+
+/// Size a pool whose allocations carry extra failover demand (`extra[i]` WU/s for
+/// `demands[i]`; missing entries are 0). `previous` is the warm spares loaded at the last
+/// reconcile. With no failover demand, this is [`size`] and no warm spares are loaded.
+pub fn size_with_failover(
+    pool: &ModelPoolSpec,
+    profile: &PerformanceProfileSpec,
+    demands: &[Demand],
+    extra: &[f64],
+    previous: RoleReplicas,
+) -> Result<Sizing, SizingError> {
+    let base = size(pool, profile, demands)?;
+    let extra_total: f64 = extra.iter().filter(|e| e.is_finite() && **e > 0.0).sum();
+    if extra_total <= 0.0 {
+        return Ok(base);
+    }
+    let with_failover: Vec<Demand> = demands
+        .iter()
+        .enumerate()
+        .map(|(i, d)| Demand {
+            wu_per_sec: d.wu_per_sec
+                + extra
+                    .get(i)
+                    .copied()
+                    .filter(|e| e.is_finite() && *e > 0.0)
+                    .unwrap_or(0.0),
+            ..*d
+        })
+        .collect();
+    let failover = size(pool, profile, &with_failover)?;
+
+    let h = &pool.headroom;
+    let mut short = 0;
+    let mut role = |base: u32, fo: u32, prev: u32| -> u32 {
+        let needed = fo.saturating_sub(base).saturating_sub(h.hot_spares);
+        short += needed.saturating_sub(h.warm_spares);
+        needed.min(h.warm_spares).max(prev.min(h.warm_spares))
+    };
+    let base_desired = |floor: u32| floor + h.failure_domain_k + h.maintenance_slots + h.hot_spares;
+    let (floor, loaded, desired, min_available) = if pool.disaggregation.enabled {
+        let (bp, bd) = (base.floor.prefill, base.floor.decode);
+        let (fp, fd) = (failover.floor.prefill, failover.floor.decode);
+        let lp = role(bp, fp, previous.prefill);
+        let ld = role(bd, fd, previous.decode);
+        let (dp, dd) = (base_desired(bp) + lp, base_desired(bd) + ld);
+        (
+            base.floor,
+            RoleReplicas::disaggregated(lp, ld),
+            RoleReplicas::disaggregated(dp, dd),
+            RoleReplicas::disaggregated(
+                (fp + h.failure_domain_k).min(dp - h.maintenance_slots),
+                (fd + h.failure_domain_k).min(dd - h.maintenance_slots),
+            ),
+        )
+    } else {
+        let b = base.floor.aggregated;
+        let f = failover.floor.aggregated;
+        let l = role(b, f, previous.aggregated);
+        let d = base_desired(b) + l;
+        (
+            base.floor,
+            RoleReplicas::aggregated(l),
+            RoleReplicas::aggregated(d),
+            RoleReplicas::aggregated((f + h.failure_domain_k).min(d - h.maintenance_slots)),
+        )
+    };
+    let mut sizing = Sizing {
+        floor,
+        desired,
+        min_available,
+        allocated_wu_per_sec: base.allocated_wu_per_sec,
+        shortfall: None,
+        warm_loaded: loaded,
+        failover_shortfall: short,
+    };
+    apply_max_replicas(pool, &mut sizing);
     Ok(sizing)
 }
 
@@ -362,6 +464,86 @@ mod tests {
                 tier: Tier::Agentic
             }
         );
+    }
+
+    #[test]
+    fn failover_loads_warm_spares_beyond_hot_spares() {
+        let mut p = pool(); // k 2, maintenance 1, hot 1
+        p.headroom.warm_spares = 3;
+        let d = [demand(100_000.0, Tier::Interactive, 1.0)]; // floor 4
+        let none = RoleReplicas::default();
+
+        // No failover demand: the same as `size`.
+        let s = size_with_failover(&p, &profile(), &d, &[0.0], none).unwrap();
+        assert_eq!(s, size(&p, &profile(), &d).unwrap());
+        assert_eq!(s.warm_loaded.total, 0);
+
+        // +32k WU/s: floor 4 → 5. The hot spare covers it; no warm spare loads.
+        let s = size_with_failover(&p, &profile(), &d, &[32_000.0], none).unwrap();
+        assert_eq!(s.warm_loaded.total, 0);
+        assert_eq!(s.desired.total, 8);
+        assert_eq!(
+            s.min_available.total,
+            5 + 2,
+            "hot spare now carries provisioned work"
+        );
+
+        // +100k: floor 4 → 7. One hot spare, then two warm spares.
+        let s = size_with_failover(&p, &profile(), &d, &[100_000.0], none).unwrap();
+        assert_eq!(s.floor.total, 4, "the floor stays the normal floor");
+        assert_eq!(s.warm_loaded, RoleReplicas::aggregated(2));
+        assert_eq!(s.desired.total, 8 + 2);
+        assert_eq!(s.min_available.total, 9);
+        assert_eq!(s.failover_shortfall, 0);
+
+        // Ramping down: the loaded spares are held while any failover demand remains.
+        let s =
+            size_with_failover(&p, &profile(), &d, &[1.0], RoleReplicas::aggregated(2)).unwrap();
+        assert_eq!(s.warm_loaded.total, 2);
+        // Over: released.
+        let s = size_with_failover(&p, &profile(), &d, &[], RoleReplicas::aggregated(2)).unwrap();
+        assert_eq!(s.warm_loaded.total, 0);
+        assert_eq!(s.desired.total, 8);
+
+        // +300k: 400k / 40k / 0.8 = 12.5, so floor 4 → 13. Hot 1 + warm 3 cover 4 of 9;
+        // 5 short.
+        let s = size_with_failover(&p, &profile(), &d, &[300_000.0], none).unwrap();
+        assert_eq!(s.warm_loaded.total, 3);
+        assert_eq!(s.failover_shortfall, 5);
+        assert_eq!(
+            s.min_available.total,
+            11 - 1,
+            "never above desired − maintenance"
+        );
+
+        // maxReplicas still caps.
+        p.max_replicas = Some(9);
+        let s = size_with_failover(&p, &profile(), &d, &[100_000.0], none).unwrap();
+        assert_eq!(s.desired.total, 9);
+        assert_eq!(s.shortfall, Some(Shortfall { needed: 10, max: 9 }));
+    }
+
+    #[test]
+    fn failover_warm_spares_per_role_when_disaggregated() {
+        let mut p = pool();
+        p.headroom.warm_spares = 2;
+        p.disaggregation = Disaggregation {
+            enabled: true,
+            prefill_share: 0.3,
+            ..Default::default()
+        };
+        let mut prof = profile();
+        prof.role_capacity = Some(RoleCapacity {
+            prefill: cap(120_000.0, 100_000.0, 150_000.0),
+            decode: cap(20_000.0, 18_000.0, 30_000.0),
+        });
+        let d = [demand(100_000.0, Tier::Interactive, 1.0)];
+        // Base: prefill 30k/120k/0.8 → 1, decode 70k/20k/0.8 = 4.375 → 5.
+        // Failover +100k: prefill 60k → 1, decode 140k → 9. Decode needs 4 − 1 hot = 3.
+        let s = size_with_failover(&p, &prof, &d, &[100_000.0], RoleReplicas::default()).unwrap();
+        assert_eq!(s.warm_loaded, RoleReplicas::disaggregated(0, 2));
+        assert_eq!(s.failover_shortfall, 1);
+        assert_eq!(s.desired, RoleReplicas::disaggregated(1 + 4, 5 + 4 + 2));
     }
 
     #[test]

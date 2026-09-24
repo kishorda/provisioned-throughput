@@ -44,7 +44,9 @@ executes gradually.
 
 The `k(p)` headroom is kept **hot**, because it must absorb failures instantly. During a
 region failover, the router reclaims hot spares from PAYG by fencing and then preempting
-it ([13 §2](13-tenant-aware-routing.md#2-algorithms), [ADR-015](adr/ADR-015-failover-payg-preemption.md)). The
+it ([13 §2](13-tenant-aware-routing.md#2-algorithms), [ADR-015](adr/ADR-015-failover-payg-preemption.md)).
+The capacity controller then loads warm spares for any failover demand the hot spares
+can't cover, and releases them when the failover ends ([ADR-016](adr/ADR-016-warm-spare-loading.md)). The
 maintenance slot and burst allowance can be warm. PAYG demand is the economic justification
 for hot headroom: it pays for GPUs that provisioned customers need only during failures.
 

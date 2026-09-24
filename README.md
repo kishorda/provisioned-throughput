@@ -27,7 +27,7 @@ named latency tier.
 | `pt-mock-engine` | Stand-in for a Dynamo frontend: OpenAI chat API with configurable TTFT/TPOT and simulated prefix caching |
 | `pt-crds` | Custom resources (docs/08 §2): `PerformanceProfile`, `ModelPool`, `PoolAllocation`, `CapacityReservation`, and the `crdgen` binary |
 | `pt-control-plane` | Customer REST API (docs/12): create, get, list, update, and delete Provisioned Throughput; commercial rules; capacity checks; renewal lifecycle; in-memory store plus a CockroachDB migration |
-| `pt-operator` | Regional Capacity Controller: sizes each `ModelPool` from its allocations (docs/06 §2), applies a `DynamoGraphDeployment` and per-role PodDisruptionBudgets, and reports status |
+| `pt-operator` | Regional Capacity Controller: sizes each `ModelPool` from its allocations (docs/06 §2), applies a `DynamoGraphDeployment` and per-role PodDisruptionBudgets, loads warm spares for failover demand from the regional snapshot, and reports status |
 
 ## Run locally
 
@@ -213,6 +213,11 @@ For each `ModelPool` it:
 
 - sets `desiredReplicas` = floor + `failureDomainK` + `maintenanceSlots` + `hotSpares`, per role
 - sets a PodDisruptionBudget of `minAvailable` = floor + `failureDomainK` per role
+- during a region failover, adds the active failover demand from the regional snapshot
+  (set `PT_CONTROL_PLANE_URL`, `PT_REGION`, `PT_REGION_TOKEN`, `PT_SNAPSHOT_PUBLIC_KEY`,
+  and `PT_SNAPSHOT_CACHE`, as in `deploy/operator/deployment.yaml`). Hot spares cover the
+  first part, and warm spares load for the rest. `kubectl get ptpool -o yaml` shows
+  `failoverWuPerSec`, `warmSparesLoaded`, and the `FailoverActive` condition (ADR-016)
 - refuses to touch children, and sets `Ready=False`, when the profile is missing, the
   engine version doesn't match the profile, or a strict-dedicated pool enables PAYG backfill
 
@@ -237,8 +242,8 @@ Follow-ups from the roadmap in docs/11:
   refunds the difference.
 - **Redpanda/ClickHouse.** Usage goes to JSONL and/or the control plane's in-memory telemetry store (35-day retention).
 - **Region failover gaps.** Steering is an API; no GeoDNS/anycast controller consumes it.
-  Warm spares aren't loaded when an incident opens, and router `hot_spare` flags are
-  configured, not rendered by the capacity controller. Preempted PAYG isn't metered.
+  Router `hot_spare` flags are configured, not rendered by the capacity controller.
+  There's no weight-prefetch DaemonSet, so loaded warm spares start cold. Preempted PAYG isn't metered.
   Failover activation needs the control plane. Failover headroom is
   reserved but not priced (open PM question, docs/11 §4).
 - **Signing-key rotation.** Gateways trust a single snapshot public key.

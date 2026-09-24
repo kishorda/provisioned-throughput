@@ -1,6 +1,6 @@
 # 07 · Multi-Region Design
 
-> Decision records: [ADR-007](adr/ADR-007-regional-static-stability.md), [ADR-014](adr/ADR-014-automatic-region-failover.md), [ADR-015](adr/ADR-015-failover-payg-preemption.md)
+> Decision records: [ADR-007](adr/ADR-007-regional-static-stability.md), [ADR-014](adr/ADR-014-automatic-region-failover.md), [ADR-015](adr/ADR-015-failover-payg-preemption.md), [ADR-016](adr/ADR-016-warm-spare-loading.md)
 
 ## 1. Principles
 
@@ -110,8 +110,10 @@ sequenceDiagram
    until now. Provisioned requests that use a failover entitlement carry
    `x-pt-failover`, so the router fences new PAYG off hot spares. If provisioned work
    still waits 250 ms, the router aborts running PAYG, preferring hot spares
-   ([13 §2](13-tenant-aware-routing.md#2-algorithms), ADR-015). *Not built:* loading
-   warm spares when an incident opens.
+   ([13 §2](13-tenant-aware-routing.md#2-algorithms), ADR-015). The Regional Capacity
+   Controller follows the same snapshot. It adds each reservation's active failover CUs
+   to its `PoolAllocation`s and loads warm spares for whatever the hot spares can't cover
+   ([08 §2](08-kubernetes-and-dynamo-integration.md#2-custom-resources), ADR-016).
 5. **SLA.** The first `failover_window_minutes` (5) of the incident are excluded for
    Multi-region reservations. The whole incident is excluded in the failed region for
    Regional ones ([09 §5](09-metering-observability-and-slas.md#5-implementation)).

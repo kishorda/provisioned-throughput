@@ -1724,11 +1724,16 @@ name = "pt-operator"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "futures",
+ "jiff",
  "k8s-openapi",
  "kube",
+ "pt-control-plane",
  "pt-core",
  "pt-crds",
+ "pt-entitlement",
+ "reqwest",
  "serde",
  "serde_json",
  "serde_yaml",

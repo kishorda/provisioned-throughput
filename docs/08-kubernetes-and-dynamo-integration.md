@@ -1,6 +1,6 @@
 # 08 · Kubernetes & NVIDIA Dynamo Integration
 
-> Decision records: [ADR-008](adr/ADR-008-dynamo-substrate.md), [ADR-009](adr/ADR-009-rust.md)
+> Decision records: [ADR-008](adr/ADR-008-dynamo-substrate.md), [ADR-009](adr/ADR-009-rust.md), [ADR-016](adr/ADR-016-warm-spare-loading.md)
 
 ## 1. Stack per GPU cluster
 
@@ -114,6 +114,16 @@ gives it WFQ weights and KV budgets without calling the Kubernetes API on the ho
 ### `CapacityReservation` (regional mirror of the global contract, read-only in-cluster)
 Carries tier, shape, and boundary policy for audit and for controllers. The global plane
 remains the source of truth.
+
+**Failover demand (ADR-016).** With a snapshot source configured, the controller follows
+the region's signed entitlement snapshot. Each `PoolAllocation` grows by its reservation's
+active failover fraction (`wuPerSec × active failover CUs ÷ CUs`). The pool is then sized
+with that demand: hot spares absorb the first part, and warm spares load for the rest, up
+to `headroom.warmSpares` per role. Loaded spares are held until the failover ends.
+`ModelPool.status` reports `failoverWuPerSec` and `warmSparesLoaded`, and sets the
+`FailoverActive` condition. `CapacityShortfall` turns true with reason
+`FailoverHeadroomExhausted` when spares can't cover the demand. The DGD is annotated with
+`pt.example.com/warm-spares-staged` and `…/warm-spares-loaded`.
 
 ## 3. Division of responsibility with Dynamo
 

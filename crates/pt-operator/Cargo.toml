@@ -9,10 +9,12 @@ rust-version.workspace = true
 [dependencies]
 pt-core = { workspace = true, features = ["schema"] }
 pt-crds.workspace = true
+pt-entitlement.workspace = true
 anyhow.workspace = true
 futures.workspace = true
 k8s-openapi.workspace = true
 kube = { workspace = true, features = ["client", "runtime", "derive", "rustls-tls", "ring"] }
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -22,3 +24,6 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 serde_yaml.workspace = true
+pt-control-plane.workspace = true
+axum.workspace = true
+jiff.workspace = true

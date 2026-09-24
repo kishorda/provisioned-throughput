@@ -15,6 +15,8 @@ use crate::sizing::{self, Demand};
 
 pub const READY: &str = "Ready";
 pub const CAPACITY_SHORTFALL: &str = "CapacityShortfall";
+/// True while allocations on the pool carry failover demand (docs/07 §4).
+pub const FAILOVER_ACTIVE: &str = "FailoverActive";
 
 pub struct PoolInput<'a> {
     pub name: &'a str,
@@ -37,10 +39,13 @@ pub struct Plan {
     pub children: Option<Children>,
 }
 
+/// `failover_extra[i]` is the active failover demand (WU/s) on `allocations[i]`, from
+/// [`crate::failover::failover_extra`]. Missing entries count as 0.
 pub fn plan(
     pool: &PoolInput<'_>,
     profile: Option<&PerformanceProfileSpec>,
     allocations: &[PoolAllocationSpec],
+    failover_extra: &[f64],
     now: &str,
 ) -> Plan {
     let mut status = pool.previous.cloned().unwrap_or_default();
@@ -78,7 +83,17 @@ pub fn plan(
     }
 
     let demands: Vec<Demand> = allocations.iter().map(Demand::from).collect();
-    let sizing = match sizing::size(pool.spec, profile, &demands) {
+    let previous_loaded = pool
+        .previous
+        .map(|s| s.warm_spares_loaded)
+        .unwrap_or_default();
+    let sizing = match sizing::size_with_failover(
+        pool.spec,
+        profile,
+        &demands,
+        failover_extra,
+        previous_loaded,
+    ) {
         Ok(s) => s,
         Err(e) => return blocked(status, "SizingFailed", e.to_string()),
     };
@@ -86,8 +101,13 @@ pub fn plan(
     status.provisioned_floor = sizing.floor;
     status.desired_replicas = sizing.desired;
     status.min_available = sizing.min_available;
-    let shortfall = match sizing.shortfall {
-        Some(s) => Condition::new(
+    status.failover_wu_per_sec = failover_extra
+        .iter()
+        .filter(|e| e.is_finite() && **e > 0.0)
+        .sum();
+    status.warm_spares_loaded = sizing.warm_loaded;
+    let shortfall = match (sizing.shortfall, sizing.failover_shortfall) {
+        (Some(s), _) => Condition::new(
             CAPACITY_SHORTFALL,
             true,
             "MaxReplicasExceeded",
@@ -96,9 +116,31 @@ pub fn plan(
                 s.needed, s.max
             ),
         ),
-        None => Condition::new(CAPACITY_SHORTFALL, false, "WithinBudget", ""),
+        (None, n) if n > 0 => Condition::new(
+            CAPACITY_SHORTFALL,
+            true,
+            "FailoverHeadroomExhausted",
+            format!(
+                "Failover needs {n} more replicas than the hot and warm spares provide. Failover traffic may queue or be rejected."
+            ),
+        ),
+        _ => Condition::new(CAPACITY_SHORTFALL, false, "WithinBudget", ""),
     };
     set_condition(&mut status.conditions, shortfall, now);
+    let failover = if status.failover_wu_per_sec > 0.0 {
+        Condition::new(
+            FAILOVER_ACTIVE,
+            true,
+            "FailoverDemand",
+            format!(
+                "{:.0} WU/s of failover demand; {} warm spares loaded.",
+                status.failover_wu_per_sec, sizing.warm_loaded.total
+            ),
+        )
+    } else {
+        Condition::new(FAILOVER_ACTIVE, false, "NoFailover", "")
+    };
+    set_condition(&mut status.conditions, failover, now);
     set_condition(
         &mut status.conditions,
         Condition::new(
@@ -121,8 +163,14 @@ pub fn plan(
         owner: pool.owner.clone(),
         spec: pool.spec,
     };
+    let mut dgd = render::dynamo_graph_deployment(&pool_ref, profile, &sizing.desired);
+    render::annotate_warm_spares(
+        &mut dgd,
+        pool.spec.headroom.warm_spares,
+        sizing.warm_loaded.total,
+    );
     let children = Children {
-        dgd: render::dynamo_graph_deployment(&pool_ref, profile, &sizing.desired),
+        dgd,
         pdbs: render::disruption_budgets(&pool_ref, &sizing.min_available),
     };
     Plan {
@@ -254,6 +302,7 @@ mod tests {
             &input(&s),
             Some(&profile()),
             &[alloc(25_000.0), alloc(5_000.0)],
+            &[],
             "t1",
         );
         assert!(ready(&p.status).is_true());
@@ -268,9 +317,61 @@ mod tests {
     }
 
     #[test]
+    fn failover_loads_warm_spares_and_holds_them() {
+        let mut s = spec(); // k 1, maintenance 1, no hot spares
+        s.headroom.warm_spares = 2;
+        // 25k interactive / 10k = 2.5 → floor 3; desired 5.
+        let allocs = [alloc(25_000.0)];
+        let p = plan(&input(&s), Some(&profile()), &allocs, &[10_000.0], "t1");
+        // Failover 35k → floor 4: one warm spare loads.
+        assert_eq!(p.status.warm_spares_loaded.total, 1);
+        assert_eq!(p.status.failover_wu_per_sec, 10_000.0);
+        assert_eq!(p.status.desired_replicas.total, 6);
+        let c = |st: &ModelPoolStatus, t: &str| {
+            st.conditions
+                .iter()
+                .find(|c| c.type_ == t)
+                .cloned()
+                .unwrap()
+        };
+        assert!(c(&p.status, FAILOVER_ACTIVE).is_true());
+        assert!(!c(&p.status, CAPACITY_SHORTFALL).is_true());
+        let dgd = &p.children.as_ref().unwrap().dgd;
+        assert_eq!(dgd["spec"]["services"]["Worker"]["replicas"], 6);
+        assert_eq!(
+            dgd["metadata"]["annotations"][render::WARM_SPARES_LOADED_ANNOTATION],
+            "1"
+        );
+        assert_eq!(
+            dgd["metadata"]["annotations"][render::WARM_SPARES_STAGED_ANNOTATION],
+            "1"
+        );
+
+        // The ramp shrinks demand, but the loaded spare is held from the previous status.
+        let mut i = input(&s);
+        i.previous = Some(&p.status);
+        let held = plan(&i, Some(&profile()), &allocs, &[100.0], "t2");
+        assert_eq!(held.status.warm_spares_loaded.total, 1);
+
+        // More than the spares can cover: a shortfall condition.
+        let big = plan(&input(&s), Some(&profile()), &allocs, &[60_000.0], "t1");
+        let short = c(&big.status, CAPACITY_SHORTFALL);
+        assert!(short.is_true());
+        assert_eq!(short.reason, "FailoverHeadroomExhausted");
+
+        // Over: released.
+        let mut i = input(&s);
+        i.previous = Some(&held.status);
+        let done = plan(&i, Some(&profile()), &allocs, &[], "t3");
+        assert_eq!(done.status.warm_spares_loaded.total, 0);
+        assert_eq!(done.status.desired_replicas.total, 5);
+        assert!(!c(&done.status, FAILOVER_ACTIVE).is_true());
+    }
+
+    #[test]
     fn missing_profile_blocks_without_children() {
         let s = spec();
-        let p = plan(&input(&s), None, &[alloc(1.0)], "t1");
+        let p = plan(&input(&s), None, &[alloc(1.0)], &[], "t1");
         assert!(!ready(&p.status).is_true());
         assert_eq!(ready(&p.status).reason, "ProfileNotFound");
         assert!(p.children.is_none());
@@ -280,7 +381,7 @@ mod tests {
     fn engine_version_mismatch_blocks() {
         let mut s = spec();
         s.engine.version = "1.3".into();
-        let p = plan(&input(&s), Some(&profile()), &[], "t1");
+        let p = plan(&input(&s), Some(&profile()), &[], &[], "t1");
         assert_eq!(ready(&p.status).reason, "ProfileMismatch");
         assert!(ready(&p.status).message.contains("Recalibrate"));
         assert!(p.children.is_none());
@@ -290,10 +391,10 @@ mod tests {
     fn strict_dedicated_with_backfill_is_invalid() {
         let mut s = spec();
         s.isolation = PoolIsolation::StrictDedicated;
-        let p = plan(&input(&s), Some(&profile()), &[], "t1");
+        let p = plan(&input(&s), Some(&profile()), &[], &[], "t1");
         assert_eq!(ready(&p.status).reason, "InvalidSpec");
         s.payg.backfill = false;
-        let p = plan(&input(&s), Some(&profile()), &[], "t1");
+        let p = plan(&input(&s), Some(&profile()), &[], &[], "t1");
         assert!(ready(&p.status).is_true());
     }
 
@@ -301,7 +402,7 @@ mod tests {
     fn shortfall_condition_reflects_max_replicas() {
         let mut s = spec();
         s.max_replicas = Some(3);
-        let p = plan(&input(&s), Some(&profile()), &[alloc(30_000.0)], "t1");
+        let p = plan(&input(&s), Some(&profile()), &[alloc(30_000.0)], &[], "t1");
         let c = p
             .status
             .conditions
@@ -317,7 +418,7 @@ mod tests {
         let s = spec();
         let mut prof = profile();
         prof.capacity.interactive = 0.0;
-        let p = plan(&input(&s), Some(&prof), &[alloc(1.0)], "t1");
+        let p = plan(&input(&s), Some(&prof), &[alloc(1.0)], &[], "t1");
         assert_eq!(ready(&p.status).reason, "SizingFailed");
     }
 }

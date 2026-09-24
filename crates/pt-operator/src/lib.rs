@@ -8,8 +8,12 @@
 //! 3. applies a PodDisruptionBudget per role that never lets voluntary disruption go below
 //!    floor + failure headroom (docs/06 §6);
 //! 4. reports sizing and conditions in `ModelPool.status`.
+//!
+//! With a snapshot source configured, it also follows the region's entitlement snapshot
+//! and loads warm spares for active failover demand (docs/07 §4, [`failover`]).
 
 pub mod controller;
+pub mod failover;
 pub mod plan;
 pub mod render;
 pub mod sizing;

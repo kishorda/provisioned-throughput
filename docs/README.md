@@ -74,6 +74,7 @@ The design rests on six decisions:
 | [013](adr/ADR-013-tenant-scheduling-tier.md) | Tenant scheduling as a tier in front of Dynamo (refines 004, 008) |
 | [014](adr/ADR-014-automatic-region-failover.md) | Automatic region failover from gateway heartbeats (refines 007) |
 | [015](adr/ADR-015-failover-payg-preemption.md) | Fence, then preempt, PAYG on hot spares during failover (refines 006, 013) |
+| [016](adr/ADR-016-warm-spare-loading.md) | Load warm spares from snapshot failover demand (refines 006, 014) |
 
 ## Glossary
 

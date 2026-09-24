@@ -125,8 +125,9 @@ spec:
                   warmSpares:
                     default: 0
                     description: |-
-                      Replicas with weights staged on node-local NVMe but no GPU claim. Informational
-                      until the warm-spare controller exists.
+                      Replicas with weights staged on node-local NVMe but no GPU claim. During a region
+                      failover, the controller loads as many as the failover demand needs beyond the hot
+                      spares (docs/07 §4).
                     format: uint32
                     minimum: 0.0
                     type: integer
@@ -247,6 +248,11 @@ spec:
                     minimum: 0.0
                     type: integer
                 type: object
+              failoverWuPerSec:
+                default: 0.0
+                description: Extra demand from active failover entitlements (docs/07 §4).
+                format: double
+                type: number
               minAvailable:
                 default:
                   aggregated: 0
@@ -288,6 +294,38 @@ spec:
                   prefill: 0
                   total: 0
                 description: Replicas needed to serve all allocations at target utilisation.
+                properties:
+                  aggregated:
+                    default: 0
+                    description: Aggregated workers. Zero for disaggregated pools.
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  decode:
+                    default: 0
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  prefill:
+                    default: 0
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  total:
+                    default: 0
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                type: object
+              warmSparesLoaded:
+                default:
+                  aggregated: 0
+                  decode: 0
+                  prefill: 0
+                  total: 0
+                description: |-
+                  Warm spares loaded (serving) for the failover, per role. Included in
+                  `desiredReplicas`. Held until the failover ends.
                 properties:
                   aggregated:
                     default: 0

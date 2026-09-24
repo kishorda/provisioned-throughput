@@ -30,6 +30,20 @@ spec:
           env:
             - name: RUST_LOG
               value: info,pt_operator=debug
+            # Follow the region's entitlement snapshot to load warm spares on failover
+            # (docs/07 §4). Without these, failover demand is ignored.
+            - name: PT_CONTROL_PLANE_URL
+              value: https://control-plane.pt.example.com
+            - name: PT_REGION
+              value: eu-central
+            - name: PT_REGION_TOKEN
+              valueFrom:
+                secretKeyRef: { name: pt-region, key: token }
+            - name: PT_SNAPSHOT_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef: { name: pt-region, key: snapshot-public-key }
+            - name: PT_SNAPSHOT_CACHE
+              value: /var/cache/pt/entitlements.json
           resources:
             requests: { cpu: 100m, memory: 128Mi }
             limits: { memory: 256Mi }
@@ -38,3 +52,10 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+          volumeMounts:
+            - name: snapshot-cache
+              mountPath: /var/cache/pt
+      volumes:
+        # Survives container restarts, not pod rescheduling. Use a PVC to survive both.
+        - name: snapshot-cache
+          emptyDir: {}

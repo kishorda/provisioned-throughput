@@ -105,8 +105,9 @@ pub struct Headroom {
     /// Loaded replicas serving PAYG until provisioned traffic needs them.
     #[serde(default)]
     pub hot_spares: u32,
-    /// Replicas with weights staged on node-local NVMe but no GPU claim. Informational
-    /// until the warm-spare controller exists.
+    /// Replicas with weights staged on node-local NVMe but no GPU claim. During a region
+    /// failover, the controller loads as many as the failover demand needs beyond the hot
+    /// spares (docs/07 §4).
     #[serde(default)]
     pub warm_spares: u32,
 }
@@ -195,6 +196,13 @@ pub struct ModelPoolStatus {
     /// Number of `PoolAllocation`s on this pool.
     #[serde(default)]
     pub allocations: u32,
+    /// Extra demand from active failover entitlements (docs/07 §4).
+    #[serde(default)]
+    pub failover_wu_per_sec: f64,
+    /// Warm spares loaded (serving) for the failover, per role. Included in
+    /// `desiredReplicas`. Held until the failover ends.
+    #[serde(default)]
+    pub warm_spares_loaded: RoleReplicas,
     #[serde(default)]
     pub conditions: Vec<Condition>,
 }

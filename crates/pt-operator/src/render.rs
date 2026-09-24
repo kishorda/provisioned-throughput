@@ -20,6 +20,11 @@ use serde_json::{json, Value};
 pub const DGD_API_VERSION: &str = "nvidia.com/v1alpha1";
 pub const DGD_KIND: &str = "DynamoGraphDeployment";
 pub const CONDITIONAL_DISAGG_ANNOTATION: &str = "pt.example.com/conditional-disaggregation";
+/// Warm spares to keep staged (weights on node-local NVMe, no GPU claim), for the weight
+/// prefetcher. Dynamo has no warm-spare concept, so this records intent.
+pub const WARM_SPARES_STAGED_ANNOTATION: &str = "pt.example.com/warm-spares-staged";
+/// Warm spares loaded into the worker replicas for an active failover.
+pub const WARM_SPARES_LOADED_ANNOTATION: &str = "pt.example.com/warm-spares-loaded";
 /// Frontend replicas. The frontend is CPU-only and stateless.
 pub const FRONTEND_REPLICAS: u32 = 2;
 
@@ -168,6 +173,14 @@ pub fn dynamo_graph_deployment(
         },
         "spec": { "services": services },
     })
+}
+
+/// Record warm-spare state on a rendered DGD: how many to keep staged, and how many are
+/// loaded into its worker replicas for a failover.
+pub fn annotate_warm_spares(dgd: &mut Value, warm_spares: u32, loaded: u32) {
+    let a = &mut dgd["metadata"]["annotations"];
+    a[WARM_SPARES_STAGED_ANNOTATION] = json!(warm_spares.saturating_sub(loaded).to_string());
+    a[WARM_SPARES_LOADED_ANNOTATION] = json!(loaded.to_string());
 }
 
 /// One PDB per worker role. Voluntary disruptions (drains, upgrades) may take down

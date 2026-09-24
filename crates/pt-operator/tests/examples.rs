@@ -32,6 +32,7 @@ fn example_pool_sizes_and_renders() {
         &input,
         Some(&profile.spec),
         &[alloc.spec],
+        &[],
         "2026-09-23T00:00:00Z",
     );
     let ready = p
