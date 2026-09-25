@@ -329,6 +329,7 @@ async fn stack(chunked: bool, allocations: Vec<AllocationConfig>) -> Stack {
         }],
         entitlements: None,
         quota: None,
+        tokenization: Default::default(),
         usage_export: None,
         // A at about its entitlement; B and C with small entitlements for their size.
         reservations: vec![

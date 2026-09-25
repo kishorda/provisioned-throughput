@@ -74,6 +74,7 @@ async fn gateway_classes_reach_the_router() {
         }],
         entitlements: None,
         quota: None,
+        tokenization: Default::default(),
         usage_export: None,
         reservations: vec![ReservationConfig {
             id: "res-1".into(),

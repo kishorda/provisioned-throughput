@@ -11,7 +11,15 @@ named latency tier.
     the engine's actual usage, and writes a usage record for every request.
   - The P1 custom resources and the Regional Capacity Controller (docs/06, docs/08).
   - The control-plane API that lets customers create, update, and delete Provisioned
-    Throughput for a model (docs/12).
+    Throughput for a model (docs/12), on a durable SQL store, with quotes, monthly
+    invoices, and usage and SLA reports.
+  - Signed entitlement snapshots that gateways follow, and a Quota Coordinator that
+    shares each entitlement across gateway replicas (active/standby).
+  - The tenant-aware router tier (docs/13).
+  - Automatic region failover, warm spares, and share rebalancing between regions
+    (docs/07).
+  - An interference test suite that checks tenant isolation against a mock engine that
+    models continuous batching (docs/05 §7).
 
 ## Crates
 
@@ -19,12 +27,13 @@ named latency tier.
 |-------|--------------|
 | `pt-core` | Shared types: WU cost model and `PerformanceProfile`, tiers and CU pricing, workload shape, token counting, usage records |
 | `pt-admission` | Debt-based WU bucket (ADR-002), burst bank, boundary-policy chain (burst → queue → spillover → reject), `continuation` reserve, output-length estimator |
+| `pt-tokenize` | Input token counting: each model's `tokenizer.json` (HF `tokenizers`, pure Rust), a per-message cache, an inline byte budget with background fill, and learned bytes-per-token ratios (ADR-028) |
 | `pt-gateway` | OpenAI-compatible gateway (axum): auth, estimate, admit, proxy/stream, settle, usage JSONL, `/v1/pt/status`. Loads entitlements from signed control-plane snapshots or a static file |
 | `pt-router` | Tenant-aware router tier (docs/13): priority classes, WFQ by WU, pull-based dispatch on worker slots and KV, dedicated placement, per-reservation KV budgets, prefix and session affinity, hot spares with PAYG preemption during failover |
 | `pt-quota` | Regional Quota Coordinator: leases that split each reservation's entitlement across gateway replicas without overselling (ADR-012), active/standby on a Kubernetes Lease (ADR-027) |
 | `pt-telemetry` | Customer usage, latency, session, and monthly SLA reports built from gateway usage records (docs/09 §5), served by the control plane |
 | `pt-entitlement` | Snapshot format shared by the control plane and gateways, Ed25519 signing and verification, API-key hashing |
-| `pt-mock-engine` | Stand-in for a Dynamo frontend: OpenAI chat API with configurable TTFT/TPOT and simulated prefix caching |
+| `pt-mock-engine` | Stand-in for a Dynamo frontend: OpenAI chat API with configurable TTFT/TPOT, simulated prefix caching, and an optional continuous-batching contention model |
 | `pt-crds` | Custom resources (docs/08 §2): `PerformanceProfile`, `ModelPool`, `PoolAllocation`, `CapacityReservation`, and the `crdgen` binary |
 | `pt-control-plane` | Customer REST API (docs/12): create, get, list, update, and delete Provisioned Throughput; commercial rules; capacity checks; renewal lifecycle; durable SQL store (CockroachDB or PostgreSQL) or in-memory |
 | `pt-operator` | Regional Capacity Controller: sizes each `ModelPool` from its allocations (docs/06 §2), applies a `DynamoGraphDeployment` and per-role PodDisruptionBudgets, loads warm spares for failover demand from the regional snapshot, and reports status |
@@ -49,10 +58,19 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
        "messages":[{"role":"user","content":"Plan a trip to Lisbon"}]}'
 
 curl http://127.0.0.1:8080/v1/pt/status -H 'Authorization: Bearer sk-acme-dev'
+curl http://127.0.0.1:8080/internal/v1/tokenizers     # how each model's tokens are counted
 ```
 
+Input tokens are counted with each model's own `tokenizer.json`, listed under
+`[[tokenization.tokenizers]]` in the gateway config (ADR-028). Counts are cached per
+message, so an agent's repeated context costs a hash lookup. New text beyond
+`inline_bytes` (4 KB) is estimated by a learned bytes-per-token ratio, then tokenized in
+the background. Models without a tokenizer use a ratio learned from the engine's counts.
+The gateway passes its count to the router in `x-pt-prompt-tokens`.
+
 Mock engine settings: `MOCK_ADDR`, `MOCK_NAME`, `MOCK_TTFT_MS` (default 50),
-`MOCK_TPOT_MS` (10), `MOCK_OUTPUT_TOKENS` (64). `MOCK_CONTENTION=1` replaces the fixed
+`MOCK_TPOT_MS` (10), `MOCK_OUTPUT_TOKENS` (64). `MOCK_TOKENIZER=path/to/tokenizer.json`
+counts prompt tokens with a real tokenizer. `MOCK_CONTENTION=1` replaces the fixed
 timings with a continuous-batching model, so concurrent requests slow each other down.
 
 ### Request and response headers
@@ -283,8 +301,9 @@ Follow-ups from the roadmap in docs/11:
 - **Quota Coordinator on a cluster.** Active/standby election (ADR-027) is tested with an
   in-memory lease only. The Kubernetes Lease backend and `deploy/quota/` haven't run
   against a cluster. There's also no home-gateway routing for small tenants.
-- **Model tokenizer.** Input tokens are approximated (4 bytes per token). Settlement uses
-  the engine's counts, so this affects only the admission estimate.
+- **Chat templates.** Token counts use each model's tokenizer (ADR-028), but the chat
+  template is approximated by a per-model `message_overhead`. Tool definitions and image
+  parts aren't counted. Tokenizer files have to be shipped with the gateway.
 - **Prefix-cache index at the gateway.** Estimates assume no cache hits; settlement
   refunds the difference.
 - **Redpanda.** Gateways push usage to the control plane, which writes it to ClickHouse

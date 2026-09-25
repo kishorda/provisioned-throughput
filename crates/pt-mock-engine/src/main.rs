@@ -2,7 +2,9 @@
 //!
 //! Configured with environment variables:
 //! `MOCK_ADDR` (default `127.0.0.1:9000`), `MOCK_NAME`, `MOCK_TTFT_MS`, `MOCK_TPOT_MS`,
-//! `MOCK_OUTPUT_TOKENS`, and `MOCK_CONTENTION=1` for the continuous-batching model.
+//! `MOCK_OUTPUT_TOKENS`, `MOCK_CONTENTION=1` for the continuous-batching model, and
+//! `MOCK_TOKENIZER=path/to/tokenizer.json` to count prompt tokens with a real tokenizer
+//! (for any model; `MOCK_MESSAGE_OVERHEAD`, default 3, per message).
 
 use std::time::Duration;
 
@@ -41,5 +43,15 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("binding {addr}"))?;
     tracing::info!(%addr, ?config, "mock engine listening");
-    MockEngine::new(config).serve(listener).await
+    let mut engine = MockEngine::new(config);
+    if let Ok(path) = std::env::var("MOCK_TOKENIZER") {
+        let spec = pt_tokenize::TokenizerSpec {
+            model: pt_tokenize::ANY_MODEL.into(),
+            path: path.into(),
+            message_overhead: env_or("MOCK_MESSAGE_OVERHEAD", pt_tokenize::MESSAGE_OVERHEAD)?,
+        };
+        let tokens = pt_tokenize::Tokenizers::load(&[spec], 100_000)?;
+        engine = engine.with_tokenizers(std::sync::Arc::new(tokens));
+    }
+    engine.serve(listener).await
 }

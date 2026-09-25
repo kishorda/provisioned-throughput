@@ -16,8 +16,7 @@ use futures::StreamExt;
 use pt_admission::{AdmitRequest, AdmitTicket, Decision};
 use pt_core::cost::{estimate_kv_token_seconds, measured_kv_token_seconds};
 use pt_core::{
-    count_message, Outcome, RejectReason, Timings, TokenBreakdown, TrafficClass, UsageRecord,
-    WorkBreakdown,
+    Outcome, RejectReason, Timings, TokenBreakdown, TrafficClass, UsageRecord, WorkBreakdown,
 };
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -73,11 +72,39 @@ pub async fn chat_completions(
         Err(msg) => return api_error(StatusCode::BAD_REQUEST, "invalid_request_error", msg),
     };
 
+    // Count input tokens (ADR-028). Tokenizing is CPU work, so anything not cached runs
+    // on the blocking pool, and at most `inline_bytes` of it before admission. Longer new
+    // messages are estimated now and tokenized in the background for the next request.
+    let prompt_bytes: usize = messages.iter().map(|(r, c)| r.len() + c.len()).sum();
+    let message_count = messages.len();
+    let count = if app.tokens.uncached_bytes(&res.model, &messages) == 0 {
+        app.tokens
+            .count_within(&res.model, &messages, app.inline_bytes)
+    } else {
+        let (tokens, model, budget) =
+            (Arc::clone(&app.tokens), res.model.clone(), app.inline_bytes);
+        match tokio::task::spawn_blocking(move || tokens.count_within(&model, &messages, budget))
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(error = %e, "token counting failed");
+                return api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "Couldn't count the request's tokens.",
+                );
+            }
+        }
+    };
+    if !count.deferred.is_empty() {
+        let (tokens, model, deferred) =
+            (Arc::clone(&app.tokens), res.model.clone(), count.deferred);
+        tokio::task::spawn_blocking(move || tokens.fill(&model, &deferred));
+    }
+    let input_tokens = count.tokens;
+
     // Estimate WU. Prefill is exact after counting; decode is predicted (docs/04 §3).
-    let input_tokens: u64 = messages
-        .iter()
-        .map(|(role, content)| count_message(&*app.tokens, role, content))
-        .sum();
     let max_tokens = req
         .get("max_completion_tokens")
         .or_else(|| req.get("max_tokens"))
@@ -105,6 +132,8 @@ pub async fn chat_completions(
         received_at,
         received_at_ms,
         input_tokens,
+        prompt_bytes,
+        message_count,
         wu_est,
         in_shape,
         class: None,
@@ -187,6 +216,8 @@ pub async fn chat_completions(
         .header("x-pt-reservation", &res.id)
         .header("x-pt-class", class.as_str())
         .header("x-pt-wu-estimate", format!("{wu_est:.1}"))
+        // The router sizes the request's KV footprint from this (ADR-028).
+        .header("x-pt-prompt-tokens", input_tokens.to_string())
         // The router's WFQ weight: this gateway's share of the reservation.
         .header(
             "x-pt-weight",
@@ -335,6 +366,9 @@ struct Settlement {
     received_at: Instant,
     received_at_ms: u64,
     input_tokens: u64,
+    /// Bytes of roles and contents, and the message count, for learning token ratios.
+    prompt_bytes: usize,
+    message_count: usize,
     wu_est: f64,
     in_shape: bool,
     class: Option<TrafficClass>,
@@ -369,6 +403,15 @@ impl Settlement {
             None => (0, 0, 0),
         };
         let prompt = uncached + cached;
+        if let Some(u) = self.obs.usage {
+            self.app.tokens.observe(
+                &res.model,
+                self.message_count,
+                self.prompt_bytes,
+                self.input_tokens,
+                u.prompt_tokens,
+            );
+        }
         let kv = match (
             self.streamed,
             self.obs.first_content_at,

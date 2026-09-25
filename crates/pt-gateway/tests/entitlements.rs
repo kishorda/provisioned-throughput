@@ -100,6 +100,7 @@ fn gateway_config(
             tls: Default::default(),
         }),
         quota: None,
+        tokenization: Default::default(),
         usage_export: None,
         reservations: vec![],
         deployments: vec![],

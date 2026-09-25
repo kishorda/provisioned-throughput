@@ -10,12 +10,13 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::{Duration, Instant};
 
 use pt_admission::{BoundaryPolicy, LimiterConfig, OutputEstimator, ReservationLimiter};
-use pt_core::{ApproxTokenCounter, PerformanceProfile, Shape, Tier, TokenCounter};
+use pt_core::{PerformanceProfile, Shape, Tier};
 use pt_entitlement::{
     failover_cus, sha256_hex, DeploymentEntitlement, FailoverShare, RegionFailover,
     ReservationEntitlement, Snapshot,
 };
 use pt_quota::wire::{RenewResponse, ReservationDemand};
+use pt_tokenize::Tokenizers;
 
 use crate::config::{ConfigError, GatewayConfig};
 use crate::usage::UsageSink;
@@ -231,7 +232,10 @@ pub struct Inner {
     pub engine_url: String,
     pub payg_engine_url: String,
     pub sink: Arc<dyn UsageSink>,
-    pub tokens: Arc<dyn TokenCounter>,
+    /// Input token counting (ADR-028).
+    pub tokens: Arc<Tokenizers>,
+    /// Most uncached bytes tokenized before admission.
+    pub inline_bytes: usize,
 }
 
 /// Shared gateway state. Cheap to clone.
@@ -261,6 +265,9 @@ impl AppState {
             },
             None => EntitlementSource::Static,
         };
+        let t = &config.tokenization;
+        let tokens = Tokenizers::load(&t.tokenizers, t.cache_entries)
+            .map_err(|e| ConfigError::Invalid(e.to_string()))?;
         let state = Self(Arc::new(Inner {
             current: RwLock::new(Arc::new(Entitlements::empty(source))),
             quota: config.quota.as_ref().map(|q| QuotaShares {
@@ -279,7 +286,8 @@ impl AppState {
             engine_url,
             payg_engine_url,
             sink,
-            tokens: Arc::new(ApproxTokenCounter),
+            tokens: Arc::new(tokens),
+            inline_bytes: t.inline_bytes,
         }));
 
         if config.entitlements.is_none() {

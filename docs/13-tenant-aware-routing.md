@@ -55,7 +55,10 @@ flowchart LR
 | Failover fence | While a failover is active, PAYG isn't placed on hot spares. Spillover and provisioned traffic can use them |
 | Score | `load × (slot and KV utilisation) − overlap × (prefix tokens held ÷ prompt tokens) − session × (same session's worker) + spare × (PAYG or spillover on the floor, or provisioned or burst on a hot spare)`. Lowest cost wins |
 
-The KV footprint is `(prompt tokens + max_tokens) ÷ block_size`. Prefix overlap comes from
+The KV footprint is `(prompt tokens + max_tokens) ÷ block_size`. Prompt tokens come
+from the gateway's count in `x-pt-prompt-tokens`, made with the model's tokenizer
+([ADR-028](adr/ADR-028-input-token-counting.md)). Without it, the router estimates 4
+bytes per token. Prefix overlap comes from
 the router's own index of which worker served which message prefixes, like Dynamo's
 approximate KV routing mode.
 

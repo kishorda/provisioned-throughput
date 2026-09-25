@@ -23,7 +23,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use bytes::Bytes;
-use pt_core::{count_message, ApproxTokenCounter};
+use pt_tokenize::Tokenizers;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
@@ -88,6 +88,8 @@ pub struct MockEngine {
     batcher: Option<contention::Batcher>,
     /// Hashes of message-level prefixes already seen, standing in for a KV prefix cache.
     prefixes: Arc<Mutex<HashSet<u64>>>,
+    /// Counts prompt tokens: 4 bytes per token unless a tokenizer is set.
+    tokens: Arc<Tokenizers>,
 }
 
 impl MockEngine {
@@ -98,7 +100,14 @@ impl MockEngine {
             stats: Arc::default(),
             batcher,
             prefixes: Arc::default(),
+            tokens: Arc::new(Tokenizers::ratio_only()),
         }
+    }
+
+    /// Count prompt tokens with real tokenizers, as an engine would (ADR-028).
+    pub fn with_tokenizers(mut self, tokens: Arc<Tokenizers>) -> Self {
+        self.tokens = tokens;
+        self
     }
 
     /// Requests the simulated engine evicted for lack of KV and recomputed.
@@ -128,8 +137,7 @@ impl MockEngine {
     }
 
     /// Returns (prompt_tokens, cached_tokens) and records the prompt's prefixes.
-    fn prefill(&self, messages: &[ChatMessage]) -> (u64, u64) {
-        let counter = ApproxTokenCounter;
+    fn prefill(&self, model: &str, messages: &[ChatMessage]) -> (u64, u64) {
         let mut hasher = DefaultHasher::new();
         let mut prompt = 0;
         let mut cached = 0;
@@ -139,7 +147,9 @@ impl MockEngine {
             m.role.hash(&mut hasher);
             m.content.hash(&mut hasher);
             let prefix = hasher.finish();
-            let tokens = count_message(&counter, &m.role, &m.content);
+            let tokens = self
+                .tokens
+                .count(model, &[(m.role.clone(), m.content.clone())]);
             prompt += tokens;
             if still_cached && seen.contains(&prefix) {
                 cached += tokens;
@@ -194,7 +204,7 @@ async fn chat_completions(
             .into_response();
     }
     let cfg = Arc::clone(&engine.config);
-    let (prompt_tokens, cached_tokens) = engine.prefill(&req.messages);
+    let (prompt_tokens, cached_tokens) = engine.prefill(&req.model, &req.messages);
     let limit = req.max_completion_tokens.or(req.max_tokens);
     let output_tokens = limit.map_or(cfg.default_output_tokens, |m| {
         m.min(cfg.default_output_tokens)

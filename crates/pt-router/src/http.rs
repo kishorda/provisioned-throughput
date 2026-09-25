@@ -215,6 +215,18 @@ fn class_of(h: &HeaderMap) -> TrafficClass {
     }
 }
 
+/// Rescale cumulative prefix token counts from an `estimated` total to an `exact` one.
+fn scale_prefixes(prefixes: Vec<(u64, u64)>, estimated: u64, exact: u64) -> Vec<(u64, u64)> {
+    if estimated == 0 {
+        return prefixes;
+    }
+    let f = exact as f64 / estimated as f64;
+    prefixes
+        .into_iter()
+        .map(|(h, t)| (h, (t as f64 * f).round() as u64))
+        .collect()
+}
+
 /// Cumulative message-prefix hashes with token counts, plus the prompt's token count.
 fn prefixes(req: &Value) -> (Vec<(u64, u64)>, u64) {
     let counter = ApproxTokenCounter;
@@ -253,7 +265,15 @@ async fn chat(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: Bytes
             )
         }
     };
-    let (prefix_hashes, prompt_tokens) = prefixes(&req);
+    let (mut prefix_hashes, mut prompt_tokens) = prefixes(&req);
+    // The gateway counted with the model's tokenizer (ADR-028). Use its total, and scale
+    // the per-prefix estimates to match, so overlap stays a fraction of the prompt.
+    if let Some(exact) =
+        header_str(&headers, "x-pt-prompt-tokens").and_then(|v| v.parse::<u64>().ok())
+    {
+        prefix_hashes = scale_prefixes(prefix_hashes, prompt_tokens, exact);
+        prompt_tokens = exact;
+    }
     let max_tokens = req
         .get("max_completion_tokens")
         .or_else(|| req.get("max_tokens"))
@@ -430,4 +450,19 @@ fn preempted() -> Response {
 async fn status(State(shared): State<Arc<Shared>>) -> Json<Value> {
     let status = shared.lock().dispatcher.status(Instant::now());
     Json(serde_json::to_value(status).unwrap_or(Value::Null))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gateway_counts_rescale_prefixes() {
+        let p = vec![(1, 100), (2, 250), (3, 400)];
+        assert_eq!(
+            scale_prefixes(p.clone(), 400, 800),
+            vec![(1, 200), (2, 500), (3, 800)]
+        );
+        assert_eq!(scale_prefixes(p.clone(), 0, 800), p);
+    }
 }

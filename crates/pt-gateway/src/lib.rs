@@ -26,6 +26,7 @@ pub fn router(app: AppState) -> Router {
         .route("/v1/chat/completions", post(chat::chat_completions))
         .route("/v1/pt/status", get(status))
         .route("/internal/v1/entitlements", get(entitlements))
+        .route("/internal/v1/tokenizers", get(tokenizers))
         .route("/healthz", get(|| async { "ok" }))
         .with_state(app)
 }
@@ -48,6 +49,15 @@ async fn entitlements(State(app): State<AppState>) -> Json<serde_json::Value> {
         "applied_secs_ago": e.applied_at.elapsed().as_secs(),
         "reservations": e.reservation_count(),
         "deployments": e.deployment_count(),
+    }))
+}
+
+/// `GET /internal/v1/tokenizers`: how each model's input tokens are counted, and how
+/// close the counts are to the engine's (ADR-028).
+async fn tokenizers(State(app): State<AppState>) -> Json<serde_json::Value> {
+    Json(json!({
+        "inline_bytes": app.inline_bytes,
+        "models": app.tokens.status(),
     }))
 }
 

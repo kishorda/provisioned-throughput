@@ -9,6 +9,17 @@ payg_engine_url = "http://127.0.0.1:9001"  # PAYG pool for spillover
 usage_log = "usage.jsonl"                  # omit to write usage records to stdout
 wu_per_cu = 1000.0                         # WU/s delivered by one Capacity Unit
 
+# Input token counting before admission (ADR-028). Without tokenizers, every model is
+# counted at a bytes-per-token ratio learned from the engine's counts (4 to start).
+[tokenization]
+inline_bytes = 4096      # most uncached bytes tokenized before admission; longer new messages
+                         # are estimated, then tokenized in the background (placeholder)
+cache_entries = 100000   # messages whose counts are cached
+# [[tokenization.tokenizers]]
+# model = "llama-4-maverick"
+# path = "tokenizers/llama-4-maverick/tokenizer.json"   # the model's own tokenizer.json
+# message_overhead = 4   # tokens the chat template adds per message (calibrate per model)
+
 [[profiles]]
 name = "llama-4-maverick.b200.trtllm-1.2.tp8"
 coefficients = { a = 1.00, b = 0.08, c = 3.10, d = 0.00021 }

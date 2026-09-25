@@ -11,6 +11,7 @@ pt-core.workspace = true
 pt-admission.workspace = true
 pt-entitlement = { workspace = true, features = ["client"] }
 pt-quota.workspace = true
+pt-tokenize.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 bytes.workspace = true

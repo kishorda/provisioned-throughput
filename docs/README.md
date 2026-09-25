@@ -86,6 +86,7 @@ The design rests on six decisions:
 | [025](adr/ADR-025-interference-suite.md) | Run the interference suite against a contention-model mock, with a control run |
 | [026](adr/ADR-026-backfill-ratio.md) | Cap PAYG backfill at `backfill_ratio` of each floor worker (refines 006, 015) |
 | [027](adr/ADR-027-quota-coordinator-standby.md) | Active/standby Quota Coordinator on a Kubernetes Lease, with a warm-up after a handover (amends 012) |
+| [028](adr/ADR-028-input-token-counting.md) | Count input tokens with the model's tokenizer, cached per message, within a byte budget |
 
 ## Glossary
 

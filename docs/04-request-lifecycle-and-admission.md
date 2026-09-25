@@ -1,6 +1,6 @@
 # 04 · Request Lifecycle & Admission Control
 
-> Decision records: [ADR-002](adr/ADR-002-debt-based-wu-bucket.md), [ADR-003](adr/ADR-003-lease-based-distributed-quota.md), [ADR-012](adr/ADR-012-single-instance-quota-coordinator.md), [ADR-027](adr/ADR-027-quota-coordinator-standby.md)
+> Decision records: [ADR-002](adr/ADR-002-debt-based-wu-bucket.md), [ADR-003](adr/ADR-003-lease-based-distributed-quota.md), [ADR-012](adr/ADR-012-single-instance-quota-coordinator.md), [ADR-027](adr/ADR-027-quota-coordinator-standby.md), [ADR-028](adr/ADR-028-input-token-counting.md)
 
 ## 1. End-to-end sequence
 
@@ -46,7 +46,7 @@ allocation-light and has a latency budget:
 |-------|--------------|-------|
 | TLS + HTTP parse | amortised | Keep-alive, HTTP/2 |
 | Auth + deployment resolve | 50 µs | In-memory map from the entitlement snapshot. API keys hashed with SipHash/BLAKE3 |
-| Tokenise | ≤ 1 ms for 32K tokens | HF `tokenizers` crate, per-model tokenizer pool, rayon for > 32K. Longer prompts get a larger budget, which is excluded from N1 |
+| Tokenise | ≤ 2.5 ms (4 KB of new text) | HF `tokenizers` with each model's `tokenizer.json`, cached per message. At most `inline_bytes` of uncached text is tokenized before admission. Longer new messages are estimated by a learned ratio and tokenized in the background ([ADR-028](adr/ADR-028-input-token-counting.md)). Measured: 4 KB ≈ 2.7 ms, 512 KB ≈ 194 ms uncached, ≈ 0.2 ms cached |
 | Prefix block hashing | 100 µs | Same block size and hash as Dynamo's KV router, so hashes are reusable downstream |
 | WU estimate + admit | 20 µs | Lock-free per-reservation atomic bucket |
 | Forward | none | Streaming proxy with back-pressure |
@@ -56,7 +56,11 @@ allocation-light and has a latency budget:
 The blog's central admission problem is that you must price a request before you know
 its output length.
 
-- **Prefill: exact.** Tokenisation gives input length. The prefix hashes are checked
+- **Prefill: exact.** Tokenisation gives input length. Messages seen before come from a
+  per-message cache. A new message longer than the inline budget is estimated at the
+  model's learned bytes-per-token ratio for this request only, and is exact on the next
+  one ([ADR-028](adr/ADR-028-input-token-counting.md)). The gateway passes its count to
+  the router in `x-pt-prompt-tokens`. The prefix hashes are checked
   against a gateway-local, approximate **prefix-cache index**: a Bloom filter per pool, fed
   from Dynamo KV events via NATS. That gives an expected `cached_prefill_tokens` value. A
   wrong guess only changes the estimate, and settlement fixes it.

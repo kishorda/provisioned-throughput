@@ -1,0 +1,13 @@
+[package]
+name = "pt-tokenize"
+description = "Input token counting for admission: model tokenizers with a per-message cache, or a learned bytes-per-token ratio (ADR-028)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pt-core.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokenizers.workspace = true

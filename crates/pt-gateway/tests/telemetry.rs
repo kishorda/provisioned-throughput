@@ -105,6 +105,7 @@ async fn gateway_usage_reaches_customer_reports() {
             tls: Default::default(),
         }),
         quota: None,
+        tokenization: Default::default(),
         usage_export: Some(UsageExportConfig {
             control_plane_url: cp.clone(),
             token: REGION_TOKEN.into(),

@@ -62,6 +62,7 @@ fn gateway_config(cp: &str, engine: &str, public_key: String) -> GatewayConfig {
             tls: Default::default(),
         }),
         quota: None,
+        tokenization: Default::default(),
         usage_export: None,
         reservations: vec![],
         deployments: vec![],

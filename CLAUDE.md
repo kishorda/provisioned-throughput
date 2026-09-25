@@ -4,13 +4,26 @@
 This is the architecture design and code for a **Provisioned Throughput (PT)** product for AI inference, written from a principal-architect perspective. It answers the problems raised in the PM's blog post:
 https://kishoraher.wordpress.com/2026/09/23/provisioned-throughput-for-ai-inference-why-just-reserve-some-capacity-is-harder-than-it-sounds/
 
-**Current state:** design docs are complete. The Rust workspace implements the **P0 admission path** (docs/04, run locally against a mock engine) the **P1 CRDs plus the Regional Capacity Controller** (docs/06, docs/08), and the **control-plane customer API** (docs/12, in-memory store), which gateways follow through **signed entitlement snapshots** (docs/12 §6), the **Quota Coordinator** that shares entitlements across gateway replicas (ADR-012), and **customer usage/SLA telemetry** (docs/09 §5) fed by gateway usage export, the **Quote API** (docs/02 §5), the **tenant-aware router tier** `pt-router` (docs/13, ADR-013), a **durable SQL store** for the control plane (`sql.rs`, CockroachDB or PostgreSQL, ADR-017), **monthly invoices** (ADR-018), **usage records in ClickHouse** (ADR-019), **automatic region failover** (docs/07 §4, ADR-014): gateway heartbeats, automatic incidents, reserved failover headroom, snapshot-activated failover entitlements, and a DNS steering feed, an **active/standby Quota Coordinator** (ADR-027), and the **interference test suite** (docs/05 §7, ADR-025) against a contention-model mock engine. The controller has only been unit-tested: there's no cluster, Docker, or kubectl on this machine. Dynamo integration is designed (docs/13 §3) but not built, because Dynamo can't be compiled or run here. `README.md` lists what's missing. The remote is `origin` = `git@github.com:kishorda/provisioned-throughput.git` (SSH). HTTPS has no credentials on this machine, and there's no `gh` CLI.
+**Current state:** design docs are complete. The Rust workspace implements:
+- the **P0 admission path** (docs/04), run locally against a mock engine;
+- the **P1 CRDs and the Regional Capacity Controller** (docs/06, docs/08);
+- the **control-plane customer API** (docs/12) on a durable SQL store (`sql.rs`, CockroachDB or PostgreSQL, ADR-017) or in memory, running as several instances (ADR-023) and serving HTTPS with optional mTLS (ADR-022);
+- **signed entitlement snapshots** that gateways follow (docs/12 §6), with key rotation (ADR-020);
+- the **Quota Coordinator**, which shares entitlements across gateway replicas (ADR-012) and runs active/standby on a Kubernetes Lease (ADR-027);
+- **customer usage and SLA telemetry** (docs/09 §5) fed by gateway usage export, with **usage records in ClickHouse** (ADR-019);
+- the **Quote API** (docs/02 §5) and **monthly invoices** (ADR-018);
+- the **tenant-aware router tier** `pt-router` (docs/13, ADR-013), with hot-spare preemption (ADR-015) and a backfill cap (ADR-026);
+- **automatic region failover** (docs/07 §4, ADR-014 to ADR-016): gateway heartbeats, automatic incidents, reserved failover headroom, snapshot-activated failover entitlements, warm spares, and a DNS steering feed, plus **share rebalancing** between regions (ADR-024);
+- the **interference test suite** (docs/05 §7, ADR-025) against a contention-model mock engine;
+- **input token counting** with each model's tokenizer, cached per message within an inline byte budget (ADR-028).
+
+The controller has only been unit-tested: there's no cluster, Docker, or kubectl on this machine. Dynamo integration is designed (docs/13 §3) but not built, because Dynamo can't be compiled or run here. `README.md` lists what's missing. The remote is `origin` = `git@github.com:kishorda/provisioned-throughput.git` (SSH). HTTPS has no credentials on this machine, and there's no `gh` CLI.
 
 ## Fixed decisions (don't re-litigate without the user)
 - **Sellable unit:** an abstract **Capacity Unit (CU)** = a fixed rate of **Work Units (WU)** per second at a named SLO tier (Interactive / Agentic / Standard).
   WU = `a·uncached_prefill + b·cached_prefill + c·decode·m_decode + d·KV_token_seconds`. Coefficients come from a per-(model, GPU, engine version, parallelism) `PerformanceProfile`.
 - **Footprint:** multi-cluster and **multi-region** from v1. The global control plane is off the request path, and regional data planes are statically stable.
-- **Stack:** Kubernetes + **NVIDIA Dynamo** (KV router, disaggregated prefill/decode, KVBM, NIXL, Planner, operator, Grove), plus KAI Scheduler. **Rust** for the gateway (Pingora or hyper + tower), Quota Coordinator (single instance, HTTP/JSON for now: ADR-012), router extensions, kube-rs controllers, planner (good_lp + HiGHS), and metering.
+- **Stack:** Kubernetes + **NVIDIA Dynamo** (KV router, disaggregated prefill/decode, KVBM, NIXL, Planner, operator, Grove), plus KAI Scheduler. **Rust** for the gateway (Pingora or hyper + tower), Quota Coordinator (active/standby on a Kubernetes Lease, soft state, HTTP/JSON for now: ADR-012, ADR-027), router extensions, kube-rs controllers, planner (good_lp + HiGHS), and metering.
 - **Traffic classes (strict priority):** `provisioned > burst > spillover > payg`. Headroom is backfilled with preemptible PAYG.
 - **SLA:** measured at the regional PT Gateway, as p95 per 5-minute window per deployment, counting in-shape provisioned traffic only.
 
@@ -20,12 +33,13 @@ Cargo.toml                      # workspace
 crates/
   pt-core/                      # WU cost model, PerformanceProfile, tiers + pricing, Shape, TermMonths, token counting, UsageRecord
   pt-telemetry/                 # usage store (trait, in-memory, clickhouse.rs, UsageBackend), usage.rs (series/summary/advice), sla.rs (windows, attainment, credits), sessions.rs, api.rs; Directory trait implemented by the control plane
-  pt-router/                    # tenant scheduling tier: scheduler.rs (priority + SCFQ WFQ), workers.rs (eligibility, KV budget, scoring, prefix index), dispatch.rs (pure), http.rs (proxy + capacity guards)
+  pt-router/                    # tenant scheduling tier: scheduler.rs (priority + SCFQ WFQ), workers.rs (eligibility, KV budget, backfill cap, scoring, prefix index), dispatch.rs (pure), http.rs (proxy + capacity guards); tests/interference.rs
   pt-quota/                     # Quota Coordinator: allocator.rs (pure max-min split), coordinator.rs (leases, never-oversell rule, terms + warm-up), election.rs (active/standby on a Lease), wire.rs (shared with gateway), api.rs
   pt-entitlement/               # Snapshot format, Ed25519 SnapshotSigner/Verifier, sha256_hex for API keys
+  pt-tokenize/                  # input token counting: HF tokenizers (fancy-regex, no C), per-message cache, inline budget + background fill, learned ratios
   pt-admission/                 # DebtBucket (ADR-002), BurstBank, ReservationLimiter (burst → queue → spillover → reject), OutputEstimator
   pt-gateway/                   # axum gateway: chat.rs (admission path), sse.rs, state.rs (swappable entitlements), sync.rs (snapshot long-poll + cache), config.rs, usage.rs; tests/gateway.rs, tests/entitlements.rs (control plane → gateway e2e)
-  pt-mock-engine/               # OpenAI-compatible mock with TTFT/TPOT and simulated prefix cache
+  pt-mock-engine/               # OpenAI-compatible mock with TTFT/TPOT, simulated prefix cache, contention.rs (continuous-batching model)
   pt-crds/                      # kube-rs CRD types + crdgen binary; tests/manifests.rs checks deploy/ drift
   pt-operator/                  # capacity controller: sizing.rs, render.rs (DGD + PDB), plan.rs (pure), controller.rs (kube I/O)
   pt-control-plane/             # customer API: service.rs (rules), api.rs (HTTP), quote.rs + quote_api.rs (sizing), telemetry.rs (Directory impl), store.rs (trait + MemoryStore), sql.rs (SqlStore), planner.rs, migrations/ (CockroachDB/PostgreSQL)
@@ -44,13 +58,14 @@ docs/
   01-requirements-and-traceability.md   # blog problems P1–P20 → requirements → sections; NFRs N1–N10
   02 … 11-*.md                  # unit/cost model, system, request path, isolation, capacity,
                                 # multi-region, K8s+Dynamo, metering/SLA, lifecycle, roadmap
-  adr/ADR-001 … ADR-014-*.md    # Nygard format: Status, Date, Context, Decision, Consequences
+  adr/ADR-001 … ADR-027-*.md    # Nygard format: Status, Date, Context, Decision, Consequences
 ```
 Published summary page (private Artifact): https://claude.ai/artifact/HMSSEEU8fb8tWSrGE9NmSH
 Its source HTML lived in a session scratchpad, not in this repo. To update it, republish with that URL after reading it.
 
 ## Conventions for code
 - Keep admission logic pure and synchronous in `pt-admission`, taking `now: Instant` explicitly so tests are deterministic. The gateway owns async and I/O.
+- Token counting (ADR-028): the gateway counts with `pt_tokenize::Tokenizers` (`AppState.tokens`), never `ApproxTokenCounter`. Uncached work runs on `spawn_blocking`. `count_within` tokenizes at most `inline_bytes` of uncached text, and `deferred` messages go to `fill` in the background (deduplicated through `filling`). Settlement calls `observe` with the engine's prompt tokens. The gateway sends `x-pt-prompt-tokens`, and the router rescales its prefix estimates to it. Keep the `tokenizers` crate on `default-features = false, features = ["fancy-regex"]`: the defaults build C/C++ (`onig`, `esaxx_fast`). A real-tokenizer check runs with `PT_TEST_TOKENIZER=<gpt2 tokenizer.json>` (`pt-tokenize/tests/real.rs`, `--release --nocapture` prints timings).
 - Settlement and usage emission happen once, in `Settlement::drop` (`crates/pt-gateway/src/chat.rs`), so every exit path is covered, including client disconnects.
 - Engines are reached over plain HTTP (`reqwest` with default features off). Don't add crates that need cmake or TLS C libraries: this machine has no cmake. Where TLS is needed, use rustls with the ring provider: sqlx `tls-rustls-ring-webpki`, reqwest `rustls-tls-webpki-roots` (pt-telemetry only), kube `ring`. Never aws-lc-rs or native-tls.
 - Control-plane transport (ADR-022): `[server.tls]` serves HTTPS through `tls::TlsListener` (rustls with ring; handshakes run in their own tasks). ALPN must stay `http/1.1` only, because axum has no HTTP/2 here. Clients build reqwest through `pt_entitlement::client_tls::ControlPlaneTls` (feature `client`), which enforces the policy. Tests generate certificates with `rcgen`, so they always run.

@@ -26,6 +26,9 @@ pub struct GatewayConfig {
     /// run only one replica per region.
     #[serde(default)]
     pub quota: Option<QuotaClientConfig>,
+    /// How input tokens are counted before admission (ADR-028).
+    #[serde(default)]
+    pub tokenization: TokenizationConfig,
     /// Push usage records to the control plane's telemetry API (docs/09).
     #[serde(default)]
     pub usage_export: Option<UsageExportConfig>,
@@ -110,6 +113,40 @@ fn default_flush_interval_ms() -> u64 {
 }
 fn default_buffer() -> usize {
     100_000
+}
+
+/// Input token counting (docs/04 §3, ADR-028).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TokenizationConfig {
+    /// Each model's `tokenizer.json`. Models without one are counted by a bytes-per-token
+    /// ratio learned from the engine's counts.
+    #[serde(default)]
+    pub tokenizers: Vec<pt_tokenize::TokenizerSpec>,
+    /// Messages whose counts are cached, across all models.
+    #[serde(default = "default_cache_entries")]
+    pub cache_entries: usize,
+    /// Most uncached bytes tokenized before admission. Longer new messages are estimated
+    /// by ratio and tokenized in the background. Placeholder: about 2.5 ms of tokenizing.
+    #[serde(default = "default_inline_bytes")]
+    pub inline_bytes: usize,
+}
+
+impl Default for TokenizationConfig {
+    fn default() -> Self {
+        Self {
+            tokenizers: vec![],
+            cache_entries: default_cache_entries(),
+            inline_bytes: default_inline_bytes(),
+        }
+    }
+}
+
+fn default_cache_entries() -> usize {
+    100_000
+}
+fn default_inline_bytes() -> usize {
+    4 * 1024
 }
 
 #[derive(Debug, Clone, Deserialize)]

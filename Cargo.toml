@@ -12,6 +12,7 @@ members = [
     "crates/pt-quota",
     "crates/pt-telemetry",
     "crates/pt-router",
+    "crates/pt-tokenize",
 ]
 
 [workspace.package]
@@ -27,8 +28,10 @@ pt-mock-engine = { path = "crates/pt-mock-engine" }
 pt-crds = { path = "crates/pt-crds" }
 pt-entitlement = { path = "crates/pt-entitlement" }
 pt-control-plane = { path = "crates/pt-control-plane" }
-pt-quota = { path = "crates/pt-quota" }
+# Gateways need only the wire types; the coordinator binary builds with its `kube` default.
+pt-quota = { path = "crates/pt-quota", default-features = false }
 pt-telemetry = { path = "crates/pt-telemetry" }
+pt-tokenize = { path = "crates/pt-tokenize" }
 
 anyhow = "1"
 axum = "0.8"
@@ -56,6 +59,9 @@ serde_yaml = "0.9"
 sha2 = "0.10"
 schemars = "1"
 thiserror = "2"
+# Model tokenizers (tokenizer.json). Pure-Rust regex backend: the default `onig` and
+# `esaxx_fast` features build C/C++ code (ADR-028).
+tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time", "sync", "signal"] }
 time = "0.3"
 toml = "0.8"
