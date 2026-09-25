@@ -130,6 +130,11 @@ curl -s http://127.0.0.1:8090/v1/invoices -H 'Authorization: Bearer sk-admin-acm
 curl -s http://127.0.0.1:8090/v1/invoices/2026-10 -H 'Authorization: Bearer sk-admin-acme-dev'   # one month
 ```
 
+Reservations with shares in several regions are rebalanced automatically. When demand
+doesn't match the split, the control plane moves the effective split (`effective_regions`)
+up to 20% toward where traffic is. The contract and price stay the same. Opt out with
+`"rebalance": false` (docs/07 §3, ADR-024).
+
 Quotes size a reservation before buying, or recommend a resize from real usage (docs/02 §5):
 
 ```sh

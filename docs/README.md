@@ -82,6 +82,7 @@ The design rests on six decisions:
 | [021](adr/ADR-021-database-tls.md) | Verified TLS to the databases by default (amends 017, 019) |
 | [022](adr/ADR-022-control-plane-tls.md) | The control plane serves HTTPS, with optional mutual TLS |
 | [023](adr/ADR-023-multi-instance-control-plane.md) | Several control-plane instances: shared state in the database, one leader (amends 014, 017) |
+| [024](adr/ADR-024-share-rebalancing.md) | Move multi-region splits toward demand, within 20% |
 
 ## Glossary
 

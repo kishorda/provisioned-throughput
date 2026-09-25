@@ -58,11 +58,17 @@ flowchart LR
 - Deployment endpoints are regional (`eu-west.pt.example.com`) plus one global name
   (`pt.example.com`) that routes through GeoDNS/anycast to the nearest region holding a
   share for that deployment.
-- **Share rebalancing between regions:** with a global endpoint, demand may not match the
-  static split. The Entitlement Distributor watches regional utilisation reports every 5 s.
-  It shifts up to 20% of a reservation's CUs between its regions (not beyond the region's
-  placed capacity) and publishes new snapshots. Settling within tens of seconds is
-  acceptable, and the burst bucket absorbs the gap.
+- **Share rebalancing between regions** ([ADR-024](adr/ADR-024-share-rebalancing.md)):
+  with a global endpoint, demand may not match the static split.
+  - Every 5 minutes, the leader compares each reservation's attempted WU per region (last
+    15 minutes, throttled requests included) with its split.
+  - It moves the *effective* split toward demand: at most 20% of the CUs, at least 1 CU per
+    region, and only when that lowers the busiest region's load by 10% or more.
+  - The new split's capacity and headroom are reserved first. A move that doesn't fit
+    waits. Each move is followed by a 15-minute cooldown.
+  - The contract and price never change, and the split drifts back as demand evens out.
+  - It's frozen during incidents. Customers can opt out with `"rebalance": false`.
+  - Short bursts are the burst bucket's job.
 
 ## 4. Region failure sequence (Multi-region SKU)
 

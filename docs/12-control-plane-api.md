@@ -53,7 +53,11 @@ Create request:
 }
 ```
 
-`sku`, `isolation`, `start_at` (default: now), `auto_renew` (default: true), and
+`rebalance` (default: true) lets the control plane move the effective split toward demand
+(`effective_regions` in the resource, [ADR-024](adr/ADR-024-share-rebalancing.md)). The
+contract (`regions`) and the price don't change.
+
+`sku`, `isolation`, `start_at` (default: now), `auto_renew` (default: true), `rebalance`, and
 `boundary_policy` are optional.
 
 Errors use the same shape as the gateway:
@@ -94,6 +98,7 @@ Errors use the same shape as the gateway:
 | Tier | At the next renewal |
 | Shape | Now, after checking that the regions can serve it |
 | Boundary policy, auto-renew, name | Now |
+| `rebalance` | Now. Turning it off returns the effective split to the contract at once |
 
 Before the term starts, every change applies immediately. A request that mixes an increase
 with a region change is scheduled as a whole. Send the increase on its own to apply it now.

@@ -54,6 +54,7 @@ async fn follower_turns_a_region_failure_into_pool_demand() {
                     burst_factor: 1.0,
                 },
                 boundary_policy: Default::default(),
+                rebalance: true,
             },
         )
         .await

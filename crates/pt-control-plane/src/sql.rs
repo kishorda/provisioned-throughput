@@ -54,6 +54,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "shared_state",
         include_str!("../migrations/0003_shared_state.sql"),
     ),
+    (
+        4,
+        "rebalance",
+        include_str!("../migrations/0004_rebalance.sql"),
+    ),
 ];
 
 /// Idempotency keys older than this are ignored and may be reused.
@@ -356,6 +361,11 @@ fn pt_from_row(r: PgRow) -> Result<ProvisionedThroughput, StoreError> {
             r.try_get("failover_headroom").map_err(bad)?,
             "failover_headroom",
         )?,
+        rebalance: r.try_get("rebalance").map_err(bad)?,
+        effective_regions: from_json(
+            r.try_get("effective_regions").map_err(bad)?,
+            "effective_regions",
+        )?,
         deployments: vec![],
         version: version as u64,
         created_at: from_db(r.try_get("created_at").map_err(bad)?)?,
@@ -367,7 +377,7 @@ fn pt_from_row(r: PgRow) -> Result<ProvisionedThroughput, StoreError> {
 /// Bind the main row's columns in this order:
 /// id, tenant, name, model, tier, sku, isolation, regions, failover_headroom, cus, shape,
 /// boundary_policy, term_months, term_start, term_end, auto_renew, state, pending_changes,
-/// endpoints, price, version, created_at, updated_at.
+/// endpoints, price, version, created_at, updated_at, rebalance, effective_regions.
 macro_rules! bind_pt {
     ($q:expr, $pt:expr) => {
         $q.bind(&$pt.id)
@@ -393,12 +403,15 @@ macro_rules! bind_pt {
             .bind($pt.version as i64)
             .bind(to_db($pt.created_at))
             .bind(to_db($pt.updated_at))
+            .bind($pt.rebalance)
+            .bind(json(&$pt.effective_regions))
     };
 }
 
 const COLUMNS: &str = "id, tenant, name, model, tier, sku, isolation, regions, failover_headroom, \
      cus, shape, boundary_policy, term_months, term_start, term_end, auto_renew, state, \
-     pending_changes, endpoints, price, version, created_at, updated_at";
+     pending_changes, endpoints, price, version, created_at, updated_at, rebalance, \
+     effective_regions";
 
 /// Replace a reservation's deployments and keys with `pt`'s.
 async fn write_children(
@@ -509,7 +522,7 @@ fn incident_from_row(r: PgRow) -> Result<RegionIncident, StoreError> {
 impl Store for SqlStore {
     async fn insert(&self, pt: ProvisionedThroughput) -> Result<(), StoreError> {
         let mut tx = self.pool.begin().await.map_err(unavailable)?;
-        let placeholders = (1..=23)
+        let placeholders = (1..=25)
             .map(|i| format!("${i}"))
             .collect::<Vec<_>>()
             .join(", ");
@@ -548,7 +561,7 @@ impl Store for SqlStore {
         expected_version: u64,
     ) -> Result<(), StoreError> {
         let mut tx = self.pool.begin().await.map_err(unavailable)?;
-        // $1 is the id; $2..$23 are the other columns; $24 is the expected version.
+        // $1 is the id; $2..$25 are the other columns; $26 is the expected version.
         let sets = COLUMNS
             .split(", ")
             .enumerate()
@@ -557,7 +570,7 @@ impl Store for SqlStore {
             .collect::<Vec<_>>()
             .join(", ");
         let sql =
-            format!("UPDATE provisioned_throughput SET {sets} WHERE id = $1 AND version = $24");
+            format!("UPDATE provisioned_throughput SET {sets} WHERE id = $1 AND version = $26");
         let done = bind_pt!(sqlx::query(&sql), pt)
             .bind(expected_version as i64)
             .execute(&mut *tx)

@@ -15,6 +15,7 @@ pub mod planner;
 pub mod pricing;
 pub mod quote;
 pub mod quote_api;
+pub mod rebalance;
 pub mod service;
 pub mod sql;
 pub mod sql_planner;

@@ -290,15 +290,16 @@ pub fn reservation_targets(
     pt: &ProvisionedThroughput,
     weight_of: impl Fn(&str) -> f64,
 ) -> Vec<Target> {
+    // The effective split: where rebalancing has moved the reservation's shares.
     let mut w: Vec<(String, f64)> = pt
-        .regions
+        .effective()
         .iter()
         .map(|r| (r.region.clone(), f64::from(r.cus) * weight_of(&r.region)))
         .collect();
     if pt.sku == Sku::MultiRegion {
-        for (from, to) in failover_targets(config, &pt.regions) {
+        for (from, to) in failover_targets(config, pt.effective()) {
             let cus = pt
-                .regions
+                .effective()
                 .iter()
                 .find(|r| r.region == from)
                 .map_or(0, |r| r.cus);

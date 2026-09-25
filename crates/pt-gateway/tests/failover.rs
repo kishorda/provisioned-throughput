@@ -175,6 +175,7 @@ async fn paired_region_takes_over_then_hands_back_gradually() {
                     burst_factor: 1.0,
                 },
                 boundary_policy: Default::default(),
+                rebalance: true,
             },
         )
         .await

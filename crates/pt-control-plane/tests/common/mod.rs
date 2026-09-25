@@ -58,5 +58,6 @@ pub fn request(name: &str, regions: &[(&str, u32)]) -> CreateRequest {
         auto_renew: true,
         shape: shape(32_768),
         boundary_policy: Default::default(),
+        rebalance: true,
     }
 }

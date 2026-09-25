@@ -564,6 +564,8 @@ mod tests {
                 monthly: 4_000,
             },
             failover_headroom: vec![],
+            rebalance: true,
+            effective_regions: vec![],
             deployments: vec![],
             version: 1,
             created_at: at("2026-10-11T00:00:00Z"),

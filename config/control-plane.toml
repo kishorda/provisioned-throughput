@@ -31,6 +31,15 @@ input_per_mtok = 10
 cached_input_per_mtok = 3
 output_per_mtok = 30
 
+# Moving multi-region splits toward demand (ADR-024). Placeholders until tuned.
+[rebalance]
+enabled = true
+interval_secs = 300        # how often the leader looks
+window_minutes = 15        # demand window (attempted WU, throttled requests included)
+cooldown_minutes = 15      # between two moves of one reservation
+max_shift_fraction = 0.2   # the effective split stays within 20% of the CUs of the contract
+min_requests = 100         # less traffic than this leaves the split alone
+
 # Monthly invoices (ADR-018): calendar months, in arrears, finalised after a grace period.
 [billing]
 finalize_grace_hours = 48

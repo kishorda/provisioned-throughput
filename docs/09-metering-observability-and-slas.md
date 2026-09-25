@@ -142,6 +142,7 @@ flowchart LR
   | CU increase | `change_grace_minutes` | All regions | `resize` |
   | Shape change | `change_grace_minutes` | All regions | `shape_change` |
   | Change applied at renewal | `change_grace_minutes` | All regions | `scheduled_change` |
+  | Split rebalanced between regions (ADR-024) | `change_grace_minutes` | All regions | `rebalance` |
   | Region incident, Multi-region SKU | First `failover_window_minutes` (default 5) of the incident | All regions | `failover` |
   | Region incident, Regional SKU | The whole incident, while open | The failed region only | `region_outage` |
 

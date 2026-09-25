@@ -3,7 +3,8 @@
 //! - **Every instance** polls the shared entitlement version every 500 ms, so its snapshot
 //!   long-polls wake for changes made through other instances.
 //! - **The leader** runs the loops that change shared state: the lifecycle, failover
-//!   detection, capacity reconciliation, invoice finalisation, and pruning. Leadership is
+//!   detection, share rebalancing, capacity reconciliation, invoice finalisation, and
+//!   pruning. Leadership is
 //!   a lease in the store (`LEADER_LEASE`), renewed every [`LEASE_RENEW`]. If the leader
 //!   stops renewing, another instance takes over once the lease expires. The loops are safe
 //!   to overlap briefly during a handover: they rely on version checks and unique
@@ -98,6 +99,7 @@ pub async fn run<S: Store, P: CapacityPlanner, C: Clock>(
     let mut reconcile = Job::new(RECONCILE_EVERY);
     let mut invoices = Job::new(Duration::from_secs(config.billing.finalize_interval_secs));
     let mut prune = Job::new(PRUNE_EVERY);
+    let mut rebalance = Job::new(Duration::from_secs(config.rebalance.interval_secs));
     let retention_ms = config.telemetry.retention_days * 86_400_000;
 
     let mut leading = false;
@@ -137,6 +139,19 @@ pub async fn run<S: Store, P: CapacityPlanner, C: Clock>(
                 Ok(drift) if !drift.is_empty() => tracing::warn!(?drift, "capacity drift"),
                 Ok(_) => {}
                 Err(e) => tracing::warn!(error = %e, "capacity reconcile failed"),
+            }
+        }
+        if rebalance.due(now) {
+            match svc.run_rebalance(&telemetry.store).await {
+                Ok(r) if !r.moved.is_empty() || !r.no_capacity.is_empty() => {
+                    tracing::info!(
+                        moved = r.moved.len(),
+                        no_capacity = r.no_capacity.len(),
+                        "rebalanced splits"
+                    )
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error = %e, "rebalancing skipped"),
             }
         }
         if invoices.due(now) {

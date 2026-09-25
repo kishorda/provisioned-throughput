@@ -106,6 +106,8 @@ pub fn exclusion_windows(
                 EventKind::CapacityIncreased { .. } => "resize",
                 EventKind::ShapeUpdated => "shape_change",
                 EventKind::ChangeApplied { .. } => "scheduled_change",
+                // Capacity moved between regions and placement catches up, like a resize.
+                EventKind::SplitRebalanced { .. } => "rebalance",
                 _ => return None,
             };
             let start = ms(e.at);
@@ -198,6 +200,8 @@ mod tests {
                 monthly: 0,
             },
             failover_headroom: vec![],
+            rebalance: true,
+            effective_regions: vec![],
             deployments: vec![],
             version: 1,
             created_at: at("2026-10-01T00:00:00Z"),

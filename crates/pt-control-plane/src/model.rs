@@ -140,6 +140,15 @@ pub enum EventKind {
     AutoRenewChanged {
         auto_renew: bool,
     },
+    /// The effective split moved toward demand (docs/07 §3, ADR-024). The contract and
+    /// price are unchanged.
+    SplitRebalanced {
+        from: Vec<RegionShare>,
+        to: Vec<RegionShare>,
+    },
+    RebalanceChanged {
+        rebalance: bool,
+    },
     CancellationRequested {
         effective_at: Timestamp,
     },
@@ -207,6 +216,14 @@ pub struct ProvisionedThroughput {
     /// surcharge per CU instead. Empty for the Regional SKU.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failover_headroom: Vec<RegionShare>,
+    /// Move the effective split toward where demand is (docs/07 §3). On by default.
+    #[serde(default = "default_true")]
+    pub rebalance: bool,
+    /// The split gateways enforce now, when rebalancing has moved it away from `regions`.
+    /// Empty means `regions`. It sums to the same CUs and moves at most 20% of them; the
+    /// contract and price follow `regions`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effective_regions: Vec<RegionShare>,
     /// Deployments sharing this reservation's entitlement, each with its own keys and an
     /// optional cap. The first is the primary, created with the reservation.
     pub deployments: Vec<Deployment>,
@@ -237,6 +254,9 @@ pub struct CreateRequest {
     pub shape: Shape,
     #[serde(default)]
     pub boundary_policy: BoundaryPolicy,
+    /// Move the effective split toward demand (docs/07 §3). Defaults to true.
+    #[serde(default = "default_true")]
+    pub rebalance: bool,
 }
 
 /// `PATCH /v1/provisioned-throughput/{id}`. Omitted fields are unchanged.
@@ -257,6 +277,9 @@ pub struct UpdateRequest {
     pub boundary_policy: Option<BoundaryPolicy>,
     #[serde(default)]
     pub auto_renew: Option<bool>,
+    /// Turning it off returns the effective split to the contract now.
+    #[serde(default)]
+    pub rebalance: Option<bool>,
 }
 
 fn default_true() -> bool {
@@ -384,6 +407,15 @@ impl Deployment {
 }
 
 impl ProvisionedThroughput {
+    /// The split gateways enforce now: `effective_regions`, or the contract.
+    pub fn effective(&self) -> &[RegionShare] {
+        if self.effective_regions.is_empty() {
+            &self.regions
+        } else {
+            &self.effective_regions
+        }
+    }
+
     /// The deployment the reservation was created with (or the oldest remaining one).
     pub fn primary(&self) -> &Deployment {
         &self.deployments[0]

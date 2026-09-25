@@ -39,6 +39,61 @@ pub struct ControlPlaneConfig {
     pub payg_prices: Vec<PaygPrice>,
     #[serde(default)]
     pub billing: BillingConfig,
+    #[serde(default)]
+    pub rebalance: RebalanceConfig,
+}
+
+/// Moving multi-region splits toward demand (docs/07 §3, ADR-024). Values are placeholders
+/// until tuned on real traffic.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RebalanceConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// How often the leader looks at demand.
+    #[serde(default = "default_rebalance_interval_secs")]
+    pub interval_secs: u64,
+    /// Demand is attempted WU per region over this window, throttled requests included.
+    #[serde(default = "default_rebalance_window_minutes")]
+    pub window_minutes: u64,
+    /// At least this long between two moves of one reservation's split.
+    #[serde(default = "default_rebalance_cooldown_minutes")]
+    pub cooldown_minutes: u64,
+    /// The effective split may differ from the contract by at most this share of the CUs.
+    #[serde(default = "default_rebalance_max_shift")]
+    pub max_shift_fraction: f64,
+    /// Too little traffic in the window leaves the split alone.
+    #[serde(default = "default_rebalance_min_requests")]
+    pub min_requests: usize,
+}
+
+impl Default for RebalanceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_secs: default_rebalance_interval_secs(),
+            window_minutes: default_rebalance_window_minutes(),
+            cooldown_minutes: default_rebalance_cooldown_minutes(),
+            max_shift_fraction: default_rebalance_max_shift(),
+            min_requests: default_rebalance_min_requests(),
+        }
+    }
+}
+
+fn default_rebalance_interval_secs() -> u64 {
+    300
+}
+fn default_rebalance_window_minutes() -> u64 {
+    15
+}
+fn default_rebalance_cooldown_minutes() -> u64 {
+    15
+}
+fn default_rebalance_max_shift() -> f64 {
+    0.2
+}
+fn default_rebalance_min_requests() -> usize {
+    100
 }
 
 /// A model's PAYG list price, in minor currency units per million tokens.
@@ -435,6 +490,13 @@ impl ControlPlaneConfig {
         if self.telemetry.retention_days * 24 < self.billing.finalize_grace_hours + 24 * 31 {
             return invalid(
                 "telemetry.retention_days must keep usage until invoices are finalised (a month plus billing.finalize_grace_hours)"
+                    .into(),
+            );
+        }
+        let r = &self.rebalance;
+        if !(0.0..=0.5).contains(&r.max_shift_fraction) || r.window_minutes == 0 {
+            return invalid(
+                "rebalance.max_shift_fraction must be in [0, 0.5] and window_minutes positive"
                     .into(),
             );
         }

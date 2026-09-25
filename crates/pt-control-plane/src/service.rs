@@ -155,6 +155,15 @@ pub enum DeleteEffect {
     AlreadyInactive,
 }
 
+/// What one rebalancing pass changed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RebalanceReport {
+    /// Reservations whose effective split moved, with the new split.
+    pub moved: Vec<(String, Vec<RegionShare>)>,
+    /// Reservations whose move didn't fit the regions' spare capacity.
+    pub no_capacity: Vec<String>,
+}
+
 /// What one failover check changed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FailoverReport {
@@ -307,7 +316,8 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         let mut reservations = Vec::new();
         let mut deployments = Vec::new();
         for pt in live {
-            let Some(share) = pt.regions.iter().find(|r| r.region == region) else {
+            // The effective split: the contract, or where rebalancing has moved it.
+            let Some(share) = pt.effective().iter().find(|r| r.region == region) else {
                 continue;
             };
             let Some(capacity) = self.config.capacity_for(region, &pt.model) else {
@@ -363,11 +373,11 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         if pt.sku != Sku::MultiRegion {
             return vec![];
         }
-        failover::failover_targets(&self.config, &pt.regions)
+        failover::failover_targets(&self.config, pt.effective())
             .into_iter()
             .filter(|(_, to)| to == region)
             .filter_map(|(from, _)| {
-                let cus = pt.regions.iter().find(|r| r.region == from)?.cus;
+                let cus = pt.effective().iter().find(|r| r.region == from)?.cus;
                 Some(FailoverShare {
                     from_region: from,
                     cus,
@@ -507,6 +517,8 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
             pending_changes: None,
             price,
             failover_headroom: headroom,
+            rebalance: req.rebalance,
+            effective_regions: vec![],
             deployments: vec![Deployment {
                 id: format!("dep-{}", &suffix[16..]),
                 name: "default".into(),
@@ -673,6 +685,26 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
             }
             _ => {}
         }
+        if let Some(v) = req.rebalance.filter(|v| *v != pt.rebalance) {
+            pt.rebalance = v;
+            push(pt, EventKind::RebalanceChanged { rebalance: v });
+            // Off: back to the contracted split now.
+            if !v && !pt.effective_regions.is_empty() {
+                let headroom = failover::headroom(&self.config, pt.sku, &pt.regions);
+                let target = footprint(&pt.regions, &headroom);
+                let shape = pt.shape;
+                self.move_capacity(pt, &target, &shape, ops).await?;
+                let from = std::mem::take(&mut pt.effective_regions);
+                pt.failover_headroom = headroom;
+                push(
+                    pt,
+                    EventKind::SplitRebalanced {
+                        from,
+                        to: pt.regions.clone(),
+                    },
+                );
+            }
+        }
 
         let shape = req.shape.unwrap_or(pt.shape);
         let mut schedule_tier = None;
@@ -699,15 +731,17 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                     self.planner.reserve(&pt.model, &after, &shape).await?;
                     ops.push(PlanOp::Reserved(after));
                     pt.regions = new.clone();
+                    pt.effective_regions.clear();
                     pt.failover_headroom = headroom;
                 }
             } else if let Some(deltas) = increases_only(&pt.regions, new) {
                 if !deltas.is_empty() {
-                    // Growing a share can grow the headroom it needs in its failover target.
+                    // The new contract replaces any rebalanced split. Growing a share can
+                    // grow the headroom it needs in its failover target.
                     let headroom = failover::headroom(&self.config, pt.sku, new);
-                    let extra = growth(&held(pt), &footprint(new, &headroom));
-                    self.planner.reserve(&pt.model, &extra, &shape).await?;
-                    ops.push(PlanOp::Reserved(extra));
+                    self.move_capacity(pt, &footprint(new, &headroom), &shape, ops)
+                        .await?;
+                    pt.effective_regions.clear();
                     pt.failover_headroom = headroom;
                     let per_cu = self.price(&pt.tier, pt.isolation, pt.sku, 1).per_cu_monthly;
                     let mut running = pt.cus;
@@ -1256,6 +1290,117 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         Ok(self.store.list_incidents().await?)
     }
 
+    /// Move each eligible reservation's effective split toward its demand (docs/07 §3,
+    /// ADR-024). Run by the leader.
+    ///
+    /// Eligible: live, `rebalance` on, shares in 2+ regions, no incident (or return ramp) in
+    /// any of its regions, not moved within the cooldown, and enough traffic in the window.
+    /// The new split's capacity (and failover headroom) is reserved before it's published.
+    /// A move that doesn't fit is skipped until the next pass.
+    pub async fn run_rebalance<U: pt_telemetry::UsageStore>(
+        &self,
+        usage: &U,
+    ) -> Result<RebalanceReport, ServiceError> {
+        let cfg = &self.config.rebalance;
+        let mut report = RebalanceReport::default();
+        if !cfg.enabled {
+            return Ok(report);
+        }
+        let now = self.clock.now();
+        let ramp = self.return_ramp();
+        let disturbed: std::collections::HashSet<String> = self
+            .store
+            .list_incidents()
+            .await?
+            .into_iter()
+            .filter(|i| i.ended_at.is_none_or(|e| e + ramp > now))
+            .map(|i| i.region)
+            .collect();
+        let window = SignedDuration::from_mins(cfg.window_minutes as i64);
+        let cooldown = SignedDuration::from_mins(cfg.cooldown_minutes as i64);
+        let ms = |t: Timestamp| t.as_millisecond().max(0) as u64;
+
+        for mut pt in self.store.list_live().await? {
+            let eligible = pt.rebalance
+                && pt.regions.len() >= 2
+                && matches!(pt.state, State::Active | State::PendingCancellation)
+                && !pt.regions.iter().any(|r| disturbed.contains(&r.region))
+                && !pt.events.iter().any(|e| {
+                    matches!(e.kind, EventKind::SplitRebalanced { .. }) && e.at + cooldown > now
+                });
+            if !eligible {
+                continue;
+            }
+            let records = usage
+                .range(&pt.tenant, &pt.id, ms(now - window), ms(now))
+                .await
+                .map_err(|e| ServiceError::Unavailable(e.to_string()))?;
+            if records.len() < cfg.min_requests {
+                continue;
+            }
+            let mut demand: std::collections::HashMap<String, f64> = Default::default();
+            for r in &records {
+                if pt.regions.iter().any(|s| s.region == r.region) {
+                    *demand.entry(r.region.clone()).or_default() +=
+                        crate::rebalance::attempted_wu(&r.record);
+                }
+            }
+            let max_shift = (f64::from(pt.cus) * cfg.max_shift_fraction).floor() as u32;
+            let target = crate::rebalance::target_split(&pt.regions, &demand, max_shift);
+            if target.as_slice() == pt.effective() {
+                continue;
+            }
+
+            let expected = pt.version;
+            let headroom = failover::headroom(&self.config, pt.sku, &target);
+            let shape = pt.shape;
+            let mut ops = Vec::new();
+            match self
+                .move_capacity(&pt, &footprint(&target, &headroom), &shape, &mut ops)
+                .await
+            {
+                Ok(()) => {}
+                Err(ServiceError::Capacity(PlanError::Unavailable(m))) => {
+                    return Err(ServiceError::Unavailable(m))
+                }
+                Err(ServiceError::Capacity(_)) => {
+                    report.no_capacity.push(pt.id.clone());
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+            let from = pt.effective().to_vec();
+            pt.effective_regions = if target == pt.regions {
+                vec![]
+            } else {
+                target.clone()
+            };
+            pt.failover_headroom = headroom;
+            pt.events.push(Event {
+                at: now,
+                kind: EventKind::SplitRebalanced {
+                    from,
+                    to: target.clone(),
+                },
+            });
+            let (id, model) = (pt.id.clone(), pt.model.clone());
+            match self.persist(pt, expected).await {
+                Ok(_) => {
+                    tracing::info!(%id, split = ?target, "rebalanced split toward demand");
+                    report.moved.push((id, target));
+                }
+                Err(e) => {
+                    // A customer change won the race; try again next pass.
+                    self.undo(&model, &shape, ops).await;
+                    if matches!(e, ServiceError::Unavailable(_)) {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        Ok(report)
+    }
+
     /// Record a gateway heartbeat for `region`, in the shared store.
     pub async fn heartbeat(&self, region: &str, hb: &Heartbeat) -> Result<(), ServiceError> {
         Ok(self
@@ -1507,6 +1652,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                         ops.push(PlanOp::Released(before));
                         ops.push(PlanOp::Reserved(after));
                         pt.regions = new;
+                        pt.effective_regions.clear();
                         pt.failover_headroom = headroom;
                     }
                     Err(e) => {
@@ -1549,6 +1695,29 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                 monthly: pt.price.monthly,
             },
         });
+    }
+
+    /// Change what `pt` holds from the planner to `target`: reserve what grows first (which
+    /// may fail, changing nothing), then release what shrinks. Records both in `ops`.
+    async fn move_capacity(
+        &self,
+        pt: &ProvisionedThroughput,
+        target: &[RegionShare],
+        shape: &Shape,
+        ops: &mut Vec<PlanOp>,
+    ) -> Result<(), ServiceError> {
+        let before = held(pt);
+        let grow = growth(&before, target);
+        if !grow.is_empty() {
+            self.planner.reserve(&pt.model, &grow, shape).await?;
+            ops.push(PlanOp::Reserved(grow));
+        }
+        let shrink = growth(target, &before);
+        if !shrink.is_empty() {
+            self.planner.release(&pt.model, &shrink).await;
+            ops.push(PlanOp::Released(shrink));
+        }
+        Ok(())
     }
 
     async fn undo(&self, model: &str, shape: &Shape, ops: Vec<PlanOp>) {
@@ -1619,9 +1788,10 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
     }
 }
 
-/// Everything a reservation holds from the planner: its shares and its failover headroom.
-fn held(pt: &ProvisionedThroughput) -> Vec<RegionShare> {
-    footprint(&pt.regions, &pt.failover_headroom)
+/// Everything a reservation holds from the planner: its effective shares (the contract,
+/// or where rebalancing moved them) and its failover headroom.
+pub(crate) fn held(pt: &ProvisionedThroughput) -> Vec<RegionShare> {
+    footprint(pt.effective(), &pt.failover_headroom)
 }
 
 /// If `new` only raises CUs in the current regions (same set), return the increases.
