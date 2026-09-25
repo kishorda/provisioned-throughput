@@ -34,8 +34,12 @@ use sqlx::{Postgres, Row, Transaction};
 use time::OffsetDateTime;
 
 use crate::billing::Invoice;
+use crate::failover::{next_heartbeat, GatewayHeartbeat};
+use crate::model::Heartbeat;
 use crate::model::{ApiKey, Deployment, Event, ProvisionedThroughput, RegionIncident};
+use crate::store::Lease;
 use crate::store::{IdempotencyRecord, Store, StoreError};
+use jiff::SignedDuration;
 
 /// Migrations in order. Never edit one that has shipped; add a new file.
 const MIGRATIONS: &[(i64, &str, &str)] = &[
@@ -44,6 +48,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         2,
         "invoices",
         include_str!("../migrations/0002_invoices.sql"),
+    ),
+    (
+        3,
+        "shared_state",
+        include_str!("../migrations/0003_shared_state.sql"),
     ),
 ];
 
@@ -466,6 +475,23 @@ async fn append_events(
     Ok(())
 }
 
+fn heartbeat_from_row(r: PgRow) -> Result<GatewayHeartbeat, StoreError> {
+    let bad = |e| corrupt("heartbeat", e);
+    let opt = |r: &PgRow, c: &str| -> Result<Option<Timestamp>, StoreError> {
+        let t: Option<OffsetDateTime> = r.try_get(c).map_err(|e| corrupt("heartbeat", e))?;
+        t.map(from_db).transpose()
+    };
+    Ok(GatewayHeartbeat {
+        last_serving_at: opt(&r, "last_serving_at")?,
+        serving_since: opt(&r, "serving_since")?,
+        region: r.try_get("region").map_err(bad)?,
+        gateway_id: r.try_get("gateway_id").map_err(bad)?,
+        last_seen: from_db(r.try_get("last_seen").map_err(bad)?)?,
+        serving: r.try_get("serving").map_err(bad)?,
+        key_id: r.try_get("key_id").map_err(bad)?,
+    })
+}
+
 fn incident_from_row(r: PgRow) -> Result<RegionIncident, StoreError> {
     let bad = |e| corrupt("incident", e);
     let ended: Option<OffsetDateTime> = r.try_get("ended_at").map_err(bad)?;
@@ -697,6 +723,128 @@ impl Store for SqlStore {
         .await
         .map_err(unavailable)?;
         docs.into_iter().map(|d| from_json(d, "invoice")).collect()
+    }
+
+    async fn bump_version(&self, at_least: u64) -> Result<u64, StoreError> {
+        let v: i64 = sqlx::query_scalar(
+            "INSERT INTO control_plane_state (key, value) VALUES ('entitlement_version', $1)
+             ON CONFLICT (key) DO UPDATE
+                 SET value = GREATEST(control_plane_state.value + 1, excluded.value)
+             RETURNING value",
+        )
+        .bind(at_least as i64)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(unavailable)?;
+        Ok(v as u64)
+    }
+
+    async fn current_version(&self) -> Result<u64, StoreError> {
+        let v: Option<i64> = sqlx::query_scalar(
+            "SELECT value FROM control_plane_state WHERE key = 'entitlement_version'",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(unavailable)?;
+        Ok(v.unwrap_or(0) as u64)
+    }
+
+    async fn record_heartbeat(
+        &self,
+        region: &str,
+        hb: &Heartbeat,
+        now: Timestamp,
+        timeout: SignedDuration,
+    ) -> Result<(), StoreError> {
+        // A gateway sends its heartbeats one at a time, so read-then-write is safe per row.
+        let prev =
+            sqlx::query("SELECT * FROM gateway_heartbeats WHERE region = $1 AND gateway_id = $2")
+                .bind(region)
+                .bind(&hb.gateway_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(unavailable)?
+                .map(heartbeat_from_row)
+                .transpose()?;
+        let next = next_heartbeat(prev.as_ref(), region, hb, now, timeout);
+        sqlx::query(
+            "INSERT INTO gateway_heartbeats
+                 (region, gateway_id, last_seen, serving, key_id, last_serving_at, serving_since)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (region, gateway_id) DO UPDATE SET
+                 last_seen = excluded.last_seen, serving = excluded.serving,
+                 key_id = excluded.key_id, last_serving_at = excluded.last_serving_at,
+                 serving_since = excluded.serving_since",
+        )
+        .bind(&next.region)
+        .bind(&next.gateway_id)
+        .bind(to_db(next.last_seen))
+        .bind(next.serving)
+        .bind(&next.key_id)
+        .bind(next.last_serving_at.map(to_db))
+        .bind(next.serving_since.map(to_db))
+        .execute(&self.pool)
+        .await
+        .map_err(unavailable)?;
+        Ok(())
+    }
+
+    async fn gateway_heartbeats(&self) -> Result<Vec<GatewayHeartbeat>, StoreError> {
+        sqlx::query("SELECT * FROM gateway_heartbeats")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(unavailable)?
+            .into_iter()
+            .map(heartbeat_from_row)
+            .collect()
+    }
+
+    async fn prune_heartbeats(&self, before: Timestamp) -> Result<usize, StoreError> {
+        let done = sqlx::query("DELETE FROM gateway_heartbeats WHERE last_seen < $1")
+            .bind(to_db(before))
+            .execute(&self.pool)
+            .await
+            .map_err(unavailable)?;
+        Ok(done.rows_affected() as usize)
+    }
+
+    async fn try_lease(
+        &self,
+        name: &str,
+        holder: &str,
+        now: Timestamp,
+        ttl: SignedDuration,
+    ) -> Result<bool, StoreError> {
+        let done = sqlx::query(
+            "INSERT INTO leases (name, holder, expires_at) VALUES ($1, $2, $4)
+             ON CONFLICT (name) DO UPDATE SET holder = excluded.holder, expires_at = excluded.expires_at
+                 WHERE leases.holder = excluded.holder OR leases.expires_at <= $3",
+        )
+        .bind(name)
+        .bind(holder)
+        .bind(to_db(now))
+        .bind(to_db(now + ttl))
+        .execute(&self.pool)
+        .await
+        .map_err(unavailable)?;
+        Ok(done.rows_affected() == 1)
+    }
+
+    async fn lease(&self, name: &str) -> Result<Option<Lease>, StoreError> {
+        let row = sqlx::query("SELECT name, holder, expires_at FROM leases WHERE name = $1")
+            .bind(name)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(unavailable)?;
+        row.map(|r| {
+            let bad = |e| corrupt("lease", e);
+            Ok(Lease {
+                name: r.try_get("name").map_err(bad)?,
+                holder: r.try_get("holder").map_err(bad)?,
+                expires_at: from_db(r.try_get("expires_at").map_err(bad)?)?,
+            })
+        })
+        .transpose()
     }
 
     async fn list_incidents(&self) -> Result<Vec<RegionIncident>, StoreError> {

@@ -4,13 +4,12 @@
 //!   enough extra capacity to absorb that region's share. One region fails at a time, so a
 //!   target holds the largest share that fails over to it, not the sum.
 //! - **Detection.** Gateways heartbeat every few seconds. A region is down when none of its
-//!   gateways has reported serving for `heartbeat_timeout_seconds`. Health is soft state:
-//!   after a control-plane restart, regions are `unknown` until their gateways report.
+//!   gateways has reported serving for `heartbeat_timeout_seconds`. Heartbeats are stored
+//!   in the database, so every control-plane instance judges health the same (ADR-023).
 //! - **Steering.** DNS weights per region and per reservation, from incidents rather than
 //!   raw health, so operator-declared incidents drain regions too.
 
-use std::collections::{BTreeMap, HashMap};
-use std::sync::Mutex;
+use std::collections::BTreeMap;
 
 use jiff::{SignedDuration, Timestamp};
 use serde::Serialize;
@@ -125,82 +124,100 @@ pub struct RegionStatus {
     pub snapshot_key_ids: BTreeMap<String, usize>,
 }
 
-/// A gateway's last heartbeat: when, whether it was serving, and its snapshot's key.
-type GatewaySeen = (Timestamp, bool, Option<String>);
-
-#[derive(Debug, Default)]
-struct Seen {
-    gateways: HashMap<String, GatewaySeen>,
-    last_serving: Option<Timestamp>,
-    serving_since: Option<Timestamp>,
+/// What the control plane remembers about one gateway, from its heartbeats. Stored in the
+/// database, so every control-plane instance sees every gateway (ADR-023).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct GatewayHeartbeat {
+    pub region: String,
+    pub gateway_id: String,
+    pub last_seen: Timestamp,
+    pub serving: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_id: Option<String>,
+    /// Last heartbeat that reported serving.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_serving_at: Option<Timestamp>,
+    /// Start of this gateway's current unbroken run of serving heartbeats.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serving_since: Option<Timestamp>,
 }
 
-/// Heartbeats per region. Soft state, rebuilt from heartbeats after a restart.
-#[derive(Debug, Default)]
-pub struct RegionHealth {
-    regions: Mutex<HashMap<String, Seen>>,
-}
+/// Heartbeat rows are kept this long after a gateway's last heartbeat, so a long-dead
+/// region still reads as down rather than unknown.
+pub const HEARTBEAT_RETENTION: SignedDuration = SignedDuration::from_hours(24);
 
-impl RegionHealth {
-    pub fn record(&self, region: &str, hb: &Heartbeat, now: Timestamp, timeout: SignedDuration) {
-        let mut all = self.regions.lock().unwrap_or_else(|e| e.into_inner());
-        let seen = all.entry(region.to_string()).or_default();
-        seen.gateways
-            .insert(hb.gateway_id.clone(), (now, hb.serving, hb.key_id.clone()));
-        // Forget gateways long gone, so the map stays small as pods churn.
-        seen.gateways
-            .retain(|_, (at, _, _)| now.duration_since(*at) <= timeout * 10);
-        if hb.serving {
-            let broken = seen
-                .last_serving
-                .is_none_or(|t| now.duration_since(t) > timeout);
-            if broken {
-                seen.serving_since = Some(now);
-            }
-            seen.last_serving = Some(now);
-        }
-    }
-
-    pub fn status(&self, region: &str, now: Timestamp, timeout: SignedDuration) -> RegionStatus {
-        let all = self.regions.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(seen) = all.get(region) else {
-            return RegionStatus {
-                region: region.into(),
-                health: Health::Unknown,
-                gateways: 0,
-                serving_gateways: 0,
-                last_serving_at: None,
-                serving_since: None,
-                snapshot_key_ids: BTreeMap::new(),
-            };
+/// A gateway's record after heartbeat `hb` at `now`. A serving run is unbroken while
+/// serving heartbeats are at most `timeout` apart.
+pub fn next_heartbeat(
+    prev: Option<&GatewayHeartbeat>,
+    region: &str,
+    hb: &Heartbeat,
+    now: Timestamp,
+    timeout: SignedDuration,
+) -> GatewayHeartbeat {
+    let last_serving = prev.and_then(|p| p.last_serving_at);
+    let (last_serving_at, serving_since) = if hb.serving {
+        let unbroken = last_serving.is_some_and(|t| now.duration_since(t) <= timeout);
+        let since = if unbroken {
+            prev.and_then(|p| p.serving_since).unwrap_or(now)
+        } else {
+            now
         };
-        let recent: Vec<&GatewaySeen> = seen
-            .gateways
-            .values()
-            .filter(|(at, _, _)| now.duration_since(*at) <= timeout)
-            .collect();
-        let mut snapshot_key_ids = BTreeMap::new();
-        for (_, _, key) in &recent {
-            *snapshot_key_ids
-                .entry(key.clone().unwrap_or_else(|| "unknown".into()))
-                .or_default() += 1;
-        }
-        let serving = seen
-            .last_serving
-            .is_some_and(|t| now.duration_since(t) <= timeout);
-        RegionStatus {
-            region: region.into(),
-            health: if serving {
-                Health::Serving
-            } else {
-                Health::Down
-            },
-            gateways: recent.len(),
-            serving_gateways: recent.iter().filter(|(_, s, _)| *s).count(),
-            last_serving_at: seen.last_serving,
-            serving_since: seen.serving_since.filter(|_| serving),
-            snapshot_key_ids,
-        }
+        (Some(now), Some(since))
+    } else {
+        (last_serving, prev.and_then(|p| p.serving_since))
+    };
+    GatewayHeartbeat {
+        region: region.to_string(),
+        gateway_id: hb.gateway_id.clone(),
+        last_seen: now,
+        serving: hb.serving,
+        key_id: hb.key_id.clone(),
+        last_serving_at,
+        serving_since,
+    }
+}
+
+/// A region's health from its gateways' records.
+///
+/// - **Serving** if some gateway reported serving within `timeout`. The region has been
+///   serving continuously at least since the earliest `serving_since` among those gateways.
+/// - **Down** if gateways have reported, but none has been serving within `timeout`.
+/// - **Unknown** if no gateway has ever reported (for example, before the first heartbeat).
+pub fn region_status(
+    region: &str,
+    gateways: &[GatewayHeartbeat],
+    now: Timestamp,
+    timeout: SignedDuration,
+) -> RegionStatus {
+    let mine: Vec<&GatewayHeartbeat> = gateways.iter().filter(|g| g.region == region).collect();
+    let fresh = |t: Timestamp| now.duration_since(t) <= timeout;
+    let recent: Vec<&&GatewayHeartbeat> = mine.iter().filter(|g| fresh(g.last_seen)).collect();
+    let mut snapshot_key_ids = BTreeMap::new();
+    for g in &recent {
+        *snapshot_key_ids
+            .entry(g.key_id.clone().unwrap_or_else(|| "unknown".into()))
+            .or_default() += 1;
+    }
+    let serving_now: Vec<&&GatewayHeartbeat> = mine
+        .iter()
+        .filter(|g| g.last_serving_at.is_some_and(fresh))
+        .collect();
+    let health = if mine.is_empty() {
+        Health::Unknown
+    } else if serving_now.is_empty() {
+        Health::Down
+    } else {
+        Health::Serving
+    };
+    RegionStatus {
+        region: region.into(),
+        health,
+        gateways: recent.len(),
+        serving_gateways: recent.iter().filter(|g| g.serving).count(),
+        last_serving_at: mine.iter().filter_map(|g| g.last_serving_at).max(),
+        serving_since: serving_now.iter().filter_map(|g| g.serving_since).min(),
+        snapshot_key_ids,
     }
 }
 

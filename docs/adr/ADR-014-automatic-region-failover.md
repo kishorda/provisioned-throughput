@@ -33,7 +33,8 @@ questions needed answers:
 - **Declare and resolve automatically.** A control-plane loop opens an `automatic`
   incident for a down region, starting at its last serving heartbeat. It does this only
   while another region is serving: if every region looks down, the control plane is
-  probably the one cut off. It resolves an automatic incident once the region has served
+  probably the one cut off. (Tightened by ADR-023: another region must have served
+  continuously for a full heartbeat timeout.) It resolves an automatic incident once the region has served
   continuously for `recovery_seconds` (60). Operators can still declare incidents, for
   example to drain a region. Only operators resolve those.
 - **Activate through snapshots.** Snapshots carry each reservation's dormant failover
@@ -60,7 +61,6 @@ questions needed answers:
   failure. The "cut-off" region keeps serving on its snapshot while its pair activates
   failover, so the reservation briefly has up to twice its entitlement. That's
   over-serving, never under-serving, and the headroom is already held.
-- ⚠️ Health is soft state. After a control-plane restart, regions are `unknown` until
-  their gateways report, and nothing is declared for them.
+- Health is stored in the database since ADR-023, and survives restarts.
 - ⚠️ Headroom can double a Multi-region reservation's capacity cost, while the price rises
   by 0.2× base per CU. PAYG backfill on the spares covers the gap (ADR-006).

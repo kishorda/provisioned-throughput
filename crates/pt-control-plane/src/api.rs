@@ -178,7 +178,7 @@ impl From<ServiceError> for ApiError {
                 "version_mismatch",
                 e.to_string(),
             ),
-            ServiceError::Unavailable(m) => {
+            ServiceError::Capacity(PlanError::Unavailable(m)) | ServiceError::Unavailable(m) => {
                 tracing::error!(error = %m, "store unavailable");
                 ApiError::new(
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -580,7 +580,7 @@ async fn heartbeat<S: Store, P: CapacityPlanner, C: Clock>(
             "gateway_id must be 1–128 characters.",
         ));
     }
-    svc.heartbeat(&region, &hb);
+    svc.heartbeat(&region, &hb).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -590,7 +590,13 @@ async fn regions<S: Store, P: CapacityPlanner, C: Clock>(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     operator(&svc, &headers)?;
-    Ok(Json(json!({ "data": svc.region_statuses() })).into_response())
+    let data = svc.region_statuses().await?;
+    let leader = svc
+        .store
+        .lease(crate::service::LEADER_LEASE)
+        .await
+        .map_err(ServiceError::from)?;
+    Ok(Json(json!({ "data": data, "leader": leader })).into_response())
 }
 
 /// `GET /internal/v1/steering`: DNS weights for a GeoDNS or global load-balancer controller.

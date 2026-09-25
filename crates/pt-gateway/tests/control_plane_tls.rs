@@ -167,6 +167,8 @@ async fn gateway_talks_to_the_control_plane_over_mutual_tls() {
         .unwrap();
     let west = svc
         .region_statuses()
+        .await
+        .unwrap()
         .into_iter()
         .find(|s| s.region == "eu-west")
         .unwrap();

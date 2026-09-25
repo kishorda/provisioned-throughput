@@ -93,10 +93,14 @@ sequenceDiagram
    (`POST /internal/v1/heartbeats`, region token) every 5 s. It reports `serving` only if
    it has entitlements and its engine answers `engine_health_path`. A region is down when
    no gateway has reported serving for `heartbeat_timeout_seconds` (30). The control plane
-   then opens an `automatic` incident, starting at the last serving heartbeat. It never
-   declares one unless another region is serving: if every region looks down, the control
-   plane is the one cut off. Regions that haven't reported since a control-plane restart
-   are `unknown` and never declared.
+   then opens an `automatic` incident, starting at the last serving heartbeat. It declares
+   one only while another region has served continuously for at least the heartbeat
+   timeout. That proves heartbeats are flowing: after a control-plane or database outage,
+   every region looks stale at once, and the first region to report must not fail the
+   others over. Regions that have never reported are `unknown` and never declared.
+   Heartbeats are stored in the database, so they count whichever control-plane instance
+   receives them. The leader runs detection
+   ([ADR-023](adr/ADR-023-multi-instance-control-plane.md)).
 2. **Steer.** `GET /internal/v1/steering` (operator key) gives each region's weight (0
    while an incident is open) and each reservation's target weights. A Multi-region
    reservation's failed share moves to its failover target. A Regional one keeps only its

@@ -10,8 +10,19 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Mutex;
 
+use jiff::{SignedDuration, Timestamp};
+
 use crate::billing::Invoice;
-use crate::model::{ProvisionedThroughput, RegionIncident};
+use crate::failover::{next_heartbeat, GatewayHeartbeat};
+use crate::model::{Heartbeat, ProvisionedThroughput, RegionIncident};
+
+/// Who holds a named lease, and until when (ADR-023).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Lease {
+    pub name: String,
+    pub holder: String,
+    pub expires_at: Timestamp,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum StoreError {
@@ -112,6 +123,47 @@ pub trait Store: Send + Sync + 'static {
         &self,
         tenant: &str,
     ) -> impl Future<Output = Result<Vec<Invoice>, StoreError>> + Send;
+
+    // Shared state for several control-plane instances (ADR-023).
+
+    /// Raise the entitlement version to `max(current + 1, at_least)` and return it. Every
+    /// instance's changes share this counter, so versions only increase.
+    fn bump_version(&self, at_least: u64) -> impl Future<Output = Result<u64, StoreError>> + Send;
+
+    /// The current entitlement version (0 before the first bump).
+    fn current_version(&self) -> impl Future<Output = Result<u64, StoreError>> + Send;
+
+    /// Record a gateway heartbeat (see [`next_heartbeat`]).
+    fn record_heartbeat(
+        &self,
+        region: &str,
+        hb: &Heartbeat,
+        now: Timestamp,
+        timeout: SignedDuration,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// Every gateway's latest heartbeat record.
+    fn gateway_heartbeats(
+        &self,
+    ) -> impl Future<Output = Result<Vec<GatewayHeartbeat>, StoreError>> + Send;
+
+    /// Forget gateways last seen before `before`. Returns how many were removed.
+    fn prune_heartbeats(
+        &self,
+        before: Timestamp,
+    ) -> impl Future<Output = Result<usize, StoreError>> + Send;
+
+    /// Take or renew lease `name` for `holder` until `now + ttl`. Succeeds if the lease is
+    /// free, expired, or already held by `holder`.
+    fn try_lease(
+        &self,
+        name: &str,
+        holder: &str,
+        now: Timestamp,
+        ttl: SignedDuration,
+    ) -> impl Future<Output = Result<bool, StoreError>> + Send;
+
+    fn lease(&self, name: &str) -> impl Future<Output = Result<Option<Lease>, StoreError>> + Send;
 }
 
 #[derive(Default)]
@@ -120,11 +172,24 @@ struct Inner {
     idempotency: HashMap<(String, String), IdempotencyRecord>,
     incidents: Vec<RegionIncident>,
     invoices: HashMap<(String, String), Invoice>,
+    version: u64,
+    heartbeats: HashMap<(String, String), GatewayHeartbeat>,
+    leases: HashMap<String, Lease>,
 }
 
 #[derive(Default)]
 pub struct MemoryStore {
     inner: Mutex<Inner>,
+}
+
+impl MemoryStore {
+    /// A store whose entitlement version starts at `version` (the service uses the clock in
+    /// milliseconds, so versions keep increasing across restarts).
+    pub fn starting_at(version: u64) -> Self {
+        let s = Self::default();
+        s.lock().version = version;
+        s
+    }
 }
 
 impl MemoryStore {
@@ -283,6 +348,70 @@ impl Store for MemoryStore {
         out.sort_by(|a, b| b.period.cmp(&a.period));
         Ok(out)
     }
+
+    async fn bump_version(&self, at_least: u64) -> Result<u64, StoreError> {
+        let mut inner = self.lock();
+        inner.version = (inner.version + 1).max(at_least);
+        Ok(inner.version)
+    }
+
+    async fn current_version(&self) -> Result<u64, StoreError> {
+        Ok(self.lock().version)
+    }
+
+    async fn record_heartbeat(
+        &self,
+        region: &str,
+        hb: &Heartbeat,
+        now: Timestamp,
+        timeout: SignedDuration,
+    ) -> Result<(), StoreError> {
+        let mut inner = self.lock();
+        let key = (region.to_string(), hb.gateway_id.clone());
+        let next = next_heartbeat(inner.heartbeats.get(&key), region, hb, now, timeout);
+        inner.heartbeats.insert(key, next);
+        Ok(())
+    }
+
+    async fn gateway_heartbeats(&self) -> Result<Vec<GatewayHeartbeat>, StoreError> {
+        Ok(self.lock().heartbeats.values().cloned().collect())
+    }
+
+    async fn prune_heartbeats(&self, before: Timestamp) -> Result<usize, StoreError> {
+        let mut inner = self.lock();
+        let n = inner.heartbeats.len();
+        inner.heartbeats.retain(|_, h| h.last_seen >= before);
+        Ok(n - inner.heartbeats.len())
+    }
+
+    async fn try_lease(
+        &self,
+        name: &str,
+        holder: &str,
+        now: Timestamp,
+        ttl: SignedDuration,
+    ) -> Result<bool, StoreError> {
+        let mut inner = self.lock();
+        let free = inner
+            .leases
+            .get(name)
+            .is_none_or(|l| l.holder == holder || l.expires_at <= now);
+        if free {
+            inner.leases.insert(
+                name.to_string(),
+                Lease {
+                    name: name.to_string(),
+                    holder: holder.to_string(),
+                    expires_at: now + ttl,
+                },
+            );
+        }
+        Ok(free)
+    }
+
+    async fn lease(&self, name: &str) -> Result<Option<Lease>, StoreError> {
+        Ok(self.lock().leases.get(name).cloned())
+    }
 }
 
 /// A shared store, so several service instances can use one (for example, a control plane
@@ -343,5 +472,38 @@ impl<T: Store> Store for std::sync::Arc<T> {
     }
     async fn list_invoices(&self, tenant: &str) -> Result<Vec<Invoice>, StoreError> {
         (**self).list_invoices(tenant).await
+    }
+    async fn bump_version(&self, at_least: u64) -> Result<u64, StoreError> {
+        (**self).bump_version(at_least).await
+    }
+    async fn current_version(&self) -> Result<u64, StoreError> {
+        (**self).current_version().await
+    }
+    async fn record_heartbeat(
+        &self,
+        region: &str,
+        hb: &Heartbeat,
+        now: Timestamp,
+        timeout: SignedDuration,
+    ) -> Result<(), StoreError> {
+        (**self).record_heartbeat(region, hb, now, timeout).await
+    }
+    async fn gateway_heartbeats(&self) -> Result<Vec<GatewayHeartbeat>, StoreError> {
+        (**self).gateway_heartbeats().await
+    }
+    async fn prune_heartbeats(&self, before: Timestamp) -> Result<usize, StoreError> {
+        (**self).prune_heartbeats(before).await
+    }
+    async fn try_lease(
+        &self,
+        name: &str,
+        holder: &str,
+        now: Timestamp,
+        ttl: SignedDuration,
+    ) -> Result<bool, StoreError> {
+        (**self).try_lease(name, holder, now, ttl).await
+    }
+    async fn lease(&self, name: &str) -> Result<Option<Lease>, StoreError> {
+        (**self).lease(name).await
     }
 }

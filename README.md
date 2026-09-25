@@ -263,9 +263,9 @@ Follow-ups from the roadmap in docs/11:
   There's no weight-prefetch DaemonSet, so loaded warm spares start cold. Preempted PAYG isn't metered.
   Failover activation needs the control plane.
 - **Signing in a KMS.** The snapshot signing key is read from configuration.
-- **Control-plane scale-out.** State is durable in SQL (ADR-017), but the capacity planner
-  and region health are per-process, so run one control-plane instance. The planner counts
-  CUs per region and model, regardless of tier.
+- **Capacity planning by tier.** The shared planner counts CUs per region and model,
+  regardless of tier. With the SQL store, run as many control-plane instances as you like
+  (ADR-023). The in-memory store is single-instance.
 - **Separate listeners.** With `[server.tls] client_ca`, the customer API also requires
   client certificates, because it shares the listener with internal traffic (ADR-022).
   Front the customer API with its own ingress. Gateway → Quota Coordinator is plain HTTP

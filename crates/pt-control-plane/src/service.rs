@@ -20,7 +20,7 @@ use tokio::sync::watch;
 
 use crate::clock::Clock;
 use crate::config::ControlPlaneConfig;
-use crate::failover::{self, footprint, growth, Health, RegionHealth, RegionStatus, Steering};
+use crate::failover::{self, footprint, growth, Health, RegionStatus, Steering};
 use crate::model::{
     total_cus, ApiKey, CreateDeploymentRequest, CreateRequest, DeclareIncident, Deployment,
     Endpoint, Event, EventKind, Heartbeat, IncidentSource, PendingChanges, ProvisionedThroughput,
@@ -31,6 +31,9 @@ use crate::planner::{CapacityPlanner, PlanError};
 use crate::pricing;
 use crate::store::{IdempotencyRecord, Store, StoreError};
 use crate::validate;
+
+/// The lease whose holder runs the background loops (ADR-023).
+pub const LEADER_LEASE: &str = "background";
 
 /// How far in the past `start_at` may be (clock skew), and how far ahead.
 const START_SKEW: SignedDuration = SignedDuration::from_mins(5);
@@ -180,9 +183,10 @@ pub struct Service<S, P, C> {
     pub clock: C,
     pub config: ControlPlaneConfig,
     signer: SnapshotSigner,
-    /// Entitlement version: bumped on every change, watched by snapshot long-polls.
+    /// The latest entitlement version this instance knows of. The shared counter is in the
+    /// store; this copy wakes snapshot long-polls, and [`Self::sync_version`] keeps it
+    /// current with other instances' changes (ADR-023).
     changes: watch::Sender<u64>,
-    health: RegionHealth,
 }
 
 impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
@@ -199,8 +203,44 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
             config,
             signer,
             changes,
-            health: RegionHealth::default(),
         }
+    }
+
+    /// Bump the shared entitlement version once at startup, so a restarted instance never
+    /// labels content with an old version and every verifier refetches (ADR-020, ADR-023).
+    pub async fn init_version(&self) -> Result<u64, StoreError> {
+        let now_ms = self.clock.now().as_millisecond().max(1) as u64;
+        let v = self.store.bump_version(now_ms).await?;
+        self.changes.send_modify(|cur| *cur = (*cur).max(v));
+        Ok(v)
+    }
+
+    /// Pick up the shared version, including other instances' changes. Wakes long-polls
+    /// when it moved. Returns the current version.
+    pub async fn sync_version(&self) -> Result<u64, StoreError> {
+        let v = self.store.current_version().await?;
+        self.changes.send_if_modified(|cur| {
+            let newer = v > *cur;
+            if newer {
+                *cur = v;
+            }
+            newer
+        });
+        Ok(*self.changes.borrow())
+    }
+
+    /// Correct the planner's reserved counts from live reservations (see
+    /// [`CapacityPlanner::reconcile`]). Run by the leader.
+    pub async fn reconcile_capacity(&self) -> Result<Vec<crate::planner::Drift>, ServiceError> {
+        let mut expected: std::collections::HashMap<(String, String), u32> = Default::default();
+        for pt in self.store.list_live().await? {
+            for share in held(&pt) {
+                *expected
+                    .entry((share.region, pt.model.clone()))
+                    .or_default() += share.cus;
+            }
+        }
+        Ok(self.planner.reconcile(&expected).await?)
     }
 
     pub fn signer(&self) -> &SnapshotSigner {
@@ -230,9 +270,16 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         self.changes.subscribe()
     }
 
-    fn bump(&self) {
+    /// Publish a committed change: bump the shared version and wake local long-polls. If
+    /// the store can't be reached, log it; the leader's next bump publishes the change.
+    async fn bump(&self) {
         let now_ms = self.clock.now().as_millisecond().max(0) as u64;
-        self.changes.send_modify(|v| *v = (*v + 1).max(now_ms));
+        match self.store.bump_version(now_ms).await {
+            Ok(v) => self.changes.send_modify(|cur| *cur = (*cur).max(v)),
+            Err(e) => {
+                tracing::error!(error = %e, "entitlement version not bumped; gateways see this change on the next one")
+            }
+        }
     }
 
     /// Entitlements for `region`: every reservation serving there (active or pending
@@ -242,9 +289,10 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         if !self.config.regions.iter().any(|r| r.name == region) {
             return Ok(None);
         }
-        // Read the version before the data. A change in between is labelled with the older
-        // version, so the gateway fetches again and never misses it.
-        let version = self.entitlement_version();
+        // Read the shared version before the data. A change in between (from any instance)
+        // is labelled with the older version, so the gateway fetches again and never misses
+        // it.
+        let version = self.sync_version().await?;
         let mut live: Vec<_> = self
             .store
             .list_live()
@@ -492,7 +540,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                 tracing::warn!(error = %e, id = %pt.id, "idempotency key raced with another request");
             }
         }
-        self.bump();
+        self.bump().await;
         tracing::info!(id = %pt.id, %tenant, model = %pt.model, cus, "provisioned throughput created");
         Ok(CreateOutcome {
             resource: pt,
@@ -579,7 +627,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         pt.updated_at = now;
         match self.store.update(pt.clone(), expected).await {
             Ok(()) => {
-                self.bump();
+                self.bump().await;
                 Ok(pt)
             }
             Err(e) => {
@@ -793,7 +841,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         if effect == DeleteEffect::CancelledNow {
             self.planner.release(&pt.model, &held(&pt)).await;
         }
-        self.bump();
+        self.bump().await;
         tracing::info!(id = %pt.id, %tenant, ?effect, "provisioned throughput deleted");
         Ok((pt, effect))
     }
@@ -807,7 +855,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         pt.version += 1;
         pt.updated_at = self.clock.now();
         self.store.update(pt.clone(), expected).await?;
-        self.bump();
+        self.bump().await;
         Ok(pt)
     }
 
@@ -1166,7 +1214,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                 other => other.into(),
             })?;
         // Snapshots carry open incidents, which activate failover entitlements.
-        self.bump();
+        self.bump().await;
         tracing::warn!(id = %incident.id, region = %incident.region, ?source, "region incident declared");
         Ok(incident)
     }
@@ -1199,7 +1247,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         }
         incident.ended_at = Some(ended_at);
         self.store.update_incident(incident.clone()).await?;
-        self.bump();
+        self.bump().await;
         tracing::info!(id = %incident.id, region = %incident.region, "region incident resolved");
         Ok(incident)
     }
@@ -1208,36 +1256,53 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         Ok(self.store.list_incidents().await?)
     }
 
-    /// Record a gateway heartbeat for `region`.
-    pub fn heartbeat(&self, region: &str, hb: &Heartbeat) {
-        self.health
-            .record(region, hb, self.clock.now(), self.heartbeat_timeout());
+    /// Record a gateway heartbeat for `region`, in the shared store.
+    pub async fn heartbeat(&self, region: &str, hb: &Heartbeat) -> Result<(), ServiceError> {
+        Ok(self
+            .store
+            .record_heartbeat(region, hb, self.clock.now(), self.heartbeat_timeout())
+            .await?)
     }
 
-    /// Current health of every configured region.
-    pub fn region_statuses(&self) -> Vec<RegionStatus> {
+    /// Current health of every configured region, from every instance's heartbeats.
+    pub async fn region_statuses(&self) -> Result<Vec<RegionStatus>, ServiceError> {
         let now = self.clock.now();
-        self.config
+        let gateways = self.store.gateway_heartbeats().await?;
+        Ok(self
+            .config
             .regions
             .iter()
-            .map(|r| self.health.status(&r.name, now, self.heartbeat_timeout()))
-            .collect()
+            .map(|r| failover::region_status(&r.name, &gateways, now, self.heartbeat_timeout()))
+            .collect())
     }
 
     /// Declare incidents for regions that stopped serving, and resolve automatic incidents
-    /// for regions that have served continuously for `recovery_seconds`. Run periodically.
+    /// for regions that have served continuously for `recovery_seconds`. Run by the leader.
     ///
-    /// A region is declared down only while another region is serving: if every region
-    /// looks down, the control plane is probably the one cut off, and failing over would
-    /// help nobody.
+    /// A region is declared down only while another region has served continuously for at
+    /// least the heartbeat timeout. That proves heartbeats are reaching the control plane:
+    /// after a control-plane or database outage every region looks stale at once, and the
+    /// first region to report must not fail the others over.
     pub async fn run_failover(&self) -> FailoverReport {
         let mut report = FailoverReport::default();
         if !self.config.failover.auto_declare {
             return report;
         }
         let now = self.clock.now();
-        let statuses = self.region_statuses();
-        let any_serving = statuses.iter().any(|s| s.health == Health::Serving);
+        let statuses = match self.region_statuses().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "failover check skipped");
+                return report;
+            }
+        };
+        let flowing = |except: &str| {
+            statuses.iter().any(|o| {
+                o.region != except
+                    && o.serving_since
+                        .is_some_and(|t| now.duration_since(t) >= self.heartbeat_timeout())
+            })
+        };
         let recovery = SignedDuration::from_secs(self.config.failover.recovery_seconds as i64);
         let incidents = match self.store.list_incidents().await {
             Ok(i) => i,
@@ -1251,7 +1316,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                 .iter()
                 .find(|i| i.region == s.region && i.ended_at.is_none());
             match (s.health, open) {
-                (Health::Down, None) if any_serving => {
+                (Health::Down, None) if flowing(&s.region) => {
                     let timeout = self.config.failover.heartbeat_timeout_seconds;
                     let started_at = s
                         .last_serving_at
@@ -1321,6 +1386,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         let weight_of = |r: &str| weights.get(r).map_or(1.0, |w| w.0);
         let regions = self
             .region_statuses()
+            .await?
             .into_iter()
             .map(|status| {
                 let (weight, incident) =
@@ -1423,7 +1489,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                 self.undo(&model, &shape, ops).await;
                 report.conflicts += 1;
             } else {
-                self.bump();
+                self.bump().await;
             }
         }
         report

@@ -202,6 +202,8 @@ async fn paired_region_takes_over_then_hands_back_gradually() {
 
     eventually("serving heartbeat", || async {
         svc.region_statuses()
+            .await
+            .unwrap()
             .iter()
             .any(|s| s.region == "eu-central" && s.health == Health::Serving)
     })
@@ -275,6 +277,8 @@ async fn gateway_with_a_dead_engine_reports_not_serving() {
     assert!(!hb.beat(&app).await.unwrap(), "engine is down");
     let s = svc
         .region_statuses()
+        .await
+        .unwrap()
         .into_iter()
         .find(|s| s.region == "eu-central")
         .unwrap();

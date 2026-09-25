@@ -1,7 +1,9 @@
 //! Capacity feasibility (docs/06 §1). The service asks the planner before it commits capacity.
 //!
-//! [`MemoryPlanner`] tracks sellable CUs per (region, model) from configuration. The real
-//! Capacity Planner places CUs into pools per tier and plans headroom. The interface is the same.
+//! [`MemoryPlanner`] tracks sellable CUs per (region, model) from configuration, for one
+//! instance. [`crate::sql_planner::SqlPlanner`] keeps the same counters in the database, so
+//! several control-plane instances share them (ADR-023). The real Capacity Planner places
+//! CUs into pools per tier and plans headroom. The interface is the same.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -30,6 +32,55 @@ pub enum PlanError {
         max_context: u64,
         needed: u64,
     },
+    /// The planner's store couldn't be reached. Nothing was reserved; retry.
+    #[error("capacity planner unavailable: {0}")]
+    Unavailable(String),
+}
+
+/// A pool whose reserved count doesn't match its live reservations.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Drift {
+    pub region: String,
+    pub model: String,
+    pub reserved: u32,
+    pub expected: u32,
+    /// Set once the same drift was seen on two runs in a row and was corrected. A drift
+    /// seen once may be a sale in flight (capacity reserved, reservation not yet saved).
+    pub corrected: bool,
+}
+
+/// Pools whose drift was seen on the previous reconcile run, as (reserved, expected).
+pub(crate) type PendingDrift = Mutex<HashMap<(String, String), (u32, u32)>>;
+
+/// Decide what to do with one pool: `Some((drift, fix))` when it drifts, where `fix` means
+/// the same drift was already seen last run.
+pub(crate) fn judge_drift(
+    pending: &PendingDrift,
+    key: &(String, String),
+    reserved: u32,
+    expected: u32,
+) -> Option<(Drift, bool)> {
+    let mut pending = pending.lock().unwrap_or_else(|e| e.into_inner());
+    if reserved == expected {
+        pending.remove(key);
+        return None;
+    }
+    let fix = pending.get(key) == Some(&(reserved, expected));
+    if fix {
+        pending.remove(key);
+    } else {
+        pending.insert(key.clone(), (reserved, expected));
+    }
+    Some((
+        Drift {
+            region: key.0.clone(),
+            model: key.1.clone(),
+            reserved,
+            expected,
+            corrected: fix,
+        },
+        fix,
+    ))
 }
 
 pub trait CapacityPlanner: Send + Sync + 'static {
@@ -57,8 +108,17 @@ pub trait CapacityPlanner: Send + Sync + 'static {
 
     /// Re-establish capacity already sold (at startup, from the store). Never fails: if
     /// configured capacity has shrunk below what's sold, the pool is overcommitted and
-    /// reports no availability, and new sales fail until it's fixed.
+    /// reports no availability, and new sales fail until it's fixed. A planner whose counts
+    /// are already durable does nothing.
     fn restore(&self, model: &str, shares: &[RegionShare]) -> impl Future<Output = ()> + Send;
+
+    /// Compare reserved counts with `expected` (live reservations' shares and headroom per
+    /// (region, model)). A pool is corrected only when the same drift shows on two runs in a
+    /// row, so a sale in flight is never undone. Returns every drift found.
+    fn reconcile(
+        &self,
+        expected: &HashMap<(String, String), u32>,
+    ) -> impl Future<Output = Result<Vec<Drift>, PlanError>> + Send;
 }
 
 #[derive(Debug)]
@@ -71,6 +131,7 @@ struct Pool {
 #[derive(Debug, Default)]
 pub struct MemoryPlanner {
     pools: Mutex<HashMap<(String, String), Pool>>,
+    pending: PendingDrift,
 }
 
 impl MemoryPlanner {
@@ -90,6 +151,7 @@ impl MemoryPlanner {
             .collect();
         Self {
             pools: Mutex::new(pools),
+            pending: Default::default(),
         }
     }
 
@@ -192,5 +254,23 @@ impl CapacityPlanner for MemoryPlanner {
                 }
             }
         }
+    }
+
+    async fn reconcile(
+        &self,
+        expected: &HashMap<(String, String), u32>,
+    ) -> Result<Vec<Drift>, PlanError> {
+        let mut pools = self.pools.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out = Vec::new();
+        for (key, pool) in pools.iter_mut() {
+            let want = expected.get(key).copied().unwrap_or(0);
+            if let Some((drift, fix)) = judge_drift(&self.pending, key, pool.reserved, want) {
+                if fix {
+                    pool.reserved = want;
+                }
+                out.push(drift);
+            }
+        }
+        Ok(out)
     }
 }

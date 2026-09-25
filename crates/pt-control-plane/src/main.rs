@@ -8,17 +8,15 @@
 //! `pt-control-plane keygen` prints a new snapshot signing key and its public key.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Context;
 use pt_control_plane::clock::SystemClock;
-use pt_control_plane::planner::MemoryPlanner;
+use pt_control_plane::planner::CapacityPlanner;
 use pt_control_plane::sql::SqlStore;
 use pt_control_plane::store::Store;
-use pt_control_plane::{app_with_usage, in_memory, with_store, ControlPlaneConfig, Service};
+use pt_control_plane::{app_with_usage, in_memory, with_sql, ControlPlaneConfig, Service};
 use pt_telemetry::clickhouse::ClickHouseUsageStore;
 use pt_telemetry::UsageBackend;
-use pt_telemetry::UsageStore;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -55,9 +53,9 @@ async fn main() -> anyhow::Result<()> {
             if store_cfg.migrate {
                 store.migrate().await.context("applying migrations")?;
             }
-            let svc = with_store(config, store, SystemClock)
+            let svc = with_sql(config, store, SystemClock)
                 .await
-                .context("restoring reserved capacity")?;
+                .context("starting on the shared store")?;
             serve(svc, "sql").await
         }
         None => {
@@ -68,42 +66,11 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Run the background loops and the HTTP API until Ctrl-C.
-async fn serve<S: Store>(
-    svc: Arc<Service<S, MemoryPlanner, SystemClock>>,
+async fn serve<S: Store, P: CapacityPlanner>(
+    svc: Arc<Service<S, P, SystemClock>>,
     store_kind: &str,
 ) -> anyhow::Result<()> {
     let listen = svc.config.server.listen.clone();
-    let interval = Duration::from_secs(svc.config.server.lifecycle_interval_secs);
-    let retention_ms = svc.config.telemetry.retention_days * 86_400_000;
-
-    let lifecycle = svc.clone();
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(interval);
-        loop {
-            tick.tick().await;
-            let r = lifecycle.run_lifecycle().await;
-            if r != Default::default() {
-                tracing::info!(?r, "lifecycle run");
-            }
-        }
-    });
-
-    let failover = svc.clone();
-    let check = Duration::from_millis(failover.config.failover.check_interval_ms);
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(check);
-        loop {
-            tick.tick().await;
-            let r = failover.run_failover().await;
-            for (id, region) in &r.declared {
-                tracing::warn!(%id, %region, "region down: failover entitlements active");
-            }
-            for (id, region) in &r.resolved {
-                tracing::info!(%id, %region, "region recovered: returning traffic gradually");
-            }
-        }
-    });
-
     let usage = match svc.config.telemetry.resolved_clickhouse() {
         Some(ch) => {
             let store = ClickHouseUsageStore::new(ch, svc.config.telemetry.retention_days)
@@ -124,38 +91,15 @@ async fn serve<S: Store>(
     tracing::info!(usage = usage.kind(), "usage store");
     let (routes, telemetry) = app_with_usage(svc.clone(), usage);
 
-    // Finalise last month's invoices once its grace period has passed (ADR-018).
-    let (billing_svc, billing_tel) = (svc.clone(), telemetry.clone());
-    let every = Duration::from_secs(svc.config.billing.finalize_interval_secs);
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(every);
-        loop {
-            tick.tick().await;
-            match pt_control_plane::billing::finalize_due(&billing_svc, &billing_tel).await {
-                Ok(done) if !done.is_empty() => {
-                    tracing::info!(invoices = done.len(), "finalised invoices")
-                }
-                Ok(_) => {}
-                Err(e) => tracing::warn!(error = %e, "invoice finalisation failed; retrying later"),
-            }
-        }
-    });
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_secs(3_600));
-        loop {
-            tick.tick().await;
-            let now = pt_telemetry::Directory::now_ms(&telemetry.directory);
-            match telemetry
-                .store
-                .prune(now.saturating_sub(retention_ms))
-                .await
-            {
-                Ok(0) => {}
-                Ok(removed) => tracing::info!(removed, "pruned old usage records"),
-                Err(e) => tracing::warn!(error = %e, "usage pruning failed; retrying next hour"),
-            }
-        }
-    });
+    // The version poller runs everywhere; lifecycle, failover, reconciliation, invoices,
+    // and pruning run only on the instance holding the leader lease (ADR-023).
+    let holder = format!("cp-{}", uuid::Uuid::new_v4().simple());
+    tracing::info!(%holder, "instance id");
+    tokio::spawn(pt_control_plane::background::run(
+        svc.clone(),
+        telemetry,
+        holder,
+    ));
 
     let listener = tokio::net::TcpListener::bind(&listen)
         .await

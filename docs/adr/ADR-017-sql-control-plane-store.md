@@ -47,10 +47,7 @@ snapshot endpoint would publish empty entitlements that make every gateway drop 
   preserves static stability (ADR-007).
 - ✅ Several control-plane instances can share one database: concurrency is enforced by
   the store, not process memory.
-- ⚠️ Running several instances still needs work. The planner and region health are
-  per-process, and snapshot versions come from each process's clock. The planner should
-  move into the database (or the real Capacity Planner) before running more than one
-  instance.
+- Running several instances: see [ADR-023](ADR-023-multi-instance-control-plane.md).
 - ⚠️ If a commit fails ambiguously (the connection drops during COMMIT), the service undoes
   its planner changes even if the write landed. The next restart's `restore_capacity`
   corrects it.

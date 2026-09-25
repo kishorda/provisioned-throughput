@@ -174,6 +174,17 @@ stateDiagram-v2
   ([ADR-021](adr/ADR-021-database-tls.md)).
 - **`MemoryStore`** backs tests and runs without `[store]`. Its state is lost on restart.
 
+**Several instances** ([ADR-023](adr/ADR-023-multi-instance-control-plane.md)). With the SQL
+store, any number of instances can serve the API behind a load balancer. These are shared
+through the database:
+- capacity counters (`capacity_pools`), reserved with conditional UPDATEs;
+- the entitlement version (`control_plane_state`), polled every 500 ms to wake long-polls;
+- gateway heartbeats;
+- a leader lease.
+
+The lease holder runs the lifecycle, failover detection, capacity reconciliation, invoice
+finalisation, and pruning. `GET /internal/v1/regions` shows the current leader.
+
 The schema (`0001_initial.sql`) is in the SQL both databases share:
 
 | Table | Holds |
@@ -291,9 +302,8 @@ and `total`, in minor units.
 
 ## 8. Not yet built
 
-- A remote Capacity Planner client. The in-memory planner counts CUs per region and
-  model, regardless of tier, and is rebuilt from the store at startup. It's per-process,
-  so run one control-plane instance until planning moves into the database.
+- A remote Capacity Planner client. The SQL planner counts CUs per region and model,
+  regardless of tier.
 - Signing in a KMS or secret store. The signing key is read from configuration.
 - Invoice adjustments, taxes, and payment collection. Final invoices are immutable, but
   there's no adjustment line for corrections yet.

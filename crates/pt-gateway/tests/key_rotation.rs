@@ -161,6 +161,8 @@ async fn rotate_without_an_outage() {
         .unwrap();
     let west = cp_b
         .region_statuses()
+        .await
+        .unwrap()
         .into_iter()
         .find(|s| s.region == "eu-west")
         .unwrap();

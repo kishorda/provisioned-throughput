@@ -30,7 +30,7 @@ fn available(svc: &Svc, region: &str) -> u32 {
     svc.planner.available(region, MAVERICK).unwrap()
 }
 
-fn beat(svc: &Svc, region: &str, gateway: &str, serving: bool) {
+async fn beat(svc: &Svc, region: &str, gateway: &str, serving: bool) {
     svc.heartbeat(
         region,
         &Heartbeat {
@@ -39,7 +39,9 @@ fn beat(svc: &Svc, region: &str, gateway: &str, serving: bool) {
             snapshot_version: 1,
             key_id: None,
         },
-    );
+    )
+    .await
+    .unwrap();
 }
 
 async fn multi_region(svc: &Svc, name: &str, regions: &[(&str, u32)]) -> String {
@@ -152,22 +154,22 @@ async fn silent_region_is_declared_down_then_recovers() {
     let id = multi_region(&svc, "agents", &[("eu-west", 6), ("eu-central", 4)]).await;
     let secs = |s| SignedDuration::from_secs(s);
 
-    beat(&svc, "eu-west", "gw-a", true);
-    beat(&svc, "eu-central", "gw-b", true);
+    beat(&svc, "eu-west", "gw-a", true).await;
+    beat(&svc, "eu-central", "gw-b", true).await;
     let last_west = clock_now(&clock);
     assert!(svc.run_failover().await.declared.is_empty());
 
     // eu-west goes quiet. Within the timeout nothing happens.
     for _ in 0..6 {
         clock.advance(secs(5));
-        beat(&svc, "eu-central", "gw-b", true);
+        beat(&svc, "eu-central", "gw-b", true).await;
     }
     assert!(
         svc.run_failover().await.declared.is_empty(),
         "30 s is not over 30 s"
     );
     clock.advance(secs(1));
-    beat(&svc, "eu-central", "gw-b", true);
+    beat(&svc, "eu-central", "gw-b", true).await;
     let before = svc.entitlement_version();
     let r = svc.run_failover().await;
     assert_eq!(r.declared.len(), 1, "{r:?}");
@@ -194,18 +196,18 @@ async fn silent_region_is_declared_down_then_recovers() {
     assert_eq!(snap.effective_cus(r, now_ms), 10.0);
 
     // A gateway that heartbeats but isn't serving doesn't count.
-    beat(&svc, "eu-west", "gw-a", false);
-    assert_eq!(status_of(&svc, "eu-west"), Health::Down);
+    beat(&svc, "eu-west", "gw-a", false).await;
+    assert_eq!(status_of(&svc, "eu-west").await, Health::Down);
 
     // eu-west serves again, but must stay up for 60 s before the incident resolves.
     for _ in 0..12 {
-        beat(&svc, "eu-west", "gw-a", true);
-        beat(&svc, "eu-central", "gw-b", true);
+        beat(&svc, "eu-west", "gw-a", true).await;
+        beat(&svc, "eu-central", "gw-b", true).await;
         assert!(svc.run_failover().await.resolved.is_empty());
         clock.advance(secs(5));
     }
-    beat(&svc, "eu-west", "gw-a", true);
-    beat(&svc, "eu-central", "gw-b", true);
+    beat(&svc, "eu-west", "gw-a", true).await;
+    beat(&svc, "eu-central", "gw-b", true).await;
     let r = svc.run_failover().await;
     assert_eq!(r.resolved.len(), 1, "{r:?}");
     let resolved = svc.incidents().await.unwrap().pop().unwrap();
@@ -231,15 +233,23 @@ async fn silent_region_is_declared_down_then_recovers() {
 async fn detection_guards() {
     let (svc, clock) = setup();
     // us-east never reported: unknown, never declared.
-    beat(&svc, "eu-west", "gw-a", true);
-    beat(&svc, "eu-central", "gw-b", true);
+    beat(&svc, "eu-west", "gw-a", true).await;
+    beat(&svc, "eu-central", "gw-b", true).await;
     clock.advance(SignedDuration::from_mins(2));
-    assert_eq!(status_of(&svc, "us-east"), Health::Unknown);
+    assert_eq!(status_of(&svc, "us-east").await, Health::Unknown);
     // Every region that ever reported is silent: the control plane is the one cut off.
     assert!(svc.run_failover().await.declared.is_empty());
 
-    // With one region serving, the silent one is declared.
-    beat(&svc, "eu-central", "gw-b", true);
+    // The first region to report after a silence (for example, after a control-plane
+    // outage) doesn't fail the others over at once: heartbeats must be flowing for a full
+    // timeout first.
+    beat(&svc, "eu-central", "gw-b", true).await;
+    assert!(svc.run_failover().await.declared.is_empty());
+    for _ in 0..6 {
+        clock.advance(SignedDuration::from_secs(5));
+        beat(&svc, "eu-central", "gw-b", true).await;
+    }
+    // eu-central has now served continuously for 30 s, and eu-west is still silent.
     let r = svc.run_failover().await;
     assert_eq!(r.declared.len(), 1);
     assert_eq!(r.declared[0].1, "eu-west");
@@ -253,12 +263,12 @@ async fn detection_guards() {
     .await
     .unwrap();
     for _ in 0..7 {
-        beat(&svc, "eu-west", "gw-a", true);
-        beat(&svc, "eu-central", "gw-b", true);
+        beat(&svc, "eu-west", "gw-a", true).await;
+        beat(&svc, "eu-central", "gw-b", true).await;
         clock.advance(SignedDuration::from_secs(10));
     }
-    beat(&svc, "eu-west", "gw-a", true);
-    beat(&svc, "eu-central", "gw-b", true);
+    beat(&svc, "eu-west", "gw-a", true).await;
+    beat(&svc, "eu-central", "gw-b", true).await;
     let r = svc.run_failover().await;
     assert_eq!(r.resolved.len(), 1);
     assert_eq!(r.resolved[0].1, "eu-west");
@@ -277,10 +287,10 @@ async fn detection_guards() {
     let mut cfg = config();
     cfg.failover.auto_declare = false;
     let off = in_memory(cfg, clock.clone());
-    beat(&off, "eu-west", "gw-a", true);
-    beat(&off, "eu-central", "gw-b", true);
+    beat(&off, "eu-west", "gw-a", true).await;
+    beat(&off, "eu-central", "gw-b", true).await;
     clock.advance(SignedDuration::from_mins(2));
-    beat(&off, "eu-central", "gw-b", true);
+    beat(&off, "eu-central", "gw-b", true).await;
     assert!(off.run_failover().await.declared.is_empty());
 }
 
@@ -437,8 +447,10 @@ fn clock_now(clock: &ManualClock) -> jiff::Timestamp {
     clock.now()
 }
 
-fn status_of(svc: &Svc, region: &str) -> Health {
+async fn status_of(svc: &Svc, region: &str) -> Health {
     svc.region_statuses()
+        .await
+        .unwrap()
         .into_iter()
         .find(|s| s.region == region)
         .unwrap()
