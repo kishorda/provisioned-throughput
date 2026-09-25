@@ -21,6 +21,7 @@ async fn worker(tpot_ms: u64, tokens: u64) -> (String, MockEngine) {
         ttft: Duration::from_millis(1),
         tpot: Duration::from_millis(tpot_ms),
         default_output_tokens: tokens,
+        contention: None,
     });
     (serve(e.router()).await, e)
 }
@@ -34,6 +35,7 @@ fn config(workers: &[(&str, u32, u32)], allocations: Vec<AllocationConfig>) -> R
         payg_guard_every: 0,
         failover_hold_ms: 30_000,
         preempt_grace_ms: 250,
+        backfill_ratio: 1.0,
         weights: None,
         workers: workers
             .iter()

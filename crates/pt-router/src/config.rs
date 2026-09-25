@@ -31,6 +31,10 @@ pub struct RouterConfig {
     /// worker busy preempts running PAYG.
     #[serde(default = "default_preempt_grace_ms")]
     pub preempt_grace_ms: u64,
+    /// Share of each floor worker's slots and KV that PAYG and spillover may hold (docs/05
+    /// §6). Hot spares aren't capped. Use 1.0 for a PAYG-only pool.
+    #[serde(default = "default_backfill_ratio")]
+    pub backfill_ratio: f64,
     #[serde(default)]
     pub weights: Option<WeightsConfig>,
     pub workers: Vec<WorkerConfig>,
@@ -94,6 +98,9 @@ fn default_failover_hold_ms() -> u64 {
 fn default_preempt_grace_ms() -> u64 {
     250
 }
+fn default_backfill_ratio() -> f64 {
+    crate::workers::DEFAULT_BACKFILL_RATIO
+}
 fn default_spare_weight() -> f64 {
     0.25
 }
@@ -108,6 +115,10 @@ impl RouterConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(!self.workers.is_empty(), "configure at least one worker");
         anyhow::ensure!(self.block_size > 0, "block_size must be positive");
+        anyhow::ensure!(
+            (0.0..=1.0).contains(&self.backfill_ratio),
+            "backfill_ratio must be in [0, 1]"
+        );
         let mut ids = HashSet::new();
         for w in &self.workers {
             anyhow::ensure!(ids.insert(w.id.as_str()), "duplicate worker {}", w.id);
@@ -175,15 +186,20 @@ impl RouterConfig {
     }
 
     pub fn weights(&self) -> Weights {
-        match &self.weights {
+        let base = match &self.weights {
             Some(w) => Weights {
                 overlap: w.overlap,
                 load: w.load,
                 session: w.session,
                 kv_overcommit: w.kv_overcommit,
                 spare: w.spare,
+                ..Weights::default()
             },
             None => Weights::default(),
+        };
+        Weights {
+            backfill_ratio: self.backfill_ratio,
+            ..base
         }
     }
 }

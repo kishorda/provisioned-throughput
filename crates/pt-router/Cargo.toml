@@ -25,3 +25,4 @@ tracing-subscriber.workspace = true
 pt-mock-engine.workspace = true
 pt-gateway = { path = "../pt-gateway" }
 pt-admission.workspace = true
+uuid.workspace = true

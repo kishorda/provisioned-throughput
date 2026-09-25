@@ -9,6 +9,7 @@ queue_timeout_ms = 30000
 payg_guard_every = 50       # PAYG goes first after 50 dispatches without one, if waiting
 failover_hold_ms = 30000    # an x-pt-failover request keeps the failover fence up this long
 preempt_grace_ms = 250      # in a failover, provisioned work waiting this long preempts PAYG
+backfill_ratio = 0.5        # PAYG/spillover may hold at most half of each floor worker (not hot spares)
 
 [weights]
 overlap = 1.0               # prefer workers that already hold the prompt's prefix

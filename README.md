@@ -52,7 +52,8 @@ curl http://127.0.0.1:8080/v1/pt/status -H 'Authorization: Bearer sk-acme-dev'
 ```
 
 Mock engine settings: `MOCK_ADDR`, `MOCK_NAME`, `MOCK_TTFT_MS` (default 50),
-`MOCK_TPOT_MS` (10), `MOCK_OUTPUT_TOKENS` (64).
+`MOCK_TPOT_MS` (10), `MOCK_OUTPUT_TOKENS` (64). `MOCK_CONTENTION=1` replaces the fixed
+timings with a continuous-batching model, so concurrent requests slow each other down.
 
 ### Request and response headers
 
@@ -213,7 +214,22 @@ Workers marked `hot_spare` serve PAYG until a region failover needs them. Gatewa
 provisioned requests that use a failover entitlement with `x-pt-failover`. While that
 marker keeps arriving, the router keeps new PAYG off hot spares. If provisioned work
 waits 250 ms, it aborts running PAYG, which then gets `x-pt-reason: preempted` (503,
-`Retry-After: 1`) or a final SSE error event (docs/13 §2, ADR-015).
+`Retry-After: 1`) or a final SSE error event (docs/13 §2, ADR-015). On other workers,
+PAYG and spillover may hold at most `backfill_ratio` (0.5) of the slots and KV, so
+provisioned work always finds room (ADR-026).
+
+## Interference suite
+
+A tenant's SLO must hold next to long prompts, KV hogs, and a PAYG flood (docs/05 §7,
+ADR-025). The suite runs the gateway and router against a mock engine that models
+continuous batching, and runs each scenario again with no isolation as a control, which
+must miss the SLO:
+
+```sh
+cargo test -p pt-router --test interference -- --nocapture                        # 3 s per scenario
+PT_SOAK_SECS=60 cargo test -p pt-router --test interference -- --ignored --nocapture  # soak
+MOCK_CONTENTION=1 target/debug/pt-mock-engine &                                     # contention by hand
+```
 
 ## Kubernetes
 
@@ -249,6 +265,8 @@ cargo clippy --workspace --all-targets
 cargo fmt --all --check
 ```
 
+The interference soak (`--ignored`, above) is a release gate, not part of the default run.
+
 ## Not built yet
 
 Follow-ups from the roadmap in docs/11:
@@ -276,6 +294,10 @@ Follow-ups from the roadmap in docs/11:
   Front the customer API with its own ingress. Gateway → Quota Coordinator is plain HTTP
   within a region.
 - **Dynamo router extensions** (tenant WFQ, KV budgets) and the engine KV-budget adapter (P1).
+- **Interference soak on real workers.** The suite runs against the mock's contention
+  model (ADR-025). The staging-pool soak on Dynamo workers, and a scenario for PAYG
+  preemption on hot spares, still need a GPU pool. The backfill ratio isn't tuned per
+  model yet (ADR-026).
 - **Controller gaps:** no leader election (run one replica), no drain workflow beyond
   PDBs, and no Dynamo Planner floor integration. The controller owns `replicas` on the
   DGD, so don't enable Planner autoscaling on PT pools yet.

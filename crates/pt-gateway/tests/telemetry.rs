@@ -68,6 +68,7 @@ async fn gateway_usage_reaches_customer_reports() {
             ttft: Duration::from_millis(5),
             tpot: Duration::from_millis(2),
             default_output_tokens: 8,
+            contention: None,
         })
         .router(),
     )

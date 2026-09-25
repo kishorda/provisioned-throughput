@@ -28,6 +28,7 @@ async fn gateway_classes_reach_the_router() {
         ttft: Duration::from_millis(1),
         tpot: Duration::from_millis(1),
         default_output_tokens: 50,
+        contention: None,
     });
     let worker = serve(engine.router()).await;
     let router_cfg = RouterConfig {
@@ -38,6 +39,7 @@ async fn gateway_classes_reach_the_router() {
         payg_guard_every: 50,
         failover_hold_ms: 30_000,
         preempt_grace_ms: 250,
+        backfill_ratio: 1.0,
         weights: None,
         workers: vec![WorkerConfig {
             id: "w0".into(),

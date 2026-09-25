@@ -50,6 +50,7 @@ async fn spawn_engine() -> String {
         ttft: Duration::from_millis(1),
         tpot: Duration::from_millis(1),
         default_output_tokens: 4,
+        contention: None,
     });
     serve(engine.router()).await
 }

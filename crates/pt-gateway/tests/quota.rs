@@ -180,6 +180,7 @@ async fn replicas_share_one_entitlement() {
             ttft: Duration::from_millis(1),
             tpot: Duration::from_millis(1),
             default_output_tokens: 4,
+            contention: None,
         })
         .router(),
     )

@@ -1,6 +1,13 @@
 //! A stand-in for a Dynamo frontend: serves `POST /v1/chat/completions` in the OpenAI
 //! format, streams tokens at a configurable TTFT and TPOT, and reports usage including
 //! simulated prefix-cache hits.
+//!
+//! With [`MockConfig::contention`] set, requests share one simulated engine instead, so
+//! tenants really interfere (see [`contention`]): decode steps slow down as the batch
+//! grows, unchunked prefill stalls everyone's decode, and KV overflow forces recompute.
+//! The interference test suite (docs/05 §7) relies on it.
+
+pub mod contention;
 
 use std::collections::HashSet;
 use std::convert::Infallible;
@@ -33,6 +40,8 @@ pub struct MockConfig {
     pub tpot: Duration,
     /// Output length when the request doesn't set `max_tokens`.
     pub default_output_tokens: u64,
+    /// Simulate a continuous-batching engine instead of fixed TTFT/TPOT.
+    pub contention: Option<contention::Contention>,
 }
 
 impl Default for MockConfig {
@@ -42,6 +51,7 @@ impl Default for MockConfig {
             ttft: Duration::from_millis(50),
             tpot: Duration::from_millis(10),
             default_output_tokens: 64,
+            contention: None,
         }
     }
 }
@@ -74,17 +84,26 @@ impl Drop for InFlight {
 pub struct MockEngine {
     config: Arc<MockConfig>,
     stats: Arc<Stats>,
+    /// The simulated engine, when contention is on.
+    batcher: Option<contention::Batcher>,
     /// Hashes of message-level prefixes already seen, standing in for a KV prefix cache.
     prefixes: Arc<Mutex<HashSet<u64>>>,
 }
 
 impl MockEngine {
     pub fn new(config: MockConfig) -> Self {
+        let batcher = config.contention.clone().map(contention::Batcher::start);
         Self {
             config: Arc::new(config),
             stats: Arc::default(),
+            batcher,
             prefixes: Arc::default(),
         }
+    }
+
+    /// Requests the simulated engine evicted for lack of KV and recomputed.
+    pub fn preemptions(&self) -> u64 {
+        self.batcher.as_ref().map_or(0, |b| b.preemptions())
     }
 
     pub fn requests_served(&self) -> u64 {
@@ -202,8 +221,23 @@ async fn chat_completions(
         cfg.name.parse().expect("engine name is a valid header"),
     );
 
+    // With contention, tokens come from the shared engine; otherwise from fixed timings.
+    let mut tokens = engine.batcher.as_ref().map(|b| {
+        b.submit(
+            prompt_tokens,
+            prompt_tokens.saturating_sub(cached_tokens),
+            output_tokens,
+        )
+    });
+
     if !req.stream {
-        tokio::time::sleep(cfg.ttft + cfg.tpot * output_tokens.saturating_sub(1) as u32).await;
+        match tokens.as_mut() {
+            Some(rx) => while rx.recv().await.is_some() {},
+            None => {
+                tokio::time::sleep(cfg.ttft + cfg.tpot * output_tokens.saturating_sub(1) as u32)
+                    .await
+            }
+        }
         let body = json!({
             "id": id,
             "object": "chat.completion",
@@ -230,10 +264,18 @@ async fn chat_completions(
                 "choices": [{ "index": 0, "delta": delta, "finish_reason": finish }],
             }))
         };
-        tokio::time::sleep(cfg.ttft).await;
+        if tokens.is_none() {
+            tokio::time::sleep(cfg.ttft).await;
+        }
         for i in 0..output_tokens {
-            if i > 0 {
-                tokio::time::sleep(cfg.tpot).await;
+            match tokens.as_mut() {
+                Some(rx) => {
+                    if rx.recv().await.is_none() {
+                        break;
+                    }
+                }
+                None if i > 0 => tokio::time::sleep(cfg.tpot).await,
+                None => {}
             }
             let delta = if i == 0 {
                 json!({ "role": "assistant", "content": TOKEN })

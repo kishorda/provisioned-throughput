@@ -112,6 +112,7 @@ async fn paired_region_takes_over_then_hands_back_gradually() {
             ttft: Duration::from_millis(1),
             tpot: Duration::from_millis(1),
             default_output_tokens: 4,
+            contention: None,
         })
         .router()
         .layer(axum::middleware::from_fn(

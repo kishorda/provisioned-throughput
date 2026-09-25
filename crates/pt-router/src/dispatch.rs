@@ -218,6 +218,10 @@ impl<T> Dispatcher<T> {
         let worker = &mut self.workers[w];
         worker.slots_used += 1;
         worker.kv_used += p.kv_blocks;
+        if is_backfill(p) {
+            worker.backfill_slots += 1;
+            worker.backfill_kv += p.kv_blocks;
+        }
         *worker
             .kv_by_reservation
             .entry(p.reservation.clone())
@@ -293,6 +297,10 @@ impl<T> Dispatcher<T> {
         let w = &mut self.workers[worker];
         w.slots_used = w.slots_used.saturating_sub(1);
         w.kv_used = w.kv_used.saturating_sub(p.kv_blocks);
+        if is_backfill(p) {
+            w.backfill_slots = w.backfill_slots.saturating_sub(1);
+            w.backfill_kv = w.backfill_kv.saturating_sub(p.kv_blocks);
+        }
         if let Some(held) = w.kv_by_reservation.get_mut(&p.reservation) {
             *held = held.saturating_sub(p.kv_blocks);
             if *held == 0 {
@@ -328,6 +336,10 @@ impl<T> Dispatcher<T> {
     }
 }
 
+fn is_backfill(p: &Placement) -> bool {
+    matches!(p.class, TrafficClass::Payg | TrafficClass::Spillover)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,9 +364,50 @@ mod tests {
         Dispatcher::new(
             vec![Worker::new("w0", "http://x", 1, 100)],
             HashMap::new(),
-            Weights::default(),
+            full_backfill(),
             0,
         )
+    }
+
+    /// PAYG may fill the floor, so these tests see only the behaviour they're about.
+    fn full_backfill() -> Weights {
+        Weights {
+            backfill_ratio: 1.0,
+            ..Weights::default()
+        }
+    }
+
+    #[test]
+    fn backfill_leaves_room_on_the_floor() {
+        let mut d: Dispatcher<u32> = Dispatcher::new(
+            vec![Worker::new("w0", "http://x", 4, 100)],
+            HashMap::new(),
+            Weights::default(),
+            0,
+        );
+        let t = Instant::now();
+        for n in 0..4 {
+            d.enqueue(p("payg", TrafficClass::Payg, 10), 1.0, None, t, later(), n)
+                .unwrap();
+        }
+        // Half the slots at most go to PAYG, whatever is queued.
+        let payg = d.dispatch(t);
+        assert_eq!(payg.len(), 2);
+        assert_eq!(d.worker(0).backfill_slots, 2);
+        d.enqueue(
+            p("a", TrafficClass::Provisioned, 10),
+            1.0,
+            None,
+            t,
+            later(),
+            9,
+        )
+        .unwrap();
+        assert_eq!(d.dispatch(t)[0].payload, 9, "provisioned finds room");
+        // Freed backfill room goes back to PAYG.
+        d.release(payg[0].id);
+        assert_eq!(d.dispatch(t).len(), 1);
+        assert_eq!(d.worker(0).backfill_slots, 2);
     }
 
     #[test]
@@ -402,7 +455,7 @@ mod tests {
         let mut d: Dispatcher<u32> = Dispatcher::new(
             vec![Worker::new("w0", "http://x", 10, 100)],
             allocs,
-            Weights::default(),
+            full_backfill(),
             0,
         );
         // greedy's budget is 0.1 × 100 × 1.2 = 12 blocks: its first 10-block request runs,
@@ -513,7 +566,7 @@ mod tests {
                 Worker::new("spare", "http://x", 1, 100).with_hot_spare(true),
             ],
             HashMap::new(),
-            Weights::default(),
+            full_backfill(),
             0,
         );
         let t0 = Instant::now();

@@ -83,6 +83,8 @@ The design rests on six decisions:
 | [022](adr/ADR-022-control-plane-tls.md) | The control plane serves HTTPS, with optional mutual TLS |
 | [023](adr/ADR-023-multi-instance-control-plane.md) | Several control-plane instances: shared state in the database, one leader (amends 014, 017) |
 | [024](adr/ADR-024-share-rebalancing.md) | Move multi-region splits toward demand, within 20% |
+| [025](adr/ADR-025-interference-suite.md) | Run the interference suite against a contention-model mock, with a control run |
+| [026](adr/ADR-026-backfill-ratio.md) | Cap PAYG backfill at `backfill_ratio` of each floor worker (refines 006, 015) |
 
 ## Glossary
 

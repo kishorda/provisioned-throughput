@@ -51,6 +51,7 @@ flowchart LR
 | Feasibility | A request larger than every eligible worker's KV capacity is rejected at once (400 `router_request_too_large`), not queued forever |
 | Credit | `slots_used < slots` and `kv_used + blocks ≤ kv_blocks` |
 | KV budget | `held + blocks ≤ kv_share × kv_blocks × 1.2` per worker, unless the reservation holds nothing there (one oversized request may run alone) |
+| Backfill cap | PAYG and spillover hold at most `backfill_ratio` (default 0.5) of a floor worker's slots and KV blocks. Hot spares aren't capped ([ADR-026](adr/ADR-026-backfill-ratio.md)) |
 | Failover fence | While a failover is active, PAYG isn't placed on hot spares. Spillover and provisioned traffic can use them |
 | Score | `load × (slot and KV utilisation) − overlap × (prefix tokens held ÷ prompt tokens) − session × (same session's worker) + spare × (PAYG or spillover on the floor, or provisioned or burst on a hot spare)`. Lowest cost wins |
 

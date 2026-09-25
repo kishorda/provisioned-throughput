@@ -2,7 +2,7 @@
 //!
 //! Configured with environment variables:
 //! `MOCK_ADDR` (default `127.0.0.1:9000`), `MOCK_NAME`, `MOCK_TTFT_MS`, `MOCK_TPOT_MS`,
-//! `MOCK_OUTPUT_TOKENS`.
+//! `MOCK_OUTPUT_TOKENS`, and `MOCK_CONTENTION=1` for the continuous-batching model.
 
 use std::time::Duration;
 
@@ -31,6 +31,10 @@ async fn main() -> anyhow::Result<()> {
         ttft: Duration::from_millis(env_or("MOCK_TTFT_MS", defaults.ttft.as_millis() as u64)?),
         tpot: Duration::from_millis(env_or("MOCK_TPOT_MS", defaults.tpot.as_millis() as u64)?),
         default_output_tokens: env_or("MOCK_OUTPUT_TOKENS", defaults.default_output_tokens)?,
+        // MOCK_CONTENTION=1 simulates a continuous-batching engine (docs/05 §7).
+        contention: env_or("MOCK_CONTENTION", 0u8)?
+            .eq(&1)
+            .then(pt_mock_engine::contention::Contention::default),
     };
     let addr: String = env_or("MOCK_ADDR", "127.0.0.1:9000".to_string())?;
     let listener = tokio::net::TcpListener::bind(&addr)

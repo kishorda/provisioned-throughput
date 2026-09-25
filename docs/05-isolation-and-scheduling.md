@@ -112,7 +112,10 @@ context ceiling > 32K):
 | **Spare** | Hot / warm spares | n/a | Serve PAYG until claimed ([06](06-capacity-planning-and-reliability.md)) |
 
 The threshold (default 1 replica-set) and the backfill ratio are Planner parameters,
-tuned per model.
+tuned per model. The **backfill ratio** is the share of each floor worker's slots and KV
+blocks that PAYG and spillover may hold. It defaults to 0.5 (a placeholder), and hot
+spares aren't capped. It keeps room on the floor for provisioned work without aborting
+PAYG outside a failover ([ADR-026](adr/ADR-026-backfill-ratio.md)).
 
 ## 7. Validation: interference test suite
 
@@ -123,6 +126,26 @@ staging pool:
 - Tenant C: KV-heavy long-lived sessions. A must see no recompute-induced stalls.
 - PAYG flood at 3× spare capacity. Provisioned SLO must hold, and PAYG must be preempted
   in < 1 s.
+
+**What's built** ([ADR-025](adr/ADR-025-interference-suite.md)). The staging-pool soak
+needs Dynamo workers. Until then, `crates/pt-router/tests/interference.rs` runs the same
+scenarios through the real gateway and router against a mock engine that models
+continuous batching: step cost grows with the batch, unchunked prefill stalls decode, and
+KV overflow evicts and recomputes. Each scenario runs twice. In the *protected* run, A
+must meet its tier. In the *control* run, the load goes straight to an engine with no
+isolation, and A must miss its tier, which proves the scenario interferes.
+
+| Scenario | Noise | Protection exercised | Protected A (TTFT / TPOT p95) | Control A |
+|----------|-------|----------------------|-------------------------------|-----------|
+| Long prompts | B: 16K-token prompts (128K scaled to the mock's prefill rate) | B's entitlement at the gateway; chunked prefill | ≈ 130 ms / 10 ms | TPOT ≈ 75 ms |
+| KV hog | C: 8K-token sequences held for 300 tokens | Router KV budget (`kv_share` 0.25) | ≈ 190 ms / 12 ms, no recompute | TTFT ≈ 4 s |
+| PAYG flood | 3× the pool's slots | Strict priority; pull-based dispatch; backfill ratio | ≈ 65 ms / 16 ms | TPOT ≈ 47 ms |
+
+A runs at 90% of its entitlement rather than 100%, so the gateway never throttles it
+and the results measure interference only. The scenarios run for 3 s each in `cargo
+test`, and for `PT_SOAK_SECS` (default 60) in the `--ignored` soak. All values are
+placeholders until calibration. The mock has one worker and no hot spares, so PAYG
+preemption timing is covered by the router's failover tests (docs/13 §2), not here.
 
 ## Blog problems addressed
 P13, P14, P15, P16, P17. See [traceability](01-requirements-and-traceability.md#2-traceability-matrix).

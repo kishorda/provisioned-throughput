@@ -8,6 +8,9 @@
 //! Hot spares (docs/06 §3) serve PAYG until provisioned traffic needs them. PAYG prefers
 //! them and provisioned traffic prefers the floor. During a region failover the router
 //! fences new PAYG off hot spares and may preempt running PAYG ([`preemption_victim`]).
+//! On the floor, backfill (PAYG and spillover) may hold at most `backfill_ratio` of a
+//! worker's slots and KV (docs/05 §6), so provisioned work never waits for a floor that
+//! PAYG has filled.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -52,6 +55,9 @@ pub struct Worker {
     pub kv_by_reservation: HashMap<String, u32>,
     /// Failure-domain headroom kept loaded: serves PAYG until provisioned traffic needs it.
     pub hot_spare: bool,
+    /// Slots and KV blocks held by backfill (PAYG and spillover).
+    pub backfill_slots: u32,
+    pub backfill_kv: u32,
 }
 
 impl Worker {
@@ -65,6 +71,8 @@ impl Worker {
             kv_used: 0,
             kv_by_reservation: HashMap::new(),
             hot_spare: false,
+            backfill_slots: 0,
+            backfill_kv: 0,
         }
     }
 
@@ -75,6 +83,18 @@ impl Worker {
 
     fn has_credit(&self, blocks: u32) -> bool {
         self.slots_used < self.slots && self.kv_used + blocks <= self.kv_blocks
+    }
+
+    /// Whether backfill may take one more slot and `blocks` KV blocks here. Hot spares take
+    /// any amount. The KV cap doesn't apply to the first backfill request, so one larger
+    /// than the cap can still run.
+    fn backfill_fits(&self, blocks: u32, ratio: f64) -> bool {
+        if self.hot_spare {
+            return true;
+        }
+        let slots = (ratio * f64::from(self.slots)).floor() as u32;
+        let kv = (ratio * f64::from(self.kv_blocks)).floor() as u32;
+        self.backfill_slots < slots && (self.backfill_kv == 0 || self.backfill_kv + blocks <= kv)
     }
 
     fn load(&self) -> f64 {
@@ -136,6 +156,9 @@ pub struct Weights {
     pub kv_overcommit: f64,
     /// Cost of the wrong kind of worker: PAYG on the floor, or provisioned on a hot spare.
     pub spare: f64,
+    /// Share of a floor worker's slots and KV that backfill may hold (docs/05 §6). 1.0 lets
+    /// PAYG fill the floor; 0.0 keeps it off.
+    pub backfill_ratio: f64,
 }
 
 impl Default for Weights {
@@ -146,9 +169,13 @@ impl Default for Weights {
             session: 0.5,
             kv_overcommit: 1.2,
             spare: 0.25,
+            backfill_ratio: DEFAULT_BACKFILL_RATIO,
         }
     }
 }
+
+/// Placeholder until calibration: half of each floor worker stays free of backfill.
+pub const DEFAULT_BACKFILL_RATIO: f64 = 0.5;
 
 /// Why no worker could take a request right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -257,6 +284,9 @@ pub fn select(
             continue;
         }
         if !w.has_credit(p.kv_blocks) {
+            continue;
+        }
+        if backfill && !w.backfill_fits(p.kv_blocks, weights.backfill_ratio) {
             continue;
         }
         if !within_budget(w, allocations, weights, p) {

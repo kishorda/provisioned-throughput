@@ -29,6 +29,7 @@ async fn spawn_engine(name: &str, ttft_ms: u64, tpot_ms: u64, output_tokens: u64
         ttft: Duration::from_millis(ttft_ms),
         tpot: Duration::from_millis(tpot_ms),
         default_output_tokens: output_tokens,
+        contention: None,
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
