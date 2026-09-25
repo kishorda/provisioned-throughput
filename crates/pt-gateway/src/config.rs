@@ -117,6 +117,11 @@ fn default_buffer() -> usize {
 pub struct QuotaClientConfig {
     /// For example `http://127.0.0.1:8095`.
     pub coordinator_url: String,
+    /// Other coordinator replicas (ADR-027). Only the leader answers; a standby returns
+    /// 503 `not_leader`, and the gateway tries the next URL. It sticks with whichever
+    /// answered last.
+    #[serde(default)]
+    pub standby_urls: Vec<String>,
     pub token: String,
     /// Defaults to a random id per process.
     #[serde(default)]

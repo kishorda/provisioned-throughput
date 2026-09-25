@@ -20,10 +20,18 @@ pub struct ReservationDemand {
     pub snapshot_version: u64,
     /// Recent WU/s of admission attempts at this gateway, including rejected ones.
     pub demand_wu_s: f64,
+    /// The unexpired lease this gateway holds, from whichever coordinator granted it; 0 if
+    /// none. A new leader warming up grants no more than this (ADR-027).
+    #[serde(default)]
+    pub held_wu_s: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RenewResponse {
+    /// The coordinator is warming up after a takeover: reservations without a lease here
+    /// keep their current rate.
+    #[serde(default)]
+    pub warming_up: bool,
     /// Leases are valid for this long after the gateway receives them.
     pub ttl_ms: u64,
     pub leases: Vec<Lease>,

@@ -6,11 +6,14 @@
 //! locally against their lease, so the coordinator is never on the request path.
 //!
 //! State is soft: after a restart, it's rebuilt from renewals within one lease period.
+//! Replicas run active/standby: only the holder of the election lease answers renewals
+//! ([`election`], ADR-027).
 
 pub mod allocator;
 pub mod api;
 pub mod config;
 pub mod coordinator;
+pub mod election;
 pub mod wire;
 
 pub use coordinator::{Coordinator, CoordinatorConfig};

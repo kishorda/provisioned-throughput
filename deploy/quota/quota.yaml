@@ -1,0 +1,127 @@
+# Quota Coordinator for one region, active/standby (ADR-027). Untested: there's no cluster
+# on the development machine.
+#
+# Two replicas in a StatefulSet, so each has a stable DNS name. Gateways list both:
+#   [quota]
+#   coordinator_url = "http://pt-quota-0.pt-quota.pt-system.svc:8095"
+#   standby_urls = ["http://pt-quota-1.pt-quota.pt-system.svc:8095"]
+# Only the replica holding the `pt-quota-eu-west` Lease answers renewals; the other returns
+# 503 not_leader and the gateway tries the next URL. Both report ready (/healthz), so
+# rollouts proceed; /leader shows which one leads.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pt-quota
+  namespace: pt-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pt-quota
+  namespace: pt-system
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pt-quota
+  namespace: pt-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pt-quota
+subjects:
+  - kind: ServiceAccount
+    name: pt-quota
+    namespace: pt-system
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pt-quota
+  namespace: pt-system
+data:
+  quota.toml: |
+    listen = "0.0.0.0:8095"
+    token = "replace-me"          # mount from a Secret in production
+    lease_ttl_ms = 1000
+    floor_fraction = 0.1
+
+    [election]
+    namespace = "pt-system"
+    lease_name = "pt-quota-eu-west"
+    # identity defaults to $POD_NAME
+    lease_duration_ms = 5000      # a standby takes over 5 s after the leader's last renewal
+    renew_deadline_ms = 3000      # the leader stops granting 3 s after its last renewal
+    retry_period_ms = 1000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pt-quota
+  namespace: pt-system
+spec:
+  clusterIP: None                 # headless: per-pod DNS names for the gateways
+  selector:
+    app: pt-quota
+  ports:
+    - name: http
+      port: 8095
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: pt-quota
+  namespace: pt-system
+spec:
+  serviceName: pt-quota
+  replicas: 2
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: pt-quota
+  template:
+    metadata:
+      labels:
+        app: pt-quota
+    spec:
+      serviceAccountName: pt-quota
+      # The leader releases its lease on SIGTERM, so a standby takes over at once.
+      terminationGracePeriodSeconds: 10
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: pt-quota
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: coordinator
+          image: pt-quota:dev
+          args: ["/etc/pt-quota/quota.toml"]
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          ports:
+            - name: http
+              containerPort: 8095
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          volumeMounts:
+            - name: config
+              mountPath: /etc/pt-quota
+      volumes:
+        - name: config
+          configMap:
+            name: pt-quota

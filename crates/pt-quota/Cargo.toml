@@ -6,9 +6,17 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["kube"]
+# The Kubernetes Lease backend for leader election (ADR-027).
+kube = ["dep:kube", "dep:k8s-openapi", "dep:jiff"]
+
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
+jiff = { workspace = true, optional = true }
+k8s-openapi = { workspace = true, optional = true }
+kube = { workspace = true, optional = true, features = ["client", "rustls-tls", "ring"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

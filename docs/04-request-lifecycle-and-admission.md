@@ -1,6 +1,6 @@
 # 04 · Request Lifecycle & Admission Control
 
-> Decision records: [ADR-002](adr/ADR-002-debt-based-wu-bucket.md), [ADR-003](adr/ADR-003-lease-based-distributed-quota.md)
+> Decision records: [ADR-002](adr/ADR-002-debt-based-wu-bucket.md), [ADR-003](adr/ADR-003-lease-based-distributed-quota.md), [ADR-012](adr/ADR-012-single-instance-quota-coordinator.md), [ADR-027](adr/ADR-027-quota-coordinator-standby.md)
 
 ## 1. End-to-end sequence
 
@@ -125,7 +125,7 @@ specific response:
 A reservation's WU/s must be enforced across many gateway replicas, with no central store
 on the hot path ([ADR-003](adr/ADR-003-lease-based-distributed-quota.md)):
 
-- The Quota Coordinator (a 3-node Raft group per region) holds each reservation's region
+- The Quota Coordinator (an active/standby pair per region, ADR-027) holds each reservation's region
   share. It grants each gateway a **lease**: a WU/s slice and a burst-credit slice, valid
   for 1 s and renewed every 250 ms.
 - Slices are proportional to each gateway's recent demand for that reservation, with a
@@ -146,6 +146,16 @@ on the hot path ([ADR-003](adr/ADR-003-lease-based-distributed-quota.md)):
 > grants)`, so grants never oversell, even mid-rebalance. Burst credit accrues from the
 > local lease instead of separate burst slices. Gateways apply leases by resizing their
 > limiters in place. Home-gateway routing isn't built yet.
+>
+> **High availability** ([ADR-027](adr/ADR-027-quota-coordinator-standby.md)). Two
+> replicas run active/standby on a Kubernetes Lease instead of Raft. Only the leader
+> grants, and a standby answers 503 `not_leader`, so gateways try the next replica in
+> the same renewal. A dead leader stops granting 3 s after its last lease renewal and is
+> replaced 5 s after it. By then all its grants have expired, so the new leader starts
+> cold. A leader that shuts down releases the lease and is replaced at once. The new
+> leader then *warms up* for one grant hold: it grants each gateway no more than the
+> unexpired lease the gateway reports holding, so a rolling update leaves no gateway in
+> fallback and never oversells.
 
 ## Blog problems addressed
 P7, P8, P11, P12. See [traceability](01-requirements-and-traceability.md#2-traceability-matrix).

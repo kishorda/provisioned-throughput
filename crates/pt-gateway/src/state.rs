@@ -413,8 +413,17 @@ impl AppState {
 
     /// Demand for each reservation since the last report, smoothed. Drains each limiter's
     /// attempted-WU counter.
-    pub fn demand_report(&self, elapsed: Duration) -> Vec<ReservationDemand> {
+    /// Each also reports the unexpired lease held at `now` (ADR-027).
+    pub fn demand_report(&self, elapsed: Duration, now: Instant) -> Vec<ReservationDemand> {
         let Some(q) = &self.quota else { return vec![] };
+        let held: HashMap<String, f64> = q
+            .leases
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|(_, l)| now < l.expires_at)
+            .map(|(id, l)| (id.clone(), l.rate))
+            .collect();
         let view = self.entitlements();
         let secs = elapsed.as_secs_f64().max(1e-3);
         let mut demand = q.demand.lock().unwrap_or_else(|e| e.into_inner());
@@ -429,6 +438,7 @@ impl AppState {
                     entitlement_wu_s: r.entitlement_wu_s(),
                     snapshot_version: view.version,
                     demand_wu_s: *d,
+                    held_wu_s: held.get(&r.id).copied().unwrap_or(0.0),
                 }
             })
             .collect()

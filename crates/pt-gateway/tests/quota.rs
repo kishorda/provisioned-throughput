@@ -14,6 +14,7 @@ use pt_gateway::state::QuotaMode;
 use pt_gateway::usage::MemorySink;
 use pt_gateway::{router, AppState, GatewayConfig};
 use pt_mock_engine::{MockConfig, MockEngine};
+use pt_quota::election::{self, ElectionConfig, Elector, Leadership, MemoryLease};
 use pt_quota::wire::{Lease, RenewResponse};
 use pt_quota::{api as quota_api, Coordinator, CoordinatorConfig};
 use serde_json::{json, Value};
@@ -38,21 +39,28 @@ async fn spawn_coordinator() -> (String, Arc<Coordinator>, Arc<AtomicBool>) {
     }));
     let down = Arc::new(AtomicBool::new(false));
     let flag = down.clone();
-    let app = quota_api::router(coordinator.clone(), TOKEN).layer(axum::middleware::from_fn(
-        move |req: axum::extract::Request, next: axum::middleware::Next| {
-            let flag = flag.clone();
-            async move {
-                if flag.load(Ordering::SeqCst) {
-                    return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    let app = quota_api::router(coordinator.clone(), Leadership::always(), TOKEN).layer(
+        axum::middleware::from_fn(
+            move |req: axum::extract::Request, next: axum::middleware::Next| {
+                let flag = flag.clone();
+                async move {
+                    if flag.load(Ordering::SeqCst) {
+                        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                    }
+                    next.run(req).await
                 }
-                next.run(req).await
-            }
-        },
-    ));
+            },
+        ),
+    );
     (serve(app).await, coordinator, down)
 }
 
 fn config(engine: &str, coordinator: &str, gateway_id: &str) -> GatewayConfig {
+    config_with(engine, &[coordinator], gateway_id)
+}
+
+/// A gateway that knows several coordinator replicas; the first URL is tried first.
+fn config_with(engine: &str, coordinators: &[&str], gateway_id: &str) -> GatewayConfig {
     GatewayConfig {
         server: ServerConfig {
             listen: "127.0.0.1:0".into(),
@@ -73,7 +81,8 @@ fn config(engine: &str, coordinator: &str, gateway_id: &str) -> GatewayConfig {
         }],
         entitlements: None,
         quota: Some(QuotaClientConfig {
-            coordinator_url: coordinator.into(),
+            coordinator_url: coordinators[0].into(),
+            standby_urls: coordinators[1..].iter().map(|u| u.to_string()).collect(),
             token: TOKEN.into(),
             gateway_id: Some(gateway_id.into()),
             renew_interval_ms: 50,
@@ -265,6 +274,7 @@ async fn local_rate_follows_lease_then_decays() {
     assert_eq!(r.limiter.config().entitlement_wu_s, 500.0);
 
     let lease = RenewResponse {
+        warming_up: false,
         ttl_ms: 1_000,
         leases: vec![Lease {
             id: "res-1".into(),
@@ -296,6 +306,7 @@ async fn local_rate_follows_lease_then_decays() {
 
     // A lease above the entitlement (after a shrink) is capped.
     let big = RenewResponse {
+        warming_up: false,
         ttl_ms: 1_000,
         leases: vec![Lease {
             id: "res-1".into(),
@@ -305,4 +316,226 @@ async fn local_rate_follows_lease_then_decays() {
     };
     app.apply_leases(&big, t0);
     assert_eq!(app.local_rate("res-1", ENTITLEMENT, t0).0, ENTITLEMENT);
+}
+
+/// One coordinator replica in an active/standby pair.
+struct Replica {
+    url: String,
+    coordinator: Arc<Coordinator>,
+    leadership: Arc<Leadership>,
+    lease: MemoryLease,
+    identity: &'static str,
+    down: Arc<AtomicBool>,
+    election: Option<(
+        tokio::task::JoinHandle<()>,
+        tokio::sync::watch::Sender<bool>,
+    )>,
+}
+
+/// Grants live 400 ms (held 600 ms); a dead leader is replaced after 1.2 s.
+const HA_TTL: Duration = Duration::from_millis(400);
+
+impl Replica {
+    async fn spawn(identity: &'static str, lease: MemoryLease) -> Self {
+        let coordinator = Arc::new(Coordinator::new(CoordinatorConfig {
+            lease_ttl: HA_TTL,
+            floor_fraction: 0.1,
+        }));
+        let leadership = Leadership::elected();
+        let down = Arc::new(AtomicBool::new(false));
+        let flag = down.clone();
+        let app = quota_api::router(coordinator.clone(), leadership.clone(), TOKEN).layer(
+            axum::middleware::from_fn(
+                move |req: axum::extract::Request, next: axum::middleware::Next| {
+                    let flag = flag.clone();
+                    async move {
+                        if flag.load(Ordering::SeqCst) {
+                            return StatusCode::BAD_GATEWAY.into_response();
+                        }
+                        next.run(req).await
+                    }
+                },
+            ),
+        );
+        let mut r = Self {
+            url: serve(app).await,
+            coordinator,
+            leadership,
+            lease,
+            identity,
+            down,
+            election: None,
+        };
+        r.start();
+        r
+    }
+
+    fn start(&mut self) {
+        let config = ElectionConfig {
+            identity: self.identity.into(),
+            lease_duration: Duration::from_millis(1_200),
+            renew_deadline: Duration::from_millis(500),
+            retry_period: Duration::from_millis(100),
+        };
+        config
+            .validate(HA_TTL * 3 / 2)
+            .expect("safe election timing");
+        let (tx, mut rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(election::run(
+            Elector::new(self.lease.clone(), config),
+            self.coordinator.clone(),
+            self.leadership.clone(),
+            async move {
+                let _ = rx.wait_for(|s| *s).await;
+            },
+        ));
+        self.down.store(false, Ordering::SeqCst);
+        self.election = Some((task, tx));
+    }
+
+    fn leading(&self) -> bool {
+        self.leadership.serving(Instant::now())
+    }
+
+    /// The process dies: no release, no answers.
+    fn crash(&mut self) {
+        if let Some((task, _)) = self.election.take() {
+            task.abort();
+        }
+        self.down.store(true, Ordering::SeqCst);
+    }
+
+    /// A rolling update: stop serving, release the lease, exit.
+    async fn shut_down(&mut self) {
+        if let Some((task, tx)) = self.election.take() {
+            tx.send(true).unwrap();
+            task.await.unwrap();
+        }
+        self.down.store(true, Ordering::SeqCst);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_standby_coordinator_takes_over_without_overselling() {
+    let engine = serve(
+        MockEngine::new(MockConfig {
+            name: "main".into(),
+            ttft: Duration::from_millis(1),
+            tpot: Duration::from_millis(1),
+            default_output_tokens: 4,
+            contention: None,
+        })
+        .router(),
+    )
+    .await;
+    let lease = MemoryLease::default();
+    let mut c1 = Replica::spawn("c1", lease.clone()).await;
+    eventually("c1 leads", 5, || async { c1.leading() }).await;
+    let mut c2 = Replica::spawn("c2", lease).await;
+    // Gateways try the standby first, so they must follow not_leader to the leader.
+    let urls = [c2.url.as_str(), c1.url.as_str()];
+    let (a, app_a) = spawn_gateway(config_with(&engine, &urls, "gw-a")).await;
+    let (b, app_b) = spawn_gateway(config_with(&engine, &urls, "gw-b")).await;
+
+    let standby = reqwest::get(format!("{}/leader", c2.url)).await.unwrap();
+    assert_eq!(standby.status(), 503);
+    let refused = reqwest::Client::new()
+        .post(format!("{}/v1/leases/renew", c2.url))
+        .bearer_auth(TOKEN)
+        .json(&json!({ "gateway_id": "x", "reservations": [] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), 503);
+    assert_eq!(
+        refused.json::<Value>().await.unwrap()["error"]["code"],
+        "not_leader"
+    );
+
+    eventually("both leased from c1", 5, || async {
+        share(&a).await.1 == "lease" && share(&b).await.1 == "lease"
+    })
+    .await;
+
+    // Throughout, the leases the gateways hold never add up to more than the entitlement,
+    // and we count how often a gateway is left without one.
+    let stop = Arc::new(AtomicBool::new(false));
+    let unleased = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let max_leased = Arc::new(std::sync::Mutex::new(0.0_f64));
+    let sampler = {
+        let (stop, unleased, max) = (stop.clone(), unleased.clone(), max_leased.clone());
+        let apps = [app_a.clone(), app_b.clone()];
+        tokio::spawn(async move {
+            while !stop.load(Ordering::SeqCst) {
+                let now = Instant::now();
+                let mut sum = 0.0;
+                for app in &apps {
+                    let (rate, mode) = app.local_rate("res-1", ENTITLEMENT, now);
+                    if mode == QuotaMode::Lease {
+                        sum += rate;
+                    } else {
+                        unleased.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+                {
+                    let mut m = max.lock().unwrap();
+                    *m = m.max(sum);
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+    };
+    let load_stop = Arc::new(AtomicBool::new(false));
+    let workers = load(a.clone(), load_stop.clone());
+
+    // 1. The leader crashes. Leases lapse into fallback, and c2 takes over once the lease
+    // record has been unchanged for 1.2 s.
+    c1.crash();
+    eventually("c2 leads", 5, || async { c2.leading() }).await;
+    assert!(
+        !c2.coordinator.warming_up(Instant::now()),
+        "a dead leader's grants have all expired: no warm-up needed"
+    );
+    eventually("leases from c2", 5, || async {
+        share(&a).await.1 == "lease" && share(&b).await.1 == "lease"
+    })
+    .await;
+    assert!(
+        unleased.load(Ordering::SeqCst) > 0,
+        "the crash caused a gap"
+    );
+
+    // 2. c1 comes back as a standby, then c2 is shut down for an update. It releases the
+    // lease, and c1 takes over at once, warming up from the leases the gateways hold.
+    c1.start();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!c1.leading(), "c1 stands by while c2 leads");
+    eventually("rebalanced under c2", 5, || async {
+        share(&a).await.0 > 700.0
+    })
+    .await;
+    unleased.store(0, Ordering::SeqCst);
+    c2.shut_down().await;
+    eventually("c1 leads again", 2, || async { c1.leading() }).await;
+    assert!(c1.coordinator.warming_up(Instant::now()));
+    // Past the warm-up, allocation is normal again.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(!c1.coordinator.warming_up(Instant::now()));
+    assert_eq!(share(&a).await.1, "lease");
+    assert_eq!(share(&b).await.1, "lease");
+    assert_eq!(
+        unleased.load(Ordering::SeqCst),
+        0,
+        "a graceful handover leaves no gateway without a lease"
+    );
+
+    load_stop.store(true, Ordering::SeqCst);
+    for w in workers {
+        let _ = w.await;
+    }
+    stop.store(true, Ordering::SeqCst);
+    sampler.await.unwrap();
+    let max = *max_leased.lock().unwrap();
+    assert!(max > 0.0);
+    assert!(max <= ENTITLEMENT + 1e-6, "leases oversold: {max}");
 }

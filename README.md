@@ -21,7 +21,7 @@ named latency tier.
 | `pt-admission` | Debt-based WU bucket (ADR-002), burst bank, boundary-policy chain (burst → queue → spillover → reject), `continuation` reserve, output-length estimator |
 | `pt-gateway` | OpenAI-compatible gateway (axum): auth, estimate, admit, proxy/stream, settle, usage JSONL, `/v1/pt/status`. Loads entitlements from signed control-plane snapshots or a static file |
 | `pt-router` | Tenant-aware router tier (docs/13): priority classes, WFQ by WU, pull-based dispatch on worker slots and KV, dedicated placement, per-reservation KV budgets, prefix and session affinity, hot spares with PAYG preemption during failover |
-| `pt-quota` | Regional Quota Coordinator: leases that split each reservation's entitlement across gateway replicas without overselling (ADR-012) |
+| `pt-quota` | Regional Quota Coordinator: leases that split each reservation's entitlement across gateway replicas without overselling (ADR-012), active/standby on a Kubernetes Lease (ADR-027) |
 | `pt-telemetry` | Customer usage, latency, session, and monthly SLA reports built from gateway usage records (docs/09 §5), served by the control plane |
 | `pt-entitlement` | Snapshot format shared by the control plane and gateways, Ed25519 signing and verification, API-key hashing |
 | `pt-mock-engine` | Stand-in for a Dynamo frontend: OpenAI chat API with configurable TTFT/TPOT and simulated prefix caching |
@@ -185,6 +185,15 @@ curl -s 127.0.0.1:8095/v1/leases -H 'Authorization: Bearer quota-token-eu-west-d
 `unleased`, or `disabled`. To run a second replica, copy the config with a different
 `listen` port and `cache_path`.
 
+In production, the coordinator runs as two replicas that elect a leader through a
+Kubernetes Lease (`[election]` in its config, and `deploy/quota/quota.yaml`). Gateways
+list every replica in `coordinator_url` and `standby_urls`. A standby answers 503
+`not_leader`, and `GET /leader` shows which replica leads. A clean shutdown hands over at
+once. After a crash, the standby takes over within about 5 s, and gateways use their
+fallback rate in the meantime (ADR-027). Without `[election]`, a single coordinator
+warms up for 1.5 s after it starts, so it never grants on top of leases from before a
+restart.
+
 The gateway caches the last snapshot in `entitlements-eu-west.json`, and keeps serving from
 it if the control plane is down. `pt-control-plane keygen` makes a new signing key pair and
 prints its key id. To rotate without an outage, add the new public key to every gateway's
@@ -271,9 +280,9 @@ The interference soak (`--ignored`, above) is a release gate, not part of the de
 
 Follow-ups from the roadmap in docs/11:
 
-- **Quota Coordinator high availability.** It's a single instance per region (ADR-012).
-  While it's down, gateways fall back to 50% of each entitlement in total. There's also no
-  home-gateway routing for small tenants.
+- **Quota Coordinator on a cluster.** Active/standby election (ADR-027) is tested with an
+  in-memory lease only. The Kubernetes Lease backend and `deploy/quota/` haven't run
+  against a cluster. There's also no home-gateway routing for small tenants.
 - **Model tokenizer.** Input tokens are approximated (4 bytes per token). Settlement uses
   the engine's counts, so this affects only the admission estimate.
 - **Prefix-cache index at the gateway.** Estimates assume no cache hits; settlement

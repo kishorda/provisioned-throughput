@@ -84,7 +84,7 @@ The global plane is **off the request path**.
 | Component | Tech | Responsibility |
 |-----------|------|----------------|
 | **PT Gateway** | Rust; Pingora (or hyper + tower) | TLS, auth, tenant/deployment resolution, tokenisation (HF `tokenizers` crate), prefix-block hashing, WU estimation, admission, boundary policy, streaming proxy, usage emission, SLA timestamps |
-| **Quota Coordinator** | Rust; tonic; Raft-replicated (openraft) state | Splits each reservation's WU/s across gateway replicas with short leases; settles debt; enforces region share of multi-region entitlements ([ADR-003](adr/ADR-003-lease-based-distributed-quota.md)) |
+| **Quota Coordinator** | Rust; active/standby on a Kubernetes Lease, soft state ([ADR-027](adr/ADR-027-quota-coordinator-standby.md)) | Splits each reservation's WU/s across gateway replicas with short leases; settles debt; enforces region share of multi-region entitlements ([ADR-003](adr/ADR-003-lease-based-distributed-quota.md)) |
 | **Tenant-aware Router** | Rust crate extending Dynamo's KV router | Priority classes, WFQ by WU, pool placement constraints, pull-based dispatch, KV-overlap scoring ([05 §3](05-isolation-and-scheduling.md#3-level-2--router)) |
 | **Dynamo serving graphs** | NVIDIA Dynamo + TRT-LLM / vLLM / SGLang | Disaggregated prefill/decode, KVBM (GPU→CPU→NVMe), NIXL KV transfer, etcd + NATS discovery and KV events |
 | **Regional Capacity Controller** | Rust, kube-rs | Reconciles `ModelPool` / `PoolAllocation` CRDs into `DynamoGraphDeployment`s. Owns provisioned floors. Coordinates Dynamo Planner for PAYG. Runs the capacity-aware drain controller. |
@@ -98,7 +98,7 @@ flowchart TB
   LB[Regional L4 LB / anycast] --> GWs
   subgraph SYS[System cluster · CPU nodes]
     GWs[PT Gateway ×N · HPA on RPS & CPU]
-    QC[Quota Coordinator ×3 · Raft]
+    QC[Quota Coordinator ×2 · active/standby]
     RCC[Regional Capacity Controller]
     KAF[Redpanda]
     CH[ClickHouse]

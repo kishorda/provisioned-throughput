@@ -40,6 +40,7 @@ flush_interval_ms = 1000
 # Remove this section to run a single replica that enforces the full entitlement.
 [quota]
 coordinator_url = "http://127.0.0.1:8095"
+# standby_urls = ["http://127.0.0.1:8096"]   # other replicas; a standby answers 503 not_leader (ADR-027)
 token = "quota-token-eu-west-dev"
 renew_interval_ms = 250
 assumed_gateways = 3        # share before the first lease

@@ -9,6 +9,14 @@
 //! The coordinator keeps a grant alive for `lease_ttl × 1.5` after issuing it, longer than
 //! the gateway uses it, so network delay can't make the coordinator hand out capacity a
 //! gateway still thinks it holds.
+//!
+//! **Terms** (ADR-027). With several replicas, only the elected leader serves. A new
+//! leader starts a term with empty state ([`Coordinator::begin_term`]). If the previous
+//! leader released its lease, or this is a restart, gateways may still hold its grants, so
+//! the term starts with a *warm-up* of one grant hold. During warm-up, a gateway is
+//! granted at most the unexpired lease it reports holding (`held_wu_s`), and one holding
+//! none gets no lease and keeps its current rate. The previous leader's grants summed to
+//! at most the entitlement, so these do too.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
@@ -24,6 +32,14 @@ pub struct CoordinatorConfig {
     pub lease_ttl: Duration,
     /// Share of each entitlement reserved as a floor across active gateways.
     pub floor_fraction: f64,
+}
+
+impl CoordinatorConfig {
+    /// How long a grant counts as outstanding: 1.5 × the lease TTL, longer than gateways
+    /// use it.
+    pub fn grant_hold(&self) -> Duration {
+        self.lease_ttl * 3 / 2
+    }
 }
 
 impl Default for CoordinatorConfig {
@@ -54,6 +70,8 @@ struct Reservation {
 pub struct Coordinator {
     config: CoordinatorConfig,
     reservations: Mutex<HashMap<String, Reservation>>,
+    /// Until then, grants are capped at what each gateway already holds.
+    warm_until: Mutex<Option<Instant>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -78,16 +96,35 @@ impl Coordinator {
         Self {
             config,
             reservations: Mutex::new(HashMap::new()),
+            warm_until: Mutex::new(None),
         }
+    }
+
+    /// Start serving as leader: forget any earlier state. With `warm_up`, gateways may
+    /// still hold grants this replica doesn't know about (a released lease or a restart).
+    pub fn begin_term(&self, now: Instant, warm_up: bool) {
+        let mut all = self.reservations.lock().unwrap_or_else(|e| e.into_inner());
+        all.clear();
+        *self.warm_until.lock().unwrap_or_else(|e| e.into_inner()) =
+            warm_up.then(|| now + self.hold());
+    }
+
+    /// Whether the current term is still warming up.
+    pub fn warming_up(&self, now: Instant) -> bool {
+        self.warm_until
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some_and(|u| now < u)
     }
 
     /// How long the coordinator counts a grant as outstanding.
     fn hold(&self) -> Duration {
-        self.config.lease_ttl * 3 / 2
+        self.config.grant_hold()
     }
 
     pub fn renew(&self, req: &RenewRequest, now: Instant) -> RenewResponse {
         let hold = self.hold();
+        let warming = self.warming_up(now);
         let mut all = self.reservations.lock().unwrap_or_else(|e| e.into_inner());
         let mut leases = Vec::with_capacity(req.reservations.len());
 
@@ -128,12 +165,24 @@ impl Coordinator {
                 .filter(|(id, g)| **id != req.gateway_id && g.grant_expires > now)
                 .map(|(_, g)| g.grant)
                 .sum();
-            let grant = targets[pos].min((r.entitlement - others).max(0.0));
+            let mut grant = targets[pos].min((r.entitlement - others).max(0.0));
+            if warming {
+                let held = if d.held_wu_s.is_finite() {
+                    d.held_wu_s.max(0.0)
+                } else {
+                    0.0
+                };
+                grant = grant.min(held);
+            }
 
             let active = r.gateways.len() as u32;
             let g = r.gateways.get_mut(&req.gateway_id).expect("present");
             g.grant = grant;
             g.grant_expires = now + hold;
+            if warming && grant <= 0.0 {
+                // Holds nothing we know of: no lease, so it keeps its current rate.
+                continue;
+            }
             leases.push(Lease {
                 id: d.id.clone(),
                 rate_wu_s: grant,
@@ -149,6 +198,7 @@ impl Coordinator {
         });
 
         RenewResponse {
+            warming_up: warming,
             ttl_ms: self.config.lease_ttl.as_millis() as u64,
             leases,
         }
@@ -197,6 +247,7 @@ mod tests {
                 entitlement_wu_s: e,
                 snapshot_version: version,
                 demand_wu_s: demand,
+                held_wu_s: 0.0,
             }],
         }
     }
@@ -299,5 +350,35 @@ mod tests {
             t0 + Duration::from_secs(2),
         );
         assert!(c.view(t0 + Duration::from_secs(2)).is_empty());
+    }
+
+    #[test]
+    fn warm_up_never_grants_more_than_gateways_hold() {
+        let c = Coordinator::new(CoordinatorConfig::default());
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        c.renew(&req("old", 1_000.0, 1, 0.0), ms(0));
+        // A new term forgets that state.
+        c.begin_term(ms(10), true);
+        assert!(c.view(ms(10)).is_empty());
+        // a and b hold 600 and 400 from the previous leader. a wants everything.
+        let held = |gw: &str, demand: f64, held: f64| {
+            let mut r = req(gw, 1_000.0, 1, demand);
+            r.reservations[0].held_wu_s = held;
+            r
+        };
+        let a = c.renew(&held("a", 5_000.0, 600.0), ms(20)).leases;
+        assert_eq!(a[0].rate_wu_s, 600.0, "capped at what it holds");
+        let b = c.renew(&held("b", 0.0, 400.0), ms(30)).leases;
+        assert!(b[0].rate_wu_s <= 400.0);
+        // A gateway holding nothing gets no lease during warm-up.
+        assert!(c.renew(&held("new", 100.0, 0.0), ms(40)).leases.is_empty());
+        // After one hold (1.5 s), normal allocation resumes.
+        assert!(!c.warming_up(ms(1_510)));
+        c.renew(&held("b", 0.0, 0.0), ms(1_510));
+        c.renew(&held("new", 100.0, 0.0), ms(1_515));
+        let a = c.renew(&held("a", 5_000.0, 0.0), ms(1_520)).leases;
+        assert!(a[0].rate_wu_s > 600.0);
+        assert!(granted(&c, ms(1_520)) <= 1_000.0 + 1e-9);
     }
 }

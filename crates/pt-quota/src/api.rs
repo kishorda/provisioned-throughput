@@ -1,9 +1,12 @@
 //! HTTP API.
 //!
 //! ```text
-//! POST /v1/leases/renew   gateway token; RenewRequest → RenewResponse
-//! GET  /v1/leases         gateway token; per-reservation grants, for operators
-//! GET  /healthz
+//! POST /v1/leases/renew   gateway token; RenewRequest → RenewResponse (503 not_leader on a standby)
+//! GET  /v1/leases         gateway token; leadership and per-reservation grants, for operators
+//! GET  /healthz           liveness
+//! GET  /leader            200 while this replica leads, 503 on a standby. For monitoring:
+//!                         don't use it as a readiness probe, or rollouts wait forever for
+//!                         a standby to become ready
 //! ```
 
 use std::sync::Arc;
@@ -18,23 +21,36 @@ use axum::{Json, Router};
 use serde_json::json;
 
 use crate::coordinator::Coordinator;
+use crate::election::Leadership;
 use crate::wire::RenewRequest;
 
 #[derive(Clone)]
 struct Ctx {
     coordinator: Arc<Coordinator>,
+    leadership: Arc<Leadership>,
     token: Arc<str>,
 }
 
-pub fn router(coordinator: Arc<Coordinator>, token: &str) -> Router {
+/// Pass [`Leadership::always`] for a single coordinator without election.
+pub fn router(coordinator: Arc<Coordinator>, leadership: Arc<Leadership>, token: &str) -> Router {
     Router::new()
         .route("/v1/leases/renew", post(renew))
         .route("/v1/leases", get(leases))
         .route("/healthz", get(|| async { "ok" }))
+        .route("/leader", get(leader))
         .with_state(Ctx {
             coordinator,
+            leadership,
             token: token.into(),
         })
+}
+
+async fn leader(State(ctx): State<Ctx>) -> Response {
+    if ctx.leadership.serving(Instant::now()) {
+        "leader".into_response()
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "standby").into_response()
+    }
 }
 
 fn error(status: StatusCode, code: &str, message: &str) -> Response {
@@ -78,7 +94,16 @@ async fn renew(State(ctx): State<Ctx>, headers: HeaderMap, body: Bytes) -> Respo
             "gateway_id is required.",
         );
     }
-    Json(ctx.coordinator.renew(&req, Instant::now())).into_response()
+    // Checked after parsing, as close to granting as possible.
+    let now = Instant::now();
+    if !ctx.leadership.serving(now) {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "not_leader",
+            "This coordinator is a standby. Try another replica.",
+        );
+    }
+    Json(ctx.coordinator.renew(&req, now)).into_response()
 }
 
 async fn leases(State(ctx): State<Ctx>, headers: HeaderMap) -> Response {
@@ -89,5 +114,11 @@ async fn leases(State(ctx): State<Ctx>, headers: HeaderMap) -> Response {
             "Invalid or missing gateway token.",
         );
     }
-    Json(json!({ "data": ctx.coordinator.view(Instant::now()) })).into_response()
+    let now = Instant::now();
+    Json(json!({
+        "leader": ctx.leadership.serving(now),
+        "warming_up": ctx.coordinator.warming_up(now),
+        "data": ctx.coordinator.view(now),
+    }))
+    .into_response()
 }

@@ -85,6 +85,7 @@ The design rests on six decisions:
 | [024](adr/ADR-024-share-rebalancing.md) | Move multi-region splits toward demand, within 20% |
 | [025](adr/ADR-025-interference-suite.md) | Run the interference suite against a contention-model mock, with a control run |
 | [026](adr/ADR-026-backfill-ratio.md) | Cap PAYG backfill at `backfill_ratio` of each floor worker (refines 006, 015) |
+| [027](adr/ADR-027-quota-coordinator-standby.md) | Active/standby Quota Coordinator on a Kubernetes Lease, with a warm-up after a handover (amends 012) |
 
 ## Glossary
 

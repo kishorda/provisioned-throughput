@@ -3,10 +3,15 @@
 //! Every `renew_interval_ms` the gateway reports each reservation's demand and receives a
 //! lease: the WU/s it may admit locally. Admission itself never waits on the coordinator.
 //! If renewals fail, leases expire and each limiter decays towards its fallback share.
+//!
+//! With coordinator replicas (ADR-027), the gateway tries each URL in turn, starting with
+//! the one that answered last, until the leader grants. It reports the lease it holds, so
+//! a new leader warming up never grants it more.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use pt_quota::wire::RenewRequest;
+use pt_quota::wire::{RenewRequest, RenewResponse};
 
 use crate::config::QuotaClientConfig;
 use crate::state::AppState;
@@ -23,6 +28,9 @@ pub struct QuotaClient {
     config: QuotaClientConfig,
     gateway_id: String,
     http: reqwest::Client,
+    urls: Vec<String>,
+    /// Index into `urls` of the replica that answered last.
+    current: AtomicUsize,
 }
 
 impl QuotaClient {
@@ -34,11 +42,22 @@ impl QuotaClient {
         let timeout =
             Duration::from_millis(config.renew_interval_ms * 4).max(Duration::from_millis(500));
         let http = reqwest::Client::builder().timeout(timeout).build()?;
+        let urls = std::iter::once(&config.coordinator_url)
+            .chain(&config.standby_urls)
+            .map(|u| u.trim_end_matches('/').to_string())
+            .collect();
         Ok(Self {
             config,
             gateway_id,
             http,
+            urls,
+            current: AtomicUsize::new(0),
         })
+    }
+
+    /// The coordinator URL that answered last.
+    pub fn current_url(&self) -> &str {
+        &self.urls[self.current.load(Ordering::Relaxed) % self.urls.len()]
     }
 
     pub fn gateway_id(&self) -> &str {
@@ -49,24 +68,36 @@ impl QuotaClient {
     pub async fn renew_once(&self, app: &AppState, elapsed: Duration) -> Result<(), QuotaError> {
         let req = RenewRequest {
             gateway_id: self.gateway_id.clone(),
-            reservations: app.demand_report(elapsed),
+            reservations: app.demand_report(elapsed, Instant::now()),
         };
+        let start = self.current.load(Ordering::Relaxed);
+        let mut last = None;
+        for i in 0..self.urls.len() {
+            let n = (start + i) % self.urls.len();
+            match self.renew_at(&self.urls[n], &req).await {
+                Ok(leases) => {
+                    self.current.store(n, Ordering::Relaxed);
+                    app.apply_leases(&leases, Instant::now());
+                    return Ok(());
+                }
+                Err(e) => last = Some(e),
+            }
+        }
+        Err(last.expect("at least one coordinator URL"))
+    }
+
+    async fn renew_at(&self, url: &str, req: &RenewRequest) -> Result<RenewResponse, QuotaError> {
         let resp = self
             .http
-            .post(format!(
-                "{}/v1/leases/renew",
-                self.config.coordinator_url.trim_end_matches('/')
-            ))
+            .post(format!("{url}/v1/leases/renew"))
             .bearer_auth(&self.config.token)
-            .json(&req)
+            .json(req)
             .send()
             .await?;
         if !resp.status().is_success() {
             return Err(QuotaError::Status(resp.status()));
         }
-        let leases = resp.json().await?;
-        app.apply_leases(&leases, Instant::now());
-        Ok(())
+        Ok(resp.json().await?)
     }
 
     /// Renew forever. Failures are logged; limiters keep adjusting to their fallback rates.

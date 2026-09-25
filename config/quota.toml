@@ -3,3 +3,13 @@ listen = "127.0.0.1:8095"
 token = "quota-token-eu-west-dev"   # development value; shared with the region's gateways
 lease_ttl_ms = 1000
 floor_fraction = 0.1                # share of each entitlement kept as a floor per replica
+
+# Active/standby replicas on a Kubernetes Lease (ADR-027). Without this section, this is the
+# region's only coordinator. Needs lease_duration − renew_deadline ≥ 1.5 × lease_ttl_ms.
+# [election]
+# namespace = "pt-system"
+# lease_name = "pt-quota-eu-west"
+# identity = "pt-quota-0"           # defaults to $POD_NAME, then $HOSTNAME
+# lease_duration_ms = 5000
+# renew_deadline_ms = 3000
+# retry_period_ms = 1000
