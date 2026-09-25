@@ -106,6 +106,7 @@ async fn gateway_usage_reaches_customer_reports() {
         }),
         quota: None,
         tokenization: Default::default(),
+        prefix_cache: Default::default(),
         usage_export: Some(UsageExportConfig {
             control_plane_url: cp.clone(),
             token: REGION_TOKEN.into(),

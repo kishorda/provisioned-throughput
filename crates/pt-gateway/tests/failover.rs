@@ -63,6 +63,7 @@ fn gateway_config(cp: &str, engine: &str, public_key: String) -> GatewayConfig {
         }),
         quota: None,
         tokenization: Default::default(),
+        prefix_cache: Default::default(),
         usage_export: None,
         reservations: vec![],
         deployments: vec![],

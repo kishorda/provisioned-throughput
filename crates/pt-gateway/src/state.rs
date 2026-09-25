@@ -9,7 +9,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::{Duration, Instant};
 
-use pt_admission::{BoundaryPolicy, LimiterConfig, OutputEstimator, ReservationLimiter};
+use pt_admission::{
+    BoundaryPolicy, LimiterConfig, OutputEstimator, PrefixCache, PrefixKeys, ReservationLimiter,
+};
 use pt_core::{PerformanceProfile, Shape, Tier};
 use pt_entitlement::{
     failover_cus, sha256_hex, DeploymentEntitlement, FailoverShare, RegionFailover,
@@ -236,6 +238,8 @@ pub struct Inner {
     pub tokens: Arc<Tokenizers>,
     /// Most uncached bytes tokenized before admission.
     pub inline_bytes: usize,
+    /// Recently sent prefixes, for expected cache hits (ADR-030). `None` when disabled.
+    pub prefix_cache: Option<(PrefixKeys, Mutex<PrefixCache>)>,
 }
 
 /// Shared gateway state. Cheap to clone.
@@ -288,6 +292,10 @@ impl AppState {
             sink,
             tokens: Arc::new(tokens),
             inline_bytes: t.inline_bytes,
+            prefix_cache: config.prefix_cache.enabled.then(|| {
+                let cache = PrefixCache::new(config.prefix_cache.config());
+                (cache.key_builder(), Mutex::new(cache))
+            }),
         }));
 
         if config.entitlements.is_none() {

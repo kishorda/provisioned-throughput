@@ -27,6 +27,7 @@ pub fn router(app: AppState) -> Router {
         .route("/v1/pt/status", get(status))
         .route("/internal/v1/entitlements", get(entitlements))
         .route("/internal/v1/tokenizers", get(tokenizers))
+        .route("/internal/v1/prefix-cache", get(prefix_cache))
         .route("/healthz", get(|| async { "ok" }))
         .with_state(app)
 }
@@ -59,6 +60,18 @@ async fn tokenizers(State(app): State<AppState>) -> Json<serde_json::Value> {
         "inline_bytes": app.inline_bytes,
         "models": app.tokens.status(),
     }))
+}
+
+/// `GET /internal/v1/prefix-cache`: the prefix index and each model's learned hit rate
+/// (ADR-030).
+async fn prefix_cache(State(app): State<AppState>) -> Json<serde_json::Value> {
+    match &app.prefix_cache {
+        Some((_, cache)) => Json(json!({
+            "enabled": true,
+            "status": cache.lock().unwrap_or_else(|e| e.into_inner()).status(),
+        })),
+        None => Json(json!({ "enabled": false })),
+    }
 }
 
 /// `GET /v1/pt/status`: the caller's deployment and its current entitlement state.

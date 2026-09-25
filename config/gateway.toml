@@ -20,6 +20,13 @@ cache_entries = 100000   # messages whose counts are cached
 # path = "tokenizers/llama-4-maverick/tokenizer.json"   # the model's own tokenizer.json
 # message_overhead = 4   # tokens the chat template adds per message (calibrate per model)
 
+# Expected cache hits for prefixes this gateway sent recently, per reservation (ADR-030).
+[prefix_cache]
+enabled = true
+capacity = 200000        # prefixes remembered
+ttl_secs = 600           # assume evicted after this long
+initial_hit_rate = 0.5   # until the engine reports cached tokens for a model (placeholder)
+
 [[profiles]]
 name = "llama-4-maverick.b200.trtllm-1.2.tp8"
 coefficients = { a = 1.00, b = 0.08, c = 3.10, d = 0.00021 }

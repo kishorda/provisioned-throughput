@@ -1,6 +1,6 @@
 # 04 · Request Lifecycle & Admission Control
 
-> Decision records: [ADR-002](adr/ADR-002-debt-based-wu-bucket.md), [ADR-003](adr/ADR-003-lease-based-distributed-quota.md), [ADR-012](adr/ADR-012-single-instance-quota-coordinator.md), [ADR-027](adr/ADR-027-quota-coordinator-standby.md), [ADR-028](adr/ADR-028-input-token-counting.md)
+> Decision records: [ADR-002](adr/ADR-002-debt-based-wu-bucket.md), [ADR-003](adr/ADR-003-lease-based-distributed-quota.md), [ADR-012](adr/ADR-012-single-instance-quota-coordinator.md), [ADR-027](adr/ADR-027-quota-coordinator-standby.md), [ADR-028](adr/ADR-028-input-token-counting.md), [ADR-030](adr/ADR-030-gateway-prefix-cache-index.md)
 
 ## 1. End-to-end sequence
 
@@ -64,6 +64,13 @@ its output length.
   against a gateway-local, approximate **prefix-cache index**: a Bloom filter per pool, fed
   from Dynamo KV events via NATS. That gives an expected `cached_prefill_tokens` value. A
   wrong guess only changes the estimate, and settlement fixes it.
+
+  > **Implementation** ([ADR-030](adr/ADR-030-gateway-prefix-cache-index.md)): until
+  > KV events are available, the index is the gateway's own history. It holds cumulative
+  > message-prefix hashes per reservation, recorded when the engine accepts a request.
+  > Expected cached tokens are the longest remembered prefix times a per-model hit rate
+  > learned from the engine's reported cached tokens (starting at 0.5).
+  > `GET /internal/v1/prefix-cache` shows the rates.
 - **Decode: predicted.**
   `decode_est = min(max_tokens, P90_output(tenant, deployment, route_hint))`
   `P90_output` is a streaming quantile sketch (DDSketch) kept per deployment and refreshed

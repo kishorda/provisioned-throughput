@@ -101,6 +101,7 @@ fn gateway_config(
         }),
         quota: None,
         tokenization: Default::default(),
+        prefix_cache: Default::default(),
         usage_export: None,
         reservations: vec![],
         deployments: vec![],

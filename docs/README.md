@@ -88,6 +88,7 @@ The design rests on six decisions:
 | [027](adr/ADR-027-quota-coordinator-standby.md) | Active/standby Quota Coordinator on a Kubernetes Lease, with a warm-up after a handover (amends 012) |
 | [028](adr/ADR-028-input-token-counting.md) | Count input tokens with the model's tokenizer, cached per message, within a byte budget |
 | [029](adr/ADR-029-controller-leader-election.md) | Active/standby capacity controller on a Kubernetes Lease, sharing ADR-027's election |
+| [030](adr/ADR-030-gateway-prefix-cache-index.md) | Estimate cache hits from the gateway's own prefix history, per reservation, at a learned hit rate |
 
 ## Glossary
 

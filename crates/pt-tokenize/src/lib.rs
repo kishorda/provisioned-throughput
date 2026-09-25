@@ -82,6 +82,8 @@ pub enum Method {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Count {
     pub tokens: u64,
+    /// Each message's tokens, in order. They sum to `tokens`.
+    pub per_message: Vec<u64>,
     /// Every message was counted by the tokenizer (now or from the cache).
     pub exact: bool,
     /// Messages estimated by ratio because they didn't fit the budget. Tokenize them in
@@ -264,36 +266,38 @@ impl Tokenizers {
             MESSAGE_OVERHEAD + ratio_tokens(role.len(), ratio) + ratio_tokens(content.len(), ratio)
         };
         let Some(t) = self.tokenizer(model) else {
-            let tokens = messages.iter().map(|(r, c)| by_ratio(r, c)).sum();
+            let per_message: Vec<u64> = messages.iter().map(|(r, c)| by_ratio(r, c)).collect();
             self.tally(model, 0, messages.len() as u64);
             return Count {
-                tokens,
+                tokens: per_message.iter().sum(),
+                per_message,
                 exact: false,
                 deferred: vec![],
             };
         };
         let mut left = budget;
-        let mut tokens = 0;
+        let mut per_message = Vec::with_capacity(messages.len());
         let mut deferred = Vec::new();
         let (mut exact_n, mut estimated_n) = (0, 0);
         for (role, content) in messages {
             let key = self.key(model, role, content);
             if let Some(n) = self.cached(key) {
-                tokens += n;
+                per_message.push(n);
                 exact_n += 1;
                 continue;
             }
             let bytes = role.len() + content.len();
             if bytes <= left {
                 left -= bytes;
-                tokens += self.tokenize(model, t, key, role, content);
+                per_message.push(self.tokenize(model, t, key, role, content));
                 exact_n += 1;
                 continue;
             }
             // Too long to tokenize now: estimate, and tokenize it in the background once.
             // Shorter messages after it may still fit what's left of the budget.
-            tokens +=
-                t.overhead + ratio_tokens(role.len(), ratio) + ratio_tokens(content.len(), ratio);
+            per_message.push(
+                t.overhead + ratio_tokens(role.len(), ratio) + ratio_tokens(content.len(), ratio),
+            );
             estimated_n += 1;
             if self
                 .filling
@@ -306,7 +310,8 @@ impl Tokenizers {
         }
         self.tally(model, exact_n, estimated_n);
         Count {
-            tokens,
+            tokens: per_message.iter().sum(),
+            per_message,
             exact: estimated_n == 0,
             deferred,
         }

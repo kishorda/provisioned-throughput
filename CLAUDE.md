@@ -15,7 +15,7 @@ https://kishoraher.wordpress.com/2026/09/23/provisioned-throughput-for-ai-infere
 - the **tenant-aware router tier** `pt-router` (docs/13, ADR-013), with hot-spare preemption (ADR-015) and a backfill cap (ADR-026);
 - **automatic region failover** (docs/07 §4, ADR-014 to ADR-016): gateway heartbeats, automatic incidents, reserved failover headroom, snapshot-activated failover entitlements, warm spares, and a DNS steering feed, plus **share rebalancing** between regions (ADR-024);
 - the **interference test suite** (docs/05 §7, ADR-025) against a contention-model mock engine;
-- **input token counting** with each model's tokenizer, cached per message within an inline byte budget (ADR-028).
+- **input token counting** with each model's tokenizer, cached per message within an inline byte budget (ADR-028), and **expected cache hits** from the gateway's prefix history (ADR-030).
 
 The controller has only been unit-tested: there's no cluster, Docker, or kubectl on this machine. Dynamo integration is designed (docs/13 §3) but not built, because Dynamo can't be compiled or run here. `README.md` lists what's missing. The remote is `origin` = `git@github.com:kishorda/provisioned-throughput.git` (SSH). HTTPS has no credentials on this machine, and there's no `gh` CLI.
 
@@ -38,7 +38,7 @@ crates/
   pt-election/                  # leader election on a lease record: Elector, Leadership, run, lead, MemoryLease, kube_lease (feature kube), terminated()
   pt-entitlement/               # Snapshot format, Ed25519 SnapshotSigner/Verifier, sha256_hex for API keys
   pt-tokenize/                  # input token counting: HF tokenizers (fancy-regex, no C), per-message cache, inline budget + background fill, learned ratios
-  pt-admission/                 # DebtBucket (ADR-002), BurstBank, ReservationLimiter (burst → queue → spillover → reject), OutputEstimator
+  pt-admission/                 # DebtBucket (ADR-002), BurstBank, ReservationLimiter (burst → queue → spillover → reject), OutputEstimator, PrefixCache (expected cache hits, ADR-030)
   pt-gateway/                   # axum gateway: chat.rs (admission path), sse.rs, state.rs (swappable entitlements), sync.rs (snapshot long-poll + cache), config.rs, usage.rs; tests/gateway.rs, tests/entitlements.rs (control plane → gateway e2e)
   pt-mock-engine/               # OpenAI-compatible mock with TTFT/TPOT, simulated prefix cache, contention.rs (continuous-batching model)
   pt-crds/                      # kube-rs CRD types + crdgen binary; tests/manifests.rs checks deploy/ drift
@@ -67,6 +67,7 @@ Its source HTML lived in a session scratchpad, not in this repo. To update it, r
 ## Conventions for code
 - Keep admission logic pure and synchronous in `pt-admission`, taking `now: Instant` explicitly so tests are deterministic. The gateway owns async and I/O.
 - Token counting (ADR-028): the gateway counts with `pt_tokenize::Tokenizers` (`AppState.tokens`), never `ApproxTokenCounter`. Uncached work runs on `spawn_blocking`. `count_within` tokenizes at most `inline_bytes` of uncached text, and `deferred` messages go to `fill` in the background (deduplicated through `filling`). Settlement calls `observe` with the engine's prompt tokens. The gateway sends `x-pt-prompt-tokens`, and the router rescales its prefix estimates to it. Keep the `tokenizers` crate on `default-features = false, features = ["fancy-regex"]`: the defaults build C/C++ (`onig`, `esaxx_fast`). A real-tokenizer check runs with `PT_TEST_TOKENIZER=<gpt2 tokenizer.json>` (`pt-tokenize/tests/real.rs`, `--release --nocapture` prints timings).
+- Prefix-cache index (ADR-030): `pt_admission::PrefixCache` is pure; the gateway hashes with `PrefixKeys` outside the lock, predicts before admission (`WorkBreakdown` gets `input − expected_cached` uncached and `expected_cached` cached), and in `Settlement::finish` records the keys (only if the engine accepted) and calls `observe` with the engine's cached tokens. Keys are scoped by reservation id; never share predictions across reservations.
 - Settlement and usage emission happen once, in `Settlement::drop` (`crates/pt-gateway/src/chat.rs`), so every exit path is covered, including client disconnects.
 - Engines are reached over plain HTTP (`reqwest` with default features off). Don't add crates that need cmake or TLS C libraries: this machine has no cmake. Where TLS is needed, use rustls with the ring provider: sqlx `tls-rustls-ring-webpki`, reqwest `rustls-tls-webpki-roots` (pt-telemetry only), kube `ring`. Never aws-lc-rs or native-tls.
 - Control-plane transport (ADR-022): `[server.tls]` serves HTTPS through `tls::TlsListener` (rustls with ring; handshakes run in their own tasks). ALPN must stay `http/1.1` only, because axum has no HTTP/2 here. Clients build reqwest through `pt_entitlement::client_tls::ControlPlaneTls` (feature `client`), which enforces the policy. Tests generate certificates with `rcgen`, so they always run.
@@ -145,7 +146,7 @@ These are recorded in `docs/11-roadmap-risks-open-questions.md` §4. Treat them 
 
 ## Open items
 - **Pricing:** no PM questions are open. `[[payg_prices]]` must mirror the regular PAYG price list; the values in `config/control-plane.toml` are development numbers.
-- **Not built:** metering of preempted PAYG; hot spares rendered as router workers (router `hot_spare` flags are hand-configured); chat-template rendering for token counts; a gateway prefix-cache index; capacity planning by tier; KMS signing; a separate customer-API listener; home-gateway routing; controller drain workflow and Dynamo Planner floor integration. `README.md` ("Not built yet") has the full list.
+- **Not built:** metering of preempted PAYG; hot spares rendered as router workers (router `hot_spare` flags are hand-configured); chat-template rendering for token counts; a KV-event-fed prefix index (the gateway uses its own history, ADR-030); capacity planning by tier; KMS signing; a separate customer-API listener; home-gateway routing; controller drain workflow and Dynamo Planner floor integration. `README.md` ("Not built yet") has the full list.
 - **Needs a cluster or GPUs:** the Kubernetes Lease backend and `deploy/` manifests (never run), the Dockerfiles, the Dynamo router plugins and engine KV-budget patch, the staging interference soak, a weight-prefetch DaemonSet, and a GeoDNS/anycast controller for `/internal/v1/steering`.
 - **Known failover limits (ADR-014):** activation needs the control plane, so a region failure during a control-plane outage doesn't fail over. A partition between a healthy region and the control plane makes the reservation over-serve briefly, never under-serve. During the return ramp, a gateway's limiter can run up to 1% above the entitlement, because rate changes under 1% are skipped.
 - **Top technical risks:** Dynamo API churn and fork maintenance, and upstream acceptance of the engine KV-budget patch.

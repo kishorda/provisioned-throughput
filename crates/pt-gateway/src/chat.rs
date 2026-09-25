@@ -77,6 +77,12 @@ pub async fn chat_completions(
     // messages are estimated now and tokenized in the background for the next request.
     let prompt_bytes: usize = messages.iter().map(|(r, c)| r.len() + c.len()).sum();
     let message_count = messages.len();
+    // Hashed outside the index's lock: a long conversation takes a fraction of a ms.
+    let prefix_keys = app
+        .prefix_cache
+        .as_ref()
+        .map(|(k, _)| k.keys(&res.id, &messages))
+        .unwrap_or_default();
     let count = if app.tokens.uncached_bytes(&res.model, &messages) == 0 {
         app.tokens
             .count_within(&res.model, &messages, app.inline_bytes)
@@ -104,6 +110,19 @@ pub async fn chat_completions(
     }
     let input_tokens = count.tokens;
 
+    // Expected cache hits: the longest prefix this gateway sent recently, times the
+    // model's learned hit rate (ADR-030). Cached prefill is priced at `b`, not `a`.
+    let prediction = match &app.prefix_cache {
+        Some((_, cache)) => cache.lock().unwrap_or_else(|e| e.into_inner()).predict(
+            &res.model,
+            &prefix_keys,
+            &count.per_message,
+            Instant::now(),
+        ),
+        None => Default::default(),
+    };
+    let cached_est = prediction.expected_cached.min(input_tokens);
+
     // Estimate WU. Prefill is exact after counting; decode is predicted (docs/04 §3).
     let max_tokens = req
         .get("max_completion_tokens")
@@ -114,9 +133,12 @@ pub async fn chat_completions(
         .shape
         .is_in_shape(input_tokens, max_tokens.unwrap_or(decode_est));
     let kv_est = estimate_kv_token_seconds(input_tokens, decode_est, res.tier.tpot_target_s());
-    let wu_est = res
-        .profile
-        .work_units(&WorkBreakdown::new(input_tokens, 0, decode_est, kv_est));
+    let wu_est = res.profile.work_units(&WorkBreakdown::new(
+        input_tokens - cached_est,
+        cached_est,
+        decode_est,
+        kv_est,
+    ));
 
     let session_id = header_str(&headers, "x-pt-session-id").map(str::to_owned);
     let continuation = header_str(&headers, "x-pt-priority")
@@ -134,6 +156,8 @@ pub async fn chat_completions(
         input_tokens,
         prompt_bytes,
         message_count,
+        prefix_keys,
+        matched_tokens: prediction.matched_tokens,
         wu_est,
         in_shape,
         class: None,
@@ -369,6 +393,9 @@ struct Settlement {
     /// Bytes of roles and contents, and the message count, for learning token ratios.
     prompt_bytes: usize,
     message_count: usize,
+    /// Prefix hashes of the prompt, and how many tokens of it matched the index.
+    prefix_keys: Vec<u64>,
+    matched_tokens: u64,
     wu_est: f64,
     in_shape: bool,
     class: Option<TrafficClass>,
@@ -403,6 +430,14 @@ impl Settlement {
             None => (0, 0, 0),
         };
         let prompt = uncached + cached;
+        if let (Some((_, index)), true) = (&self.app.prefix_cache, self.engine_accepted) {
+            let mut index = index.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(u) = self.obs.usage {
+                index.observe(&res.model, self.matched_tokens, u.cached_tokens);
+            }
+            // The engine prefilled this prompt, so it now holds these prefixes.
+            index.record(&self.prefix_keys, now);
+        }
         if let Some(u) = self.obs.usage {
             self.app.tokens.observe(
                 &res.model,

@@ -29,6 +29,9 @@ pub struct GatewayConfig {
     /// How input tokens are counted before admission (ADR-028).
     #[serde(default)]
     pub tokenization: TokenizationConfig,
+    /// Expect cache hits for prefixes this gateway sent recently (ADR-030).
+    #[serde(default)]
+    pub prefix_cache: PrefixCacheSettings,
     /// Push usage records to the control plane's telemetry API (docs/09).
     #[serde(default)]
     pub usage_export: Option<UsageExportConfig>,
@@ -113,6 +116,58 @@ fn default_flush_interval_ms() -> u64 {
 }
 fn default_buffer() -> usize {
     100_000
+}
+
+/// The gateway's prefix-cache index (docs/04 §3, ADR-030).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrefixCacheSettings {
+    /// Off: every input token is estimated as uncached prefill.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Prefixes remembered, across all reservations.
+    #[serde(default = "default_prefix_capacity")]
+    pub capacity: usize,
+    /// A prefix not sent for this long is assumed evicted.
+    #[serde(default = "default_prefix_ttl_secs")]
+    pub ttl_secs: u64,
+    /// Hit rate assumed before the engine reports cached tokens for a model. Placeholder.
+    #[serde(default = "default_initial_hit_rate")]
+    pub initial_hit_rate: f64,
+}
+
+impl Default for PrefixCacheSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            capacity: default_prefix_capacity(),
+            ttl_secs: default_prefix_ttl_secs(),
+            initial_hit_rate: default_initial_hit_rate(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_prefix_capacity() -> usize {
+    pt_admission::PrefixCacheConfig::default().capacity
+}
+fn default_prefix_ttl_secs() -> u64 {
+    pt_admission::PrefixCacheConfig::default().ttl.as_secs()
+}
+fn default_initial_hit_rate() -> f64 {
+    pt_admission::PrefixCacheConfig::default().initial_hit_rate
+}
+
+impl PrefixCacheSettings {
+    pub fn config(&self) -> pt_admission::PrefixCacheConfig {
+        pt_admission::PrefixCacheConfig {
+            capacity: self.capacity,
+            ttl: std::time::Duration::from_secs(self.ttl_secs),
+            initial_hit_rate: self.initial_hit_rate,
+        }
+    }
 }
 
 /// Input token counting (docs/04 §3, ADR-028).
@@ -327,6 +382,9 @@ impl GatewayConfig {
             if q.fallback_decay_secs.is_nan() || q.fallback_decay_secs <= 0.0 {
                 return invalid("quota.fallback_decay_secs must be positive".into());
             }
+        }
+        if !(0.0..=1.0).contains(&self.prefix_cache.initial_hit_rate) {
+            return invalid("prefix_cache.initial_hit_rate must be in [0, 1]".into());
         }
         let profiles: HashSet<_> = self.profiles.iter().map(|p| p.name.as_str()).collect();
         let mut reservations = HashSet::new();

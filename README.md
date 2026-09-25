@@ -60,6 +60,7 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
 
 curl http://127.0.0.1:8080/v1/pt/status -H 'Authorization: Bearer sk-acme-dev'
 curl http://127.0.0.1:8080/internal/v1/tokenizers     # how each model's tokens are counted
+curl http://127.0.0.1:8080/internal/v1/prefix-cache   # expected cache hits: learned hit rate per model
 ```
 
 Input tokens are counted with each model's own `tokenizer.json`, listed under
@@ -68,6 +69,11 @@ message, so an agent's repeated context costs a hash lookup. New text beyond
 `inline_bytes` (4 KB) is estimated by a learned bytes-per-token ratio, then tokenized in
 the background. Models without a tokenizer use a ratio learned from the engine's counts.
 The gateway passes its count to the router in `x-pt-prompt-tokens`.
+
+Repeated context is also priced as cached prefill (ADR-030). The gateway remembers the
+message prefixes each reservation sent recently. It estimates the longest match as cached,
+at a hit rate learned from the cached tokens the engine reports, so an agent's turns are
+estimated close to what they settle at.
 
 Mock engine settings: `MOCK_ADDR`, `MOCK_NAME`, `MOCK_TTFT_MS` (default 50),
 `MOCK_TPOT_MS` (10), `MOCK_OUTPUT_TOKENS` (64). `MOCK_TOKENIZER=path/to/tokenizer.json`
@@ -311,8 +317,8 @@ Follow-ups from the roadmap in docs/11, grouped by what they need.
 - **Chat templates.** Token counts use each model's tokenizer, but the chat template is
   approximated by a per-model `message_overhead`, and tool definitions and image parts
   aren't counted (ADR-028).
-- **Prefix-cache index at the gateway.** Estimates assume no cache hits, and settlement
-  refunds the difference.
+- **Prefix-cache index from Dynamo KV events.** The gateway predicts cache hits from its own
+  history (ADR-030). It doesn't see evictions or other replicas' traffic.
 - **Capacity planning by tier.** The shared planner counts CUs per region and model,
   whatever the tier.
 - **Signing in a KMS.** The snapshot signing key is read from configuration.

@@ -90,6 +90,7 @@ fn config_with(engine: &str, coordinators: &[&str], gateway_id: &str) -> Gateway
             fallback_decay_secs: 1.0,
         }),
         tokenization: Default::default(),
+        prefix_cache: Default::default(),
         usage_export: None,
         reservations: vec![ReservationConfig {
             id: "res-1".into(),
