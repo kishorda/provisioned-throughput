@@ -300,39 +300,59 @@ The interference soak (`--ignored`, above) is a release gate, not part of the de
 
 ## Not built yet
 
-Follow-ups from the roadmap in docs/11:
+Follow-ups from the roadmap in docs/11, grouped by what they need.
 
-- **Quota Coordinator on a cluster.** Active/standby election (ADR-027) is tested with an
-  in-memory lease only. The Kubernetes Lease backend and `deploy/quota/` haven't run
-  against a cluster. There's also no home-gateway routing for small tenants.
-- **Chat templates.** Token counts use each model's tokenizer (ADR-028), but the chat
-  template is approximated by a per-model `message_overhead`. Tool definitions and image
-  parts aren't counted. Tokenizer files have to be shipped with the gateway.
-- **Prefix-cache index at the gateway.** Estimates assume no cache hits; settlement
+### Not built
+
+- **Metering of preempted PAYG.** A preempted request should be billed only for the
+  tokens it delivered, but there's no PAYG metering path yet (ADR-015).
+- **Hot spares rendered as router workers.** Router `hot_spare` flags are set by hand in
+  config. The capacity controller doesn't render spares as separately addressable workers.
+- **Chat templates.** Token counts use each model's tokenizer, but the chat template is
+  approximated by a per-model `message_overhead`, and tool definitions and image parts
+  aren't counted (ADR-028).
+- **Prefix-cache index at the gateway.** Estimates assume no cache hits, and settlement
   refunds the difference.
-- **Redpanda.** Gateways push usage to the control plane, which writes it to ClickHouse
-  (ADR-019), or keeps it in memory when ClickHouse isn't configured. There's no Redpanda
-  stage, and usage and SLA aggregation runs in Rust rather than ClickHouse SQL.
-- **Region failover gaps.** Steering is an API; no GeoDNS/anycast controller consumes it.
-  Router `hot_spare` flags are configured, not rendered by the capacity controller.
-  There's no weight-prefetch DaemonSet, so loaded warm spares start cold. Preempted PAYG isn't metered.
-  Failover activation needs the control plane.
-- **Signing in a KMS.** The snapshot signing key is read from configuration.
 - **Capacity planning by tier.** The shared planner counts CUs per region and model,
-  regardless of tier. With the SQL store, run as many control-plane instances as you like
-  (ADR-023). The in-memory store is single-instance.
+  whatever the tier.
+- **Signing in a KMS.** The snapshot signing key is read from configuration.
 - **Separate listeners.** With `[server.tls] client_ca`, the customer API also requires
-  client certificates, because it shares the listener with internal traffic (ADR-022).
-  Front the customer API with its own ingress. Gateway → Quota Coordinator is plain HTTP
-  within a region.
-- **Dynamo router extensions** (tenant WFQ, KV budgets) and the engine KV-budget adapter (P1).
-- **Interference soak on real workers.** The suite runs against the mock's contention
-  model (ADR-025). The staging-pool soak on Dynamo workers, and a scenario for PAYG
-  preemption on hot spares, still need a GPU pool. The backfill ratio isn't tuned per
-  model yet (ADR-026).
-- **Controller gaps:** no drain workflow beyond PDBs, and no Dynamo Planner floor integration. The controller owns `replicas` on the
-  DGD, so don't enable Planner autoscaling on PT pools yet.
+  client certificates, because it shares a listener with internal traffic (ADR-022).
+  Front it with its own ingress for now.
+- **Home-gateway routing** for small tenants (docs/04 §6). Every gateway replica holds a
+  quota floor for every reservation.
+- **Redpanda.** Gateways push usage to the control plane, which writes it to ClickHouse
+  (ADR-019). Usage and SLA aggregation runs in Rust, not ClickHouse SQL.
+- **Controller workflows:** no drain workflow beyond PDBs, and no Dynamo Planner floor
+  integration. The controller owns `replicas` on the DGD, so don't enable Planner
+  autoscaling on PT pools yet.
+- **Floor room from expected concurrency.** The router keeps a fixed `backfill_ratio` of
+  each floor worker free of PAYG, not tuned per model or reservation (ADR-026).
+
+### Needs a cluster, Docker, or GPUs (none on the development machine)
+
+- **Run on Kubernetes.** Leader election for the Quota Coordinator and the controller
+  (ADR-027, ADR-029) is tested with an in-memory lease only. The Kubernetes Lease backend,
+  `deploy/quota/`, and `deploy/operator/` haven't run against a cluster, and neither
+  Dockerfile has been built.
 - **Dynamo DGD schema check.** `crates/pt-operator/src/render.rs` follows Dynamo's
   `v1alpha1` examples. Verify service fields and worker flags against the Dynamo release
-  you deploy. The rendering hasn't been run against a live cluster.
-- **Operator image.** The Dockerfile hasn't been built here, because this machine has no Docker.
+  you deploy.
+- **Dynamo router extensions** (tenant WFQ, KV budgets as plugins, docs/13 §3) and the
+  engine KV-budget adapter.
+- **Interference soak on real workers.** The suite runs against the mock's contention
+  model (ADR-025). The staging-pool soak on Dynamo workers, and a scenario for PAYG
+  preemption on hot spares, need a GPU pool.
+- **Weight-prefetch DaemonSet.** Without it, loaded warm spares start cold (ADR-016).
+- **GeoDNS or anycast controller** that consumes `/internal/v1/steering` (ADR-014).
+
+### Known limits of what's built
+
+- **Failover needs the control plane.** A region failure during a control-plane outage
+  doesn't fail over (ADR-014).
+- **Tokenizer files** (1–10 MB each) must be baked into the gateway image or mounted from a
+  volume. Each gateway replica keeps its own token-count cache (ADR-028).
+- **Transport.** Gateway → Quota Coordinator and gateway → engine are plain HTTP within a
+  region.
+- **In-memory store.** It's single-instance. Use the SQL store to run several
+  control-plane instances (ADR-023).
