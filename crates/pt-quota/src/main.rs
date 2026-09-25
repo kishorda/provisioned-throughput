@@ -43,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("binding {}", config.listen))?;
     tracing::info!(listen = %config.listen, lease_ttl_ms = config.lease_ttl_ms, elected = config.election.is_some(), "quota coordinator listening");
     tokio::spawn(async move {
-        terminated().await;
+        pt_quota::election::terminated().await;
         tracing::info!("shutting down");
         let _ = stop_tx.send(true);
     });
@@ -63,29 +63,6 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Ctrl-C, or SIGTERM from Kubernetes.
-async fn terminated() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-        match signal(SignalKind::terminate()) {
-            Ok(mut term) => {
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {}
-                    _ = term.recv() => {}
-                }
-            }
-            Err(_) => {
-                let _ = tokio::signal::ctrl_c().await;
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
-    }
-}
-
 #[cfg(feature = "kube")]
 async fn elect(
     settings: &pt_quota::config::ElectionSettings,
@@ -95,15 +72,13 @@ async fn elect(
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     use pt_quota::election::{kube_lease::KubeLease, run, Elector};
     let config = settings.config()?;
-    let client = kube::Client::try_default()
-        .await
-        .context("connecting to the Kubernetes API for leader election")?;
-    let backend = KubeLease::new(
-        client,
+    let backend = KubeLease::connect(
         &settings.namespace,
         &settings.lease_name,
         config.lease_duration,
-    );
+    )
+    .await
+    .context("connecting to the Kubernetes API for leader election")?;
     tracing::info!(identity = %config.identity, lease = %settings.lease_name, "joining the coordinator election");
     let elector = Elector::new(backend, config);
     Ok(tokio::spawn(run(

@@ -39,3 +39,28 @@ subjects:
   - kind: ServiceAccount
     name: pt-operator
     namespace: pt-system
+---
+# Leader election (ADR-029): replicas compete for the pt-operator Lease.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pt-operator-leader
+  namespace: pt-system
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pt-operator-leader
+  namespace: pt-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pt-operator-leader
+subjects:
+  - kind: ServiceAccount
+    name: pt-operator
+    namespace: pt-system

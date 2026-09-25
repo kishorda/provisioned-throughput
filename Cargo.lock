@@ -2262,6 +2262,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pt-election"
+version = "0.1.0"
+dependencies = [
+ "jiff",
+ "k8s-openapi",
+ "kube",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "pt-entitlement"
 version = "0.1.0"
 dependencies = [
@@ -2336,6 +2348,7 @@ dependencies = [
  "pt-control-plane",
  "pt-core",
  "pt-crds",
+ "pt-election",
  "pt-entitlement",
  "reqwest",
  "serde",
@@ -2353,9 +2366,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
- "jiff",
- "k8s-openapi",
- "kube",
+ "pt-election",
  "reqwest",
  "serde",
  "serde_json",

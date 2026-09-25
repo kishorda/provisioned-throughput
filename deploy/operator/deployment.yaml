@@ -1,4 +1,5 @@
-# One replica: there is no leader election yet, so don't scale this up.
+# Two replicas, active/standby on the pt-operator Lease (ADR-029). Only the leader
+# reconciles; on SIGTERM it releases the lease, so a rolling update hands over at once.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -7,9 +8,7 @@ metadata:
   labels:
     app.kubernetes.io/name: pt-operator
 spec:
-  replicas: 1
-  strategy:
-    type: Recreate
+  replicas: 2
   selector:
     matchLabels:
       app.kubernetes.io/name: pt-operator
@@ -19,6 +18,16 @@ spec:
         app.kubernetes.io/name: pt-operator
     spec:
       serviceAccountName: pt-operator
+      terminationGracePeriodSeconds: 30
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: pt-operator
+                topologyKey: kubernetes.io/hostname
       securityContext:
         runAsNonRoot: true
         seccompProfile:
@@ -30,6 +39,13 @@ spec:
           env:
             - name: RUST_LOG
               value: info,pt_operator=debug
+            # Leader election identity and lease namespace (ADR-029).
+            - name: POD_NAME
+              valueFrom:
+                fieldRef: { fieldPath: metadata.name }
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef: { fieldPath: metadata.namespace }
             # Follow the region's entitlement snapshot to load warm spares on failover
             # (docs/07 §4). Without these, failover demand is ignored.
             - name: PT_CONTROL_PLANE_URL

@@ -36,6 +36,7 @@ named latency tier.
 | `pt-mock-engine` | Stand-in for a Dynamo frontend: OpenAI chat API with configurable TTFT/TPOT, simulated prefix caching, and an optional continuous-batching contention model |
 | `pt-crds` | Custom resources (docs/08 §2): `PerformanceProfile`, `ModelPool`, `PoolAllocation`, `CapacityReservation`, and the `crdgen` binary |
 | `pt-control-plane` | Customer REST API (docs/12): create, get, list, update, and delete Provisioned Throughput; commercial rules; capacity checks; renewal lifecycle; durable SQL store (CockroachDB or PostgreSQL) or in-memory |
+| `pt-election` | Active/standby leader election on a Kubernetes Lease (or in memory), shared by the Quota Coordinator and the controller (ADR-027, ADR-029) |
 | `pt-operator` | Regional Capacity Controller: sizes each `ModelPool` from its allocations (docs/06 §2), applies a `DynamoGraphDeployment` and per-role PodDisruptionBudgets, loads warm spares for failover demand from the regional snapshot, and reports status |
 
 ## Run locally
@@ -272,6 +273,9 @@ kubectl get ptpool -n pt-serving                         # sizing and Ready cond
 ```
 
 The controller needs Dynamo's `DynamoGraphDeployment` CRD (`nvidia.com/v1alpha1`) installed.
+It runs as two replicas, and only the holder of the `pt-operator` Lease in `pt-system`
+reconciles (ADR-029). Set `PT_LEADER_ELECTION=false` to run a single replica without the
+lease, for example from a laptop against a test cluster.
 For each `ModelPool` it:
 
 - sets `desiredReplicas` = floor + `failureDomainK` + `maintenanceSlots` + `hotSpares`, per role
@@ -326,8 +330,7 @@ Follow-ups from the roadmap in docs/11:
   model (ADR-025). The staging-pool soak on Dynamo workers, and a scenario for PAYG
   preemption on hot spares, still need a GPU pool. The backfill ratio isn't tuned per
   model yet (ADR-026).
-- **Controller gaps:** no leader election (run one replica), no drain workflow beyond
-  PDBs, and no Dynamo Planner floor integration. The controller owns `replicas` on the
+- **Controller gaps:** no drain workflow beyond PDBs, and no Dynamo Planner floor integration. The controller owns `replicas` on the
   DGD, so don't enable Planner autoscaling on PT pools yet.
 - **Dynamo DGD schema check.** `crates/pt-operator/src/render.rs` follows Dynamo's
   `v1alpha1` examples. Verify service fields and worker flags against the Dynamo release

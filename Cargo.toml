@@ -13,6 +13,7 @@ members = [
     "crates/pt-telemetry",
     "crates/pt-router",
     "crates/pt-tokenize",
+    "crates/pt-election",
 ]
 
 [workspace.package]
@@ -32,6 +33,7 @@ pt-control-plane = { path = "crates/pt-control-plane" }
 pt-quota = { path = "crates/pt-quota", default-features = false }
 pt-telemetry = { path = "crates/pt-telemetry" }
 pt-tokenize = { path = "crates/pt-tokenize" }
+pt-election = { path = "crates/pt-election" }
 
 anyhow = "1"
 axum = "0.8"

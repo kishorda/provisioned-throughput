@@ -14,6 +14,7 @@
 
 pub mod controller;
 pub mod failover;
+pub mod leader;
 pub mod plan;
 pub mod render;
 pub mod sizing;

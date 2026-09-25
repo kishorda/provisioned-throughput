@@ -1,6 +1,6 @@
 # 08 · Kubernetes & NVIDIA Dynamo Integration
 
-> Decision records: [ADR-008](adr/ADR-008-dynamo-substrate.md), [ADR-009](adr/ADR-009-rust.md), [ADR-016](adr/ADR-016-warm-spare-loading.md)
+> Decision records: [ADR-008](adr/ADR-008-dynamo-substrate.md), [ADR-009](adr/ADR-009-rust.md), [ADR-016](adr/ADR-016-warm-spare-loading.md), [ADR-029](adr/ADR-029-controller-leader-election.md)
 
 ## 1. Stack per GPU cluster
 
@@ -53,6 +53,11 @@ are generated from the same types the controllers use.
 >
 > `ModelPool.status` also reports `desiredReplicas`, `minAvailable`, and `Ready` /
 > `CapacityShortfall` conditions.
+>
+> The controller runs as two replicas that elect a leader through the `pt-operator`
+> Lease ([ADR-029](adr/ADR-029-controller-leader-election.md)). Only the leader
+> reconciles. A leader that can't renew stops within 10 s and exits, 5 s before a standby
+> may take over, and a clean shutdown hands over at once.
 
 ### `PerformanceProfile` (cluster-scoped, produced by Calibration Service)
 ```yaml

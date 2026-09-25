@@ -1,0 +1,20 @@
+[package]
+name = "pt-election"
+description = "Active/standby leader election on a lease record: Kubernetes Lease or in-memory (ADR-027, ADR-029)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+# The Kubernetes Lease backend.
+kube = ["dep:kube", "dep:k8s-openapi", "dep:jiff"]
+
+[dependencies]
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+jiff = { workspace = true, optional = true }
+k8s-openapi = { workspace = true, optional = true }
+kube = { workspace = true, optional = true, features = ["client", "rustls-tls", "ring"] }
