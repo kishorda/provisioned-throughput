@@ -203,6 +203,13 @@ pub struct ModelPoolStatus {
     /// `desiredReplicas`. Held until the failover ends.
     #[serde(default)]
     pub warm_spares_loaded: RoleReplicas,
+    /// Extra replicas added while nodes hosting this pool's workers drain, one per worker
+    /// pod on a cordoned node (docs/06 §6). Included in `desiredReplicas`.
+    #[serde(default)]
+    pub drain_surge: RoleReplicas,
+    /// Cordoned nodes that still host this pool's workers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub draining_nodes: Vec<String>,
     #[serde(default)]
     pub conditions: Vec<Condition>,
 }

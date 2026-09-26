@@ -294,6 +294,10 @@ For each `ModelPool` it:
   and `PT_SNAPSHOT_CACHE`, as in `deploy/operator/deployment.yaml`). Hot spares cover the
   first part, and warm spares load for the rest. `kubectl get ptpool -o yaml` shows
   `failoverWuPerSec`, `warmSparesLoaded`, and the `FailoverActive` condition (ADR-016)
+- adds one replica per worker pod on a cordoned node, so `kubectl drain` and node upgrades
+  wait for replacements instead of using the failure headroom (`status.drainSurge`, the
+  `Draining` condition). Annotate a node `pt.example.com/drain=expedite` to drain it
+  through the maintenance slots at once (ADR-033)
 - refuses to touch children, and sets `Ready=False`, when the profile is missing, the
   engine version doesn't match the profile, or a strict-dedicated pool enables PAYG backfill
 
@@ -332,8 +336,8 @@ Follow-ups from the roadmap in docs/11, grouped by what they need.
   quota floor for every reservation.
 - **Redpanda.** Gateways push usage to the control plane, which writes it to ClickHouse
   (ADR-019). Usage and SLA aggregation runs in Rust, not ClickHouse SQL.
-- **Controller workflows:** no drain workflow beyond PDBs, and no Dynamo Planner floor
-  integration. The controller owns `replicas` on the DGD, so don't enable Planner
+- **Controller workflows:** no Dynamo Planner floor integration, and an expedited drain
+  doesn't pause sales (ADR-033). The controller owns `replicas` on the DGD, so don't enable Planner
   autoscaling on PT pools yet.
 - **Floor room from expected concurrency.** The router keeps a fixed `backfill_ratio` of
   each floor worker free of PAYG, not tuned per model or reservation (ADR-026).

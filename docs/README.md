@@ -91,6 +91,7 @@ The design rests on six decisions:
 | [030](adr/ADR-030-gateway-prefix-cache-index.md) | Estimate cache hits from the gateway's own prefix history, per reservation, at a learned hit rate |
 | [031](adr/ADR-031-capacity-in-replicas-per-tier.md) | Count sellable capacity in replicas, and cost each CU by its tier |
 | [032](adr/ADR-032-chat-template-token-counts.md) | Count the chat template's framing (tools, tool calls, system defaults) by rendering it without message text |
+| [033](adr/ADR-033-surge-before-drain.md) | Surge a replica for every pool pod on a cordoned node, so drains never use the failure headroom |
 
 ## Glossary
 

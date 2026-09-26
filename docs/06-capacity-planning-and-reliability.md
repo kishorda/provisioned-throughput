@@ -1,6 +1,6 @@
 # 06 · Capacity Planning & Reliability (Hidden Headroom)
 
-> Decision records: [ADR-006](adr/ADR-006-headroom-backfill.md), [ADR-031](adr/ADR-031-capacity-in-replicas-per-tier.md)
+> Decision records: [ADR-006](adr/ADR-006-headroom-backfill.md), [ADR-031](adr/ADR-031-capacity-in-replicas-per-tier.md), [ADR-033](adr/ADR-033-surge-before-drain.md)
 
 ## 1. What the planner must answer
 
@@ -99,6 +99,14 @@ A Rust controller that owns the "may I take this capacity away?" decision:
   node. It only proceeds if `replicas − in_flight_drains ≥ N(p) + failure_k(p)`.
 - It rate-limits concurrent drains per pool and per failure domain. Security patches get an
   "expedite" path that consumes the maintenance slot and pauses new sales on the pool.
+
+> **Implementation** ([ADR-033](adr/ADR-033-surge-before-drain.md)): no `Drain` resource.
+> The controller reacts to cordoned nodes, so `kubectl drain` and managed upgrades work
+> unchanged. It adds one replica per pool worker pod on a cordoned node. The budgets stay
+> at `floor + failure_k`, so evictions wait for the surge and never use the maintenance
+> slots or hot spares. A node annotated `pt.example.com/drain=expedite` gets no surge and
+> drains through the maintenance slots. The budget bounds concurrency, so there's no
+> separate rate limit. Expedite doesn't pause sales yet.
 
 ## Blog problems addressed
 P9, P10, plus headroom economics for P17. See [traceability](01-requirements-and-traceability.md#2-traceability-matrix).

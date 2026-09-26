@@ -2,32 +2,41 @@
 //!
 //! Primary resource: `ModelPool`. It also reacts to changes in the pool's `PoolAllocation`s
 //! and `PerformanceProfile`, to its owned `DynamoGraphDeployment` and PDBs, and, with a
-//! snapshot source, to every new entitlement snapshot (failover demand, docs/07 §4).
+//! snapshot source, to every new entitlement snapshot (failover demand, docs/07 §4). It
+//! watches the pool's worker pods and cordoned nodes to surge replicas before a drain
+//! (docs/06 §6).
 
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
+use k8s_openapi::api::core::v1::{Node, Pod};
 use k8s_openapi::api::policy::v1::PodDisruptionBudget;
 use kube::api::{
     Api, ApiResource, DeleteParams, DynamicObject, GroupVersionKind, ListParams, Patch, PatchParams,
 };
 use kube::runtime::controller::{Action, Controller};
 use kube::runtime::reflector::ObjectRef;
-use kube::runtime::watcher;
+use kube::runtime::{watcher, WatchStreamExt};
 use kube::{Client, Resource, ResourceExt};
 use pt_crds::{labels, ModelPool, PerformanceProfile, PoolAllocation};
 use serde_json::json;
 
+use crate::drain::{self, NodeState, WorkerPod, DRAIN_ANNOTATION, EXPEDITE};
 use crate::failover::failover_extra;
 pub use crate::failover::SnapshotRx;
 use crate::plan::{self, PoolInput};
+use crate::render::Role;
 
 /// Resync even without changes, to repair drift in children.
 const RESYNC: Duration = Duration::from_secs(300);
 /// Resync while a failover is active, so the return ramp and the release of warm spares
 /// are applied promptly.
 const FAILOVER_RESYNC: Duration = Duration::from_secs(30);
+/// Resync while a drain is in progress.
+const DRAIN_RESYNC: Duration = Duration::from_secs(15);
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -73,10 +82,35 @@ pub async fn run(client: Client, snapshot: Option<SnapshotRx>) -> anyhow::Result
     let owned =
         watcher::Config::default().labels(&format!("{}={}", labels::MANAGED_BY, labels::MANAGER));
 
+    // Cordons and drain annotations: node status changes every few seconds, so pass on
+    // only changes to what the drain logic reads.
+    let node_changes = watcher(Api::<Node>::all(client.clone()), watcher::Config::default())
+        .applied_objects()
+        .predicate_filter(
+            |n: &Node| {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                node_state(n).hash(&mut h);
+                Some(h.finish())
+            },
+            Default::default(),
+        )
+        .filter_map(|r| futures::future::ready(r.ok().map(|_| ())));
+    let worker_pods = Api::<Pod>::all(client.clone());
+
     let controller = Controller::new(pools, watcher::Config::default());
     let pool_store = controller.store();
     controller
         .reconcile_all_on(snapshots)
+        .reconcile_all_on(node_changes)
+        .watches(
+            worker_pods,
+            watcher::Config::default().labels(labels::POOL),
+            |p: Pod| {
+                let ns = p.namespace()?;
+                let pool = p.labels().get(labels::POOL)?.clone();
+                Some(ObjectRef::<ModelPool>::new(&pool).within(&ns))
+            },
+        )
         .owns_with(dgds, ctx.dgd.clone(), owned.clone())
         .owns(pdbs, owned)
         .watches(
@@ -137,6 +171,7 @@ async fn reconcile(pool: Arc<ModelPool>, ctx: Arc<Ctx>) -> Result<Action, Error>
         .get_opt(&pool.spec.profile_ref)
         .await?;
 
+    let drain = drain_state(client, &ns, &name).await?;
     let input = PoolInput {
         name: &name,
         namespace: &ns,
@@ -144,6 +179,7 @@ async fn reconcile(pool: Arc<ModelPool>, ctx: Arc<Ctx>) -> Result<Action, Error>
         spec: &pool.spec,
         previous: pool.status.as_ref(),
         owner,
+        drain,
     };
     let plan = plan::plan(
         &input,
@@ -204,11 +240,49 @@ async fn reconcile(pool: Arc<ModelPool>, ctx: Arc<Ctx>) -> Result<Action, Error>
     );
     let failover =
         plan.status.failover_wu_per_sec > 0.0 || plan.status.warm_spares_loaded.total > 0;
-    Ok(Action::requeue(if failover {
+    Ok(Action::requeue(if !plan.status.draining_nodes.is_empty() {
+        DRAIN_RESYNC
+    } else if failover {
         FAILOVER_RESYNC
     } else {
         RESYNC
     }))
+}
+
+fn node_state(n: &Node) -> NodeState {
+    NodeState {
+        unschedulable: n.spec.as_ref().and_then(|s| s.unschedulable) == Some(true),
+        expedite: n.annotations().get(DRAIN_ANNOTATION).map(String::as_str) == Some(EXPEDITE),
+    }
+}
+
+/// The pool's worker pods and the state of the nodes they run on.
+async fn drain_state(client: &Client, ns: &str, pool: &str) -> Result<drain::Drain, Error> {
+    let pods = Api::<Pod>::namespaced(client.clone(), ns)
+        .list(&ListParams::default().labels(&format!("{}={pool}", labels::POOL)))
+        .await?
+        .items;
+    let workers: Vec<WorkerPod> = pods
+        .iter()
+        .filter_map(|p| {
+            Some(WorkerPod {
+                node: p.spec.as_ref()?.node_name.clone()?,
+                role: Role::parse(p.labels().get(labels::ROLE)?)?,
+                terminating: p.metadata.deletion_timestamp.is_some(),
+            })
+        })
+        .collect();
+    let nodes = Api::<Node>::all(client.clone());
+    let mut states = HashMap::new();
+    for name in workers.iter().map(|w| w.node.clone()) {
+        if states.contains_key(&name) {
+            continue;
+        }
+        if let Some(node) = nodes.get_opt(&name).await? {
+            states.insert(name, node_state(&node));
+        }
+    }
+    Ok(drain::assess(&workers, &states))
 }
 
 fn error_policy(pool: Arc<ModelPool>, err: &Error, _ctx: Arc<Ctx>) -> Action {

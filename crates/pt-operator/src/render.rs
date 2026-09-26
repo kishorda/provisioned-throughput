@@ -44,6 +44,16 @@ impl Role {
         }
     }
 
+    /// The role in a worker pod's `pt.example.com/role` label. `None` for the frontend.
+    pub fn parse(s: &str) -> Option<Role> {
+        match s {
+            "aggregated" => Some(Role::Aggregated),
+            "prefill" => Some(Role::Prefill),
+            "decode" => Some(Role::Decode),
+            _ => None,
+        }
+    }
+
     fn service_name(self) -> &'static str {
         match self {
             Role::Aggregated => "Worker",

@@ -10,6 +10,7 @@ use pt_crds::profile::PerformanceProfileSpec;
 use pt_crds::{Condition, PoolAllocationSpec};
 use serde_json::Value;
 
+use crate::drain::{self, Drain};
 use crate::render::{self, PoolRef};
 use crate::sizing::{self, Demand};
 
@@ -17,6 +18,8 @@ pub const READY: &str = "Ready";
 pub const CAPACITY_SHORTFALL: &str = "CapacityShortfall";
 /// True while allocations on the pool carry failover demand (docs/07 §4).
 pub const FAILOVER_ACTIVE: &str = "FailoverActive";
+/// True while cordoned nodes host the pool's workers (docs/06 §6).
+pub const DRAINING: &str = "Draining";
 
 pub struct PoolInput<'a> {
     pub name: &'a str,
@@ -25,6 +28,8 @@ pub struct PoolInput<'a> {
     pub spec: &'a ModelPoolSpec,
     pub previous: Option<&'a ModelPoolStatus>,
     pub owner: OwnerReference,
+    /// Drains affecting the pool, from [`crate::drain::assess`].
+    pub drain: Drain,
 }
 
 pub struct Children {
@@ -98,8 +103,14 @@ pub fn plan(
         Err(e) => return blocked(status, "SizingFailed", e.to_string()),
     };
 
+    // Surge for drains: one replica per worker leaving a cordoned node. The budgets stay
+    // at floor + failure_k, so evictions wait for the surge to be ready.
+    let (desired, surge) =
+        drain::add_surge(sizing.desired, pool.drain.surge, pool.spec.max_replicas);
     status.provisioned_floor = sizing.floor;
-    status.desired_replicas = sizing.desired;
+    status.desired_replicas = desired;
+    status.drain_surge = surge;
+    status.draining_nodes = pool.drain.nodes.clone();
     status.min_available = sizing.min_available;
     status.failover_wu_per_sec = failover_extra
         .iter()
@@ -141,6 +152,7 @@ pub fn plan(
         Condition::new(FAILOVER_ACTIVE, false, "NoFailover", "")
     };
     set_condition(&mut status.conditions, failover, now);
+    set_condition(&mut status.conditions, draining(&pool.drain, surge), now);
     set_condition(
         &mut status.conditions,
         Condition::new(
@@ -151,7 +163,7 @@ pub fn plan(
                 "{} allocations, {:.0} WU/s, {} replicas.",
                 allocations.len(),
                 status.allocated_wu_per_sec,
-                sizing.desired.total
+                desired.total
             ),
         ),
         now,
@@ -163,7 +175,7 @@ pub fn plan(
         owner: pool.owner.clone(),
         spec: pool.spec,
     };
-    let mut dgd = render::dynamo_graph_deployment(&pool_ref, profile, &sizing.desired);
+    let mut dgd = render::dynamo_graph_deployment(&pool_ref, profile, &desired);
     render::annotate_warm_spares(
         &mut dgd,
         pool.spec.headroom.warm_spares,
@@ -177,6 +189,45 @@ pub fn plan(
         status,
         children: Some(children),
     }
+}
+
+fn draining(d: &Drain, surge: pt_crds::pool::RoleReplicas) -> Condition {
+    if !d.active() {
+        return Condition::new(DRAINING, false, "NoDrain", "");
+    }
+    let nodes = d.nodes.join(", ");
+    if surge.total < d.surge.total {
+        return Condition::new(
+            DRAINING,
+            true,
+            "SurgeCapped",
+            format!(
+                "Nodes {nodes} are draining. maxReplicas leaves room for {} of {} surge replicas, so evictions wait for maintenance slots and hot spares.",
+                surge.total, d.surge.total
+            ),
+        );
+    }
+    if !d.expedited.is_empty() {
+        return Condition::new(
+            DRAINING,
+            true,
+            "Expedited",
+            format!(
+                "Nodes {nodes} are draining; {} without a surge, through the maintenance slots. {} surge replicas.",
+                d.expedited.join(", "),
+                surge.total
+            ),
+        );
+    }
+    Condition::new(
+        DRAINING,
+        true,
+        "Surging",
+        format!(
+            "Nodes {nodes} are draining. {} surge replicas; evictions proceed once they're ready.",
+            surge.total
+        ),
+    )
 }
 
 /// The pool's engine must be the one the profile was calibrated on (docs/08 §5).
@@ -288,6 +339,7 @@ mod tests {
             spec,
             previous: None,
             owner: OwnerReference::default(),
+            drain: Default::default(),
         }
     }
 
@@ -420,5 +472,75 @@ mod tests {
         prof.capacity.interactive = 0.0;
         let p = plan(&input(&s), Some(&prof), &[alloc(1.0)], &[], "t1");
         assert_eq!(ready(&p.status).reason, "SizingFailed");
+    }
+
+    fn draining_pool(nodes: &[&str], surge: u32, expedited: &[&str]) -> Drain {
+        Drain {
+            surge: pt_crds::pool::RoleReplicas::aggregated(surge),
+            nodes: nodes.iter().map(|n| n.to_string()).collect(),
+            expedited: expedited.iter().map(|n| n.to_string()).collect(),
+        }
+    }
+
+    fn condition<'a>(status: &'a ModelPoolStatus, type_: &str) -> &'a Condition {
+        status.conditions.iter().find(|c| c.type_ == type_).unwrap()
+    }
+
+    #[test]
+    fn a_drain_surges_replicas_but_not_the_budget() {
+        let s = spec();
+        let mut i = input(&s);
+        i.drain = draining_pool(&["node-a"], 2, &[]);
+        let p = plan(&i, Some(&profile()), &[alloc(30_000.0)], &[], "t1");
+        // floor 3 + k 1 + maintenance 1 + surge 2.
+        assert_eq!(p.status.desired_replicas.total, 7);
+        assert_eq!(p.status.drain_surge.total, 2);
+        assert_eq!(p.status.draining_nodes, ["node-a"]);
+        let c = condition(&p.status, DRAINING);
+        assert!(c.is_true());
+        assert_eq!(c.reason, "Surging");
+        let children = p.children.unwrap();
+        assert_eq!(children.dgd["spec"]["services"]["Worker"]["replicas"], 7);
+        // The budget still protects floor + k, so evictions wait for the surge.
+        let pdb = children.pdbs[0].spec.as_ref().unwrap();
+        assert_eq!(
+            pdb.min_available,
+            Some(k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(4))
+        );
+        assert_eq!(p.status.min_available.total, 4);
+
+        // Drained: the surge goes away.
+        let mut i = input(&s);
+        let prev = p.status.clone();
+        i.previous = Some(&prev);
+        let p = plan(&i, Some(&profile()), &[alloc(30_000.0)], &[], "t2");
+        assert_eq!(p.status.desired_replicas.total, 5);
+        assert_eq!(p.status.drain_surge.total, 0);
+        assert!(p.status.draining_nodes.is_empty());
+        assert!(!condition(&p.status, DRAINING).is_true());
+    }
+
+    #[test]
+    fn max_replicas_caps_the_surge_and_says_so() {
+        let mut s = spec();
+        s.max_replicas = Some(6);
+        let mut i = input(&s);
+        i.drain = draining_pool(&["node-a", "node-b"], 3, &[]);
+        let p = plan(&i, Some(&profile()), &[alloc(30_000.0)], &[], "t1");
+        assert_eq!(p.status.desired_replicas.total, 6);
+        assert_eq!(p.status.drain_surge.total, 1);
+        let c = condition(&p.status, DRAINING);
+        assert_eq!(c.reason, "SurgeCapped");
+        assert!(c.message.contains("1 of 3"), "{}", c.message);
+    }
+
+    #[test]
+    fn an_expedited_drain_uses_the_maintenance_slot() {
+        let s = spec();
+        let mut i = input(&s);
+        i.drain = draining_pool(&["node-a"], 0, &["node-a"]);
+        let p = plan(&i, Some(&profile()), &[alloc(30_000.0)], &[], "t1");
+        assert_eq!(p.status.desired_replicas.total, 5, "no surge");
+        assert_eq!(condition(&p.status, DRAINING).reason, "Expedited");
     }
 }

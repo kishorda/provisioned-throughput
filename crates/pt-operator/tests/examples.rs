@@ -27,6 +27,7 @@ fn example_pool_sizes_and_renders() {
         spec: &pool.spec,
         previous: None,
         owner: OwnerReference::default(),
+        drain: Default::default(),
     };
     let p = plan(
         &input,

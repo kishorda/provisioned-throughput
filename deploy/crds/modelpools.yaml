@@ -248,6 +248,43 @@ spec:
                     minimum: 0.0
                     type: integer
                 type: object
+              drainSurge:
+                default:
+                  aggregated: 0
+                  decode: 0
+                  prefill: 0
+                  total: 0
+                description: |-
+                  Extra replicas added while nodes hosting this pool's workers drain, one per worker
+                  pod on a cordoned node (docs/06 §6). Included in `desiredReplicas`.
+                properties:
+                  aggregated:
+                    default: 0
+                    description: Aggregated workers. Zero for disaggregated pools.
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  decode:
+                    default: 0
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  prefill:
+                    default: 0
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  total:
+                    default: 0
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                type: object
+              drainingNodes:
+                description: Cordoned nodes that still host this pool's workers.
+                items:
+                  type: string
+                type: array
               failoverWuPerSec:
                 default: 0.0
                 description: Extra demand from active failover entitlements (docs/07 §4).

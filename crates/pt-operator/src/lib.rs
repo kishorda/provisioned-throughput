@@ -13,6 +13,7 @@
 //! and loads warm spares for active failover demand (docs/07 §4, [`failover`]).
 
 pub mod controller;
+pub mod drain;
 pub mod failover;
 pub mod leader;
 pub mod plan;
