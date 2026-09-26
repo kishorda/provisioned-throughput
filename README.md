@@ -319,8 +319,9 @@ Follow-ups from the roadmap in docs/11, grouped by what they need.
   aren't counted (ADR-028).
 - **Prefix-cache index from Dynamo KV events.** The gateway predicts cache hits from its own
   history (ADR-030). It doesn't see evictions or other replicas' traffic.
-- **Capacity planning by tier.** The shared planner counts CUs per region and model,
-  whatever the tier.
+- **Capacity placement across pools.** The planner counts each region's pool in replicas
+  and costs each CU by its tier (ADR-031), but a region is one pool per model, and there
+  are no lead times ("yes, from date D").
 - **Signing in a KMS.** The snapshot signing key is read from configuration.
 - **Separate listeners.** With `[server.tls] client_ca`, the customer API also requires
   client certificates, because it shares a listener with internal traffic (ADR-022).

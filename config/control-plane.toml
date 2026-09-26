@@ -127,33 +127,36 @@ display_name = "Qwen3 32B"
 max_context = 32768
 tiers = ["interactive", "standard"]
 
-# Sellable CUs per region and model. eu-central has no disaggregated pools for Maverick,
-# so it serves shorter contexts.
+# Sellable replicas per region and model: what provisioned floors may use, before the
+# operator's failure-domain and maintenance headroom (ADR-031). A CU draws a different
+# share of a replica at each tier, from the pool's profile: 8 B200 replicas hold 227
+# Agentic CUs, 262 Interactive, or 371 Standard. eu-central has no disaggregated pools for
+# Maverick, so it serves shorter contexts.
 [[capacity]]
 region = "eu-west"
 model = "llama-4-maverick"
-cus = 200
+replicas = 8
 max_context = 131072
 profile = "llama-4-maverick.b200.trtllm-1.2.tp8"
 
 [[capacity]]
 region = "eu-central"
 model = "llama-4-maverick"
-cus = 100
+replicas = 6            # 100 Agentic CUs
 max_context = 32768
 profile = "llama-4-maverick.h200.vllm-0.11.tp8"
 
 [[capacity]]
 region = "us-east"
 model = "llama-4-maverick"
-cus = 300
+replicas = 11           # 312 Agentic CUs
 max_context = 131072
 profile = "llama-4-maverick.b200.trtllm-1.2.tp8"
 
 [[capacity]]
 region = "us-east"
 model = "qwen3-32b"
-cus = 100
+replicas = 5            # 119 Interactive or 168 Standard CUs
 max_context = 32768
 profile = "qwen3-32b.h200.vllm-0.11.tp2"
 

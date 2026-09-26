@@ -10,7 +10,7 @@
 //! - The lifecycle loop activates, renews (applying scheduled changes), and ends reservations.
 
 use jiff::{SignedDuration, Span, Timestamp};
-use pt_core::Shape;
+use pt_core::{Shape, Tier};
 pub use pt_entitlement::sha256_hex;
 use pt_entitlement::{
     DeploymentEntitlement, FailoverShare, PreviousKey, RegionFailover, ReservationEntitlement,
@@ -27,7 +27,7 @@ use crate::model::{
     RegionIncident, RegionShare, ResolveIncident, RotateKeyRequest, Sku, State,
     UpdateDeploymentRequest, UpdateRequest,
 };
-use crate::planner::{CapacityPlanner, PlanError};
+use crate::planner::{CapacityPlanner, Held, PlanError};
 use crate::pricing;
 use crate::store::{IdempotencyRecord, Store, StoreError};
 use crate::validate;
@@ -181,9 +181,11 @@ pub struct LifecycleReport {
 }
 
 /// Capacity operations done during one request, so they can be undone if the write fails.
+/// A planner call made while applying a change, so a failed write can undo it. Capacity
+/// is reserved and released at a tier, which fixes what it costs (ADR-031).
 enum PlanOp {
-    Reserved(Vec<RegionShare>),
-    Released(Vec<RegionShare>),
+    Reserved(Tier, Vec<RegionShare>),
+    Released(Tier, Vec<RegionShare>),
 }
 
 pub struct Service<S, P, C> {
@@ -192,6 +194,8 @@ pub struct Service<S, P, C> {
     pub clock: C,
     pub config: ControlPlaneConfig,
     signer: SnapshotSigner,
+    /// What a CU costs each pool, per tier.
+    costs: crate::capacity::Costs,
     /// The latest entitlement version this instance knows of. The shared counter is in the
     /// store; this copy wakes snapshot long-polls, and [`Self::sync_version`] keeps it
     /// current with other instances' changes (ADR-023).
@@ -209,6 +213,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
             store,
             planner,
             clock,
+            costs: crate::capacity::Costs::from_config(&config),
             config,
             signer,
             changes,
@@ -241,15 +246,14 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
     /// Correct the planner's reserved counts from live reservations (see
     /// [`CapacityPlanner::reconcile`]). Run by the leader.
     pub async fn reconcile_capacity(&self) -> Result<Vec<crate::planner::Drift>, ServiceError> {
-        let mut expected: std::collections::HashMap<(String, String), u32> = Default::default();
-        for pt in self.store.list_live().await? {
-            for share in held(&pt) {
-                *expected
-                    .entry((share.region, pt.model.clone()))
-                    .or_default() += share.cus;
-            }
-        }
+        let live: Vec<Held> = self.store.list_live().await?.iter().map(holding).collect();
+        let expected = crate::planner::expected_micro(&self.costs, &live);
         Ok(self.planner.reconcile(&expected).await?)
+    }
+
+    /// What a CU costs each pool, per tier (ADR-031).
+    pub fn costs(&self) -> &crate::capacity::Costs {
+        &self.costs
     }
 
     pub fn signer(&self) -> &SnapshotSigner {
@@ -260,9 +264,8 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
     /// before serving. Returns how many reservations were restored.
     pub async fn restore_capacity(&self) -> Result<usize, StoreError> {
         let live = self.store.list_live().await?;
-        for pt in &live {
-            self.planner.restore(&pt.model, &held(pt)).await;
-        }
+        let held: Vec<Held> = live.iter().map(holding).collect();
+        self.planner.restore(&held).await;
         if !live.is_empty() {
             tracing::info!(reservations = live.len(), "restored reserved capacity");
         }
@@ -467,7 +470,12 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
 
         let headroom = failover::headroom(&self.config, req.sku, &req.regions);
         self.planner
-            .reserve(&req.model, &footprint(&req.regions, &headroom), &req.shape)
+            .reserve(
+                &req.model,
+                req.tier,
+                &footprint(&req.regions, &headroom),
+                &req.shape,
+            )
             .await?;
 
         let suffix = uuid::Uuid::new_v4().simple().to_string();
@@ -533,7 +541,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         };
 
         if let Err(e) = self.store.insert(pt.clone()).await {
-            self.planner.release(&pt.model, &held(&pt)).await;
+            self.planner.release(&pt.model, pt.tier, &held(&pt)).await;
             return Err(match e {
                 // A concurrent create took the name (the store's live-name index).
                 StoreError::AlreadyExists(_) => conflict(
@@ -712,7 +720,17 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
 
         if let Some(tier) = req.tier {
             if not_started {
-                pt.tier = tier;
+                if tier != pt.tier {
+                    // A CU costs a different amount at another tier: hold the new amount.
+                    let current = held(pt);
+                    self.planner.release(&pt.model, pt.tier, &current).await;
+                    ops.push(PlanOp::Released(pt.tier, current.clone()));
+                    self.planner
+                        .reserve(&pt.model, tier, &current, &shape)
+                        .await?;
+                    ops.push(PlanOp::Reserved(tier, current));
+                    pt.tier = tier;
+                }
             } else if tier != pt.tier {
                 schedule_tier = Some(Some(tier));
             } else {
@@ -726,10 +744,12 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                     let before = held(pt);
                     let headroom = failover::headroom(&self.config, pt.sku, new);
                     let after = footprint(new, &headroom);
-                    self.planner.release(&pt.model, &before).await;
-                    ops.push(PlanOp::Released(before));
-                    self.planner.reserve(&pt.model, &after, &shape).await?;
-                    ops.push(PlanOp::Reserved(after));
+                    self.planner.release(&pt.model, pt.tier, &before).await;
+                    ops.push(PlanOp::Released(pt.tier, before));
+                    self.planner
+                        .reserve(&pt.model, pt.tier, &after, &shape)
+                        .await?;
+                    ops.push(PlanOp::Reserved(pt.tier, after));
                     pt.regions = new.clone();
                     pt.effective_regions.clear();
                     pt.failover_headroom = headroom;
@@ -873,7 +893,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         pt.updated_at = now;
         self.store.update(pt.clone(), expected).await?;
         if effect == DeleteEffect::CancelledNow {
-            self.planner.release(&pt.model, &held(&pt)).await;
+            self.planner.release(&pt.model, pt.tier, &held(&pt)).await;
         }
         self.bump().await;
         tracing::info!(id = %pt.id, %tenant, ?effect, "provisioned throughput deleted");
@@ -1609,8 +1629,8 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                     report.renewed += 1;
                 } else {
                     let before = held(&pt);
-                    self.planner.release(&pt.model, &before).await;
-                    ops.push(PlanOp::Released(before));
+                    self.planner.release(&pt.model, pt.tier, &before).await;
+                    ops.push(PlanOp::Released(pt.tier, before));
                     pt.state = State::Ended;
                     pt.pending_changes = None;
                     pt.events.push(Event {
@@ -1646,18 +1666,25 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                 let before = held(pt);
                 let headroom = failover::headroom(&self.config, pt.sku, &new);
                 let after = footprint(&new, &headroom);
-                self.planner.release(&pt.model, &before).await;
-                match self.planner.reserve(&pt.model, &after, &pt.shape).await {
+                self.planner.release(&pt.model, pt.tier, &before).await;
+                match self
+                    .planner
+                    .reserve(&pt.model, pt.tier, &after, &pt.shape)
+                    .await
+                {
                     Ok(()) => {
-                        ops.push(PlanOp::Released(before));
-                        ops.push(PlanOp::Reserved(after));
+                        ops.push(PlanOp::Released(pt.tier, before));
+                        ops.push(PlanOp::Reserved(pt.tier, after));
                         pt.regions = new;
                         pt.effective_regions.clear();
                         pt.failover_headroom = headroom;
                     }
                     Err(e) => {
                         // Put the current capacity back and renew unchanged.
-                        let _ = self.planner.reserve(&pt.model, &before, &pt.shape).await;
+                        let _ = self
+                            .planner
+                            .reserve(&pt.model, pt.tier, &before, &pt.shape)
+                            .await;
                         pt.events.push(Event {
                             at: now,
                             kind: EventKind::ScheduledChangeFailed {
@@ -1667,8 +1694,34 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                     }
                 }
             }
-            if let Some(t) = pending.tier {
-                pt.tier = t;
+            if let Some(t) = pending.tier.filter(|t| *t != pt.tier) {
+                // The same shares cost a different amount at the new tier.
+                let current = held(pt);
+                self.planner.release(&pt.model, pt.tier, &current).await;
+                match self
+                    .planner
+                    .reserve(&pt.model, t, &current, &pt.shape)
+                    .await
+                {
+                    Ok(()) => {
+                        ops.push(PlanOp::Released(pt.tier, current.clone()));
+                        ops.push(PlanOp::Reserved(t, current));
+                        pt.tier = t;
+                    }
+                    Err(e) => {
+                        // Keep the current tier for another term.
+                        let _ = self
+                            .planner
+                            .reserve(&pt.model, pt.tier, &current, &pt.shape)
+                            .await;
+                        pt.events.push(Event {
+                            at: now,
+                            kind: EventKind::ScheduledChangeFailed {
+                                reason: e.to_string(),
+                            },
+                        });
+                    }
+                }
             }
             let monthly = self
                 .price(&pt.tier, pt.isolation, pt.sku, total_cus(&pt.regions))
@@ -1709,13 +1762,15 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         let before = held(pt);
         let grow = growth(&before, target);
         if !grow.is_empty() {
-            self.planner.reserve(&pt.model, &grow, shape).await?;
-            ops.push(PlanOp::Reserved(grow));
+            self.planner
+                .reserve(&pt.model, pt.tier, &grow, shape)
+                .await?;
+            ops.push(PlanOp::Reserved(pt.tier, grow));
         }
         let shrink = growth(target, &before);
         if !shrink.is_empty() {
-            self.planner.release(&pt.model, &shrink).await;
-            ops.push(PlanOp::Released(shrink));
+            self.planner.release(&pt.model, pt.tier, &shrink).await;
+            ops.push(PlanOp::Released(pt.tier, shrink));
         }
         Ok(())
     }
@@ -1723,9 +1778,9 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
     async fn undo(&self, model: &str, shape: &Shape, ops: Vec<PlanOp>) {
         for op in ops.into_iter().rev() {
             match op {
-                PlanOp::Reserved(shares) => self.planner.release(model, &shares).await,
-                PlanOp::Released(shares) => {
-                    if let Err(e) = self.planner.reserve(model, &shares, shape).await {
+                PlanOp::Reserved(tier, shares) => self.planner.release(model, tier, &shares).await,
+                PlanOp::Released(tier, shares) => {
+                    if let Err(e) = self.planner.reserve(model, tier, &shares, shape).await {
                         tracing::error!(error = %e, "failed to restore capacity during rollback");
                     }
                 }
@@ -1790,6 +1845,15 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
 
 /// Everything a reservation holds from the planner: its effective shares (the contract,
 /// or where rebalancing moved them) and its failover headroom.
+/// What `pt` holds from the planner, with the tier that costs it.
+fn holding(pt: &ProvisionedThroughput) -> Held {
+    Held {
+        model: pt.model.clone(),
+        tier: pt.tier,
+        shares: held(pt),
+    }
+}
+
 pub(crate) fn held(pt: &ProvisionedThroughput) -> Vec<RegionShare> {
     footprint(pt.effective(), &pt.failover_headroom)
 }

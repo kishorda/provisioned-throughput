@@ -89,6 +89,7 @@ The design rests on six decisions:
 | [028](adr/ADR-028-input-token-counting.md) | Count input tokens with the model's tokenizer, cached per message, within a byte budget |
 | [029](adr/ADR-029-controller-leader-election.md) | Active/standby capacity controller on a Kubernetes Lease, sharing ADR-027's election |
 | [030](adr/ADR-030-gateway-prefix-cache-index.md) | Estimate cache hits from the gateway's own prefix history, per reservation, at a learned hit rate |
+| [031](adr/ADR-031-capacity-in-replicas-per-tier.md) | Count sellable capacity in replicas, and cost each CU by its tier |
 
 ## Glossary
 

@@ -90,7 +90,7 @@ async fn shape_quote_sizes_prices_and_translates() {
     assert_eq!(q["slo"]["ttft_p95_ms"], 500.0);
     assert_eq!(q["slo"]["tpot_p95_ms"], 30.0);
     assert_eq!(q["feasible"], true);
-    assert_eq!(q["available_cus"], 200);
+    assert_eq!(q["available_cus"], 227);
     assert_eq!(v["recommendation"]["cus"], 22);
 }
 
@@ -116,6 +116,19 @@ async fn defaults_cover_every_region_and_tier() {
     assert!(
         notes.iter().any(|n| n.as_str().unwrap().contains("32768")),
         "{notes:?}"
+    );
+    // The same eight eu-west replicas hold more CUs at a looser tier (ADR-031).
+    let west = |tier: &str| {
+        quotes
+            .iter()
+            .find(|q| q["region"] == "eu-west" && q["tier"] == tier)
+            .unwrap()["available_cus"]
+            .as_u64()
+            .unwrap()
+    };
+    assert_eq!(
+        (west("agentic"), west("interactive"), west("standard")),
+        (227, 262, 371)
     );
     // Standard is the cheapest tier; eu-west comes first among equal prices.
     assert_eq!(v["recommendation"]["tier"], "standard");
@@ -215,7 +228,7 @@ async fn reservation_history_becomes_a_resize_recommendation() {
     // 5,000 ÷ 800 → 7 CUs.
     assert_eq!(q["recommended_cus"], 7);
     // Current CUs count towards what's available for this reservation.
-    assert_eq!(q["available_cus"], 200);
+    assert_eq!(q["available_cus"], 227);
     assert_eq!(v["recommendation"]["cus"], 7);
     assert!(v["recommendation"]["summary"]
         .as_str()

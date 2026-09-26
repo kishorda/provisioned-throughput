@@ -3,6 +3,7 @@
 
 mod common;
 
+use pt_core::Tier;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -21,6 +22,9 @@ use pt_control_plane::{with_sql, Service};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
 type Svc = Arc<Service<SqlStore, SqlPlanner, ManualClock>>;
+
+/// Micro-replicas an Agentic CU draws from the eu-west B200 pool (ADR-031).
+const AGENTIC_CU: u64 = 35_212;
 
 async fn store(name: &str) -> Option<SqlStore> {
     let Ok(url) = std::env::var("PT_TEST_DATABASE_URL") else {
@@ -82,11 +86,17 @@ async fn instances_cannot_oversell_together() {
     ));
     // Both instances see the same counters.
     assert_eq!(
-        a.planner.available("eu-central", MAVERICK).await.unwrap(),
+        a.planner
+            .available("eu-central", MAVERICK, Tier::Agentic)
+            .await
+            .unwrap(),
         Some(40)
     );
     assert_eq!(
-        b.planner.available("eu-central", MAVERICK).await.unwrap(),
+        b.planner
+            .available("eu-central", MAVERICK, Tier::Agentic)
+            .await
+            .unwrap(),
         Some(40)
     );
 }
@@ -192,12 +202,20 @@ async fn reconcile_repairs_a_leak_but_never_an_in_flight_sale() {
         .unwrap();
     // An instance reserved capacity, then died before saving the reservation.
     a.planner
-        .reserve(MAVERICK, &shares(&[("eu-west", 3)]), &shape(32_768))
+        .reserve(
+            MAVERICK,
+            Tier::Agentic,
+            &shares(&[("eu-west", 3)]),
+            &shape(32_768),
+        )
         .await
         .unwrap();
     assert_eq!(
-        a.planner.available("eu-west", MAVERICK).await.unwrap(),
-        Some(193)
+        a.planner
+            .available("eu-west", MAVERICK, Tier::Agentic)
+            .await
+            .unwrap(),
+        Some(220)
     );
 
     // First run: seen, not corrected (it could be a sale in flight).
@@ -205,24 +223,35 @@ async fn reconcile_repairs_a_leak_but_never_an_in_flight_sale() {
     assert_eq!(drift.len(), 1);
     assert_eq!(
         (drift[0].reserved, drift[0].expected, drift[0].corrected),
-        (7, 4, false)
+        (7 * AGENTIC_CU, 4 * AGENTIC_CU, false)
     );
     assert_eq!(
-        a.planner.available("eu-west", MAVERICK).await.unwrap(),
-        Some(193)
+        a.planner
+            .available("eu-west", MAVERICK, Tier::Agentic)
+            .await
+            .unwrap(),
+        Some(220)
     );
     // Second run, same drift: corrected.
     let drift = b.reconcile_capacity().await.unwrap();
     assert!(drift[0].corrected);
     assert_eq!(
-        a.planner.available("eu-west", MAVERICK).await.unwrap(),
-        Some(196)
+        a.planner
+            .available("eu-west", MAVERICK, Tier::Agentic)
+            .await
+            .unwrap(),
+        Some(223)
     );
     assert!(b.reconcile_capacity().await.unwrap().is_empty());
 
     // A sale in flight between runs changes the drift, so it isn't undone.
     a.planner
-        .reserve(MAVERICK, &shares(&[("eu-west", 2)]), &shape(32_768))
+        .reserve(
+            MAVERICK,
+            Tier::Agentic,
+            &shares(&[("eu-west", 2)]),
+            &shape(32_768),
+        )
         .await
         .unwrap();
     assert!(!b.reconcile_capacity().await.unwrap()[0].corrected);
@@ -230,9 +259,69 @@ async fn reconcile_repairs_a_leak_but_never_an_in_flight_sale() {
         .await
         .unwrap(); // this reserves 2 more; the stray 2 above stays a leak
     let drift = b.reconcile_capacity().await.unwrap();
-    assert_eq!((drift[0].reserved, drift[0].expected), (8, 6));
+    assert_eq!(
+        (drift[0].reserved, drift[0].expected),
+        (8 * AGENTIC_CU, 6 * AGENTIC_CU)
+    );
     assert!(
         !drift[0].corrected,
         "the drift changed, so it's judged afresh"
+    );
+}
+
+#[tokio::test]
+async fn pools_are_counted_in_replicas_once_after_the_upgrade() {
+    let Some(db) = store("upgrade").await else {
+        return;
+    };
+    let clock = ManualClock::new(t0());
+    let a = with_sql(config(), db.clone(), clock.clone()).await.unwrap();
+    a.create(ACME, None, request("agents", &[("eu-west", 10)]))
+        .await
+        .unwrap();
+    let mut batch = request("batch", &[("eu-west", 20)]);
+    batch.tier = Tier::Standard;
+    a.create(ACME, None, batch).await.unwrap();
+    let counted = 8_000_000 - 10 * AGENTIC_CU - 20 * 21_552;
+    assert_eq!(
+        a.planner
+            .available_micro("eu-west", MAVERICK)
+            .await
+            .unwrap(),
+        Some(counted)
+    );
+
+    // The state right after migration 0005: nothing counted in replicas yet.
+    sqlx::query("UPDATE capacity_pools SET reserved_micro = 0, micro_counted = false")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    // Two upgraded instances start at once. Each pool is counted exactly once.
+    let (b, c) = tokio::join!(
+        with_sql(config(), db.clone(), clock.clone()),
+        with_sql(config(), db.clone(), clock.clone()),
+    );
+    let (b, _c) = (b.unwrap(), c.unwrap());
+    assert_eq!(
+        b.planner
+            .available_micro("eu-west", MAVERICK)
+            .await
+            .unwrap(),
+        Some(counted)
+    );
+    let uncounted: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM capacity_pools WHERE NOT micro_counted")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(uncounted, 0);
+    // A later restart doesn't count again.
+    let d = with_sql(config(), db.clone(), clock).await.unwrap();
+    assert_eq!(
+        d.planner
+            .available_micro("eu-west", MAVERICK)
+            .await
+            .unwrap(),
+        Some(counted)
     );
 }

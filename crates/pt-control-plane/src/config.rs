@@ -367,16 +367,18 @@ pub struct ModelConfig {
     pub tiers: Vec<Tier>,
 }
 
-/// Sellable CUs for a model in a region.
+/// A model's sellable capacity in a region, in replicas (ADR-031).
 ///
-/// Simplification: capacity is counted in CUs regardless of tier. The real Capacity Planner
-/// converts CUs to replicas per tier and pool (docs/06 §2).
+/// A CU at each tier draws a different number of replicas, from the pool's profile
+/// ([`crate::capacity::Costs`]).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapacityConfig {
     pub region: String,
     pub model: String,
-    pub cus: u32,
+    /// Replicas that provisioned floors may use: the pool's size less failure-domain and
+    /// maintenance headroom, which the operator adds on top (docs/06 §2).
+    pub replicas: u32,
     /// Longest context the region's pools for this model can serve. Pools without
     /// disaggregation typically serve less than the model's maximum.
     pub max_context: u64,
@@ -518,6 +520,20 @@ impl ControlPlaneConfig {
                 return invalid(format!(
                     "capacity in {} but no [[regions]] entry for it",
                     c.region
+                ));
+            }
+            // Every tier the model offers needs a capacity, or its CUs can't be costed.
+            let (Some(profile), Some(m)) = (self.profile(&c.profile), self.model(&c.model)) else {
+                continue;
+            };
+            if let Some(t) = m
+                .tiers
+                .iter()
+                .find(|t| profile.capacity_wu_per_s.for_tier(**t) <= 0.0)
+            {
+                return invalid(format!(
+                    "profile {} has no {t} capacity, but {} is offered at {t} in {}",
+                    c.profile, c.model, c.region
                 ));
             }
         }

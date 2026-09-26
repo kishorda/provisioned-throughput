@@ -22,7 +22,9 @@ fn setup() -> (Svc, ManualClock) {
 }
 
 fn available(svc: &Svc, region: &str) -> u32 {
-    svc.planner.available(region, MAVERICK).unwrap()
+    svc.planner
+        .available(region, MAVERICK, Tier::Agentic)
+        .unwrap()
 }
 
 fn days(n: i64) -> SignedDuration {
@@ -50,8 +52,8 @@ async fn create_reserves_capacity_and_starts_the_term() {
     assert_eq!(pt.price.per_cu_monthly, BASE * 3 / 2);
     assert_eq!(pt.price.monthly, 15 * BASE * 3 / 2);
     assert_eq!(pt.endpoints[0].url, "https://eu-west.pt.example.com/v1");
-    assert_eq!(available(&svc, "eu-west"), 190);
-    assert_eq!(available(&svc, "us-east"), 295);
+    assert_eq!(available(&svc, "eu-west"), 217);
+    assert_eq!(available(&svc, "us-east"), 307);
 
     let key = out.api_key.unwrap();
     assert!(key.starts_with("ptk_"));
@@ -76,7 +78,7 @@ async fn failed_create_reserves_nothing() {
         err,
         ServiceError::Capacity(PlanError::CapacityUnavailable { requested: 400, .. })
     ));
-    assert_eq!(available(&svc, "eu-west"), 200);
+    assert_eq!(available(&svc, "eu-west"), 227);
     assert!(svc.list(ACME, None, true).await.unwrap().is_empty());
 }
 
@@ -181,7 +183,7 @@ async fn idempotent_create() {
     assert!(b.replayed);
     assert!(b.api_key.is_none());
     assert_eq!(a.resource.id, b.resource.id);
-    assert_eq!(available(&svc, "eu-west"), 190);
+    assert_eq!(available(&svc, "eu-west"), 217);
 
     let err = svc
         .create(ACME, Some("k1"), request("agents", &[("eu-west", 11)]))
@@ -217,7 +219,7 @@ async fn increase_applies_now_with_a_prorated_charge() {
         .unwrap();
     assert_eq!(pt.cus, 14);
     assert_eq!(pt.version, 2);
-    assert_eq!(available(&svc, "eu-west"), 186);
+    assert_eq!(available(&svc, "eu-west"), 213);
     let charge = pt
         .events
         .iter()
@@ -253,7 +255,7 @@ async fn increase_without_capacity_changes_nothing() {
         ServiceError::Capacity(PlanError::CapacityUnavailable { .. })
     ));
     assert_eq!(svc.get(ACME, &pt.id).await.unwrap(), pt);
-    assert_eq!(available(&svc, "eu-west"), 50);
+    assert_eq!(available(&svc, "eu-west"), 77);
 }
 
 #[tokio::test]
@@ -276,7 +278,7 @@ async fn decrease_and_region_change_wait_for_renewal() {
     let pending = pt.pending_changes.clone().unwrap();
     assert_eq!(pending.effective_at, pt.term_end);
     assert_eq!(pending.tier, Some(Tier::Standard));
-    assert_eq!(available(&svc, "eu-west"), 190);
+    assert_eq!(available(&svc, "eu-west"), 217);
 
     clock.set(pt.term_end);
     let report = svc.run_lifecycle().await;
@@ -288,8 +290,10 @@ async fn decrease_and_region_change_wait_for_renewal() {
     assert_eq!(pt.price.monthly, 6 * BASE);
     assert_eq!(pt.term_end.to_string(), "2026-12-01T00:00:00Z");
     assert!(pt.pending_changes.is_none());
-    assert_eq!(available(&svc, "eu-west"), 196);
-    assert_eq!(available(&svc, "us-east"), 298);
+    // Now 4 and 2 Standard CUs, which draw less of a replica than Agentic ones (ADR-031):
+    // eu-west has 8 replicas − 4 × 0.0216, which is 224 Agentic CUs, not 227 − 4.
+    assert_eq!(available(&svc, "eu-west"), 224);
+    assert_eq!(available(&svc, "us-east"), 311);
 }
 
 #[tokio::test]
@@ -318,7 +322,7 @@ async fn scheduled_change_that_no_longer_fits_renews_unchanged() {
         .events
         .iter()
         .any(|e| matches!(e.kind, EventKind::ScheduledChangeFailed { .. })));
-    assert_eq!(available(&svc, "eu-west"), 190);
+    assert_eq!(available(&svc, "eu-west"), 217);
 }
 
 #[tokio::test]
@@ -336,7 +340,7 @@ async fn delete_mid_term_ends_at_term_end() {
     assert!(!pt.auto_renew);
     assert_eq!(
         available(&svc, "eu-west"),
-        190,
+        217,
         "still serving until term end"
     );
 
@@ -364,7 +368,7 @@ async fn delete_mid_term_ends_at_term_end() {
     assert_eq!(svc.run_lifecycle().await.ended, 1);
     let pt = svc.get(ACME, &pt.id).await.unwrap();
     assert_eq!(pt.state, State::Ended);
-    assert_eq!(available(&svc, "eu-west"), 200);
+    assert_eq!(available(&svc, "eu-west"), 227);
     assert!(svc.list(ACME, None, false).await.unwrap().is_empty());
     assert_eq!(svc.list(ACME, None, true).await.unwrap().len(), 1);
 
@@ -438,12 +442,12 @@ async fn before_the_term_starts_changes_apply_now_and_delete_cancels() {
     let pt = svc.update(ACME, &pt.id, None, upd).await.unwrap();
     assert_eq!(pt.cus, 3);
     assert!(pt.pending_changes.is_none());
-    assert_eq!(available(&svc, "eu-west"), 197);
+    assert_eq!(available(&svc, "eu-west"), 224);
 
     let (pt, effect) = svc.delete(ACME, &pt.id, None).await.unwrap();
     assert_eq!(effect, DeleteEffect::CancelledNow);
     assert_eq!(pt.state, State::Cancelled);
-    assert_eq!(available(&svc, "eu-west"), 200);
+    assert_eq!(available(&svc, "eu-west"), 227);
 
     // A second scheduled reservation activates when its start arrives.
     let mut req = request("later2", &[("eu-west", 1)]);
@@ -519,4 +523,128 @@ async fn missed_renewals_catch_up() {
     let pt = svc.get(ACME, &pt.id).await.unwrap();
     assert_eq!(pt.term_start.to_string(), "2027-01-01T00:00:00Z");
     assert_eq!(pt.term_end.to_string(), "2027-02-01T00:00:00Z");
+}
+
+fn micro_free(svc: &Svc, region: &str) -> u64 {
+    svc.planner.available_micro(region, MAVERICK).unwrap()
+}
+
+fn at(tier: Tier, name: &str, cus: u32) -> pt_control_plane::model::CreateRequest {
+    let mut r = request(name, &[("eu-west", cus)]);
+    r.tier = tier;
+    r
+}
+
+/// eu-west has 8 B200 replicas: 371 Standard CUs or 227 Agentic ones (ADR-031).
+#[tokio::test]
+async fn each_tier_draws_its_own_share_of_the_pool() {
+    let (svc, _) = setup();
+    svc.create(ACME, None, at(Tier::Standard, "batch", 200))
+        .await
+        .unwrap();
+    // 200 Standard CUs leave room for 104 Agentic CUs, not the 27 that counting CUs alike
+    // would allow, nor the 171 that would oversell.
+    assert_eq!(available(&svc, "eu-west"), 104);
+    let err = svc
+        .create(ACME, None, at(Tier::Agentic, "agents", 105))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ServiceError::Capacity(PlanError::CapacityUnavailable {
+            tier: Tier::Agentic,
+            available: 104,
+            ..
+        })
+    ));
+    svc.create(ACME, None, at(Tier::Agentic, "agents", 104))
+        .await
+        .unwrap();
+    assert_eq!(available(&svc, "eu-west"), 0);
+}
+
+#[tokio::test]
+async fn a_tier_change_before_the_start_moves_capacity_or_fails_cleanly() {
+    let (svc, _) = setup();
+    let mut req = at(Tier::Agentic, "later", 100);
+    req.start_at = Some(t0() + days(7));
+    let pt = svc.create(ACME, None, req).await.unwrap().resource;
+    assert_eq!(available(&svc, "eu-west"), 127);
+
+    // Not started, so the change applies now, and holds the Standard amount instead.
+    let to = |tier| UpdateRequest {
+        tier: Some(tier),
+        ..Default::default()
+    };
+    let pt = svc
+        .update(ACME, &pt.id, None, to(Tier::Standard))
+        .await
+        .unwrap();
+    assert_eq!(pt.tier, Tier::Standard);
+    assert_eq!(micro_free(&svc, "eu-west"), 8_000_000 - 100 * 21_552);
+
+    // Fill most of the rest, so moving back to Agentic no longer fits.
+    svc.create(ACME, None, at(Tier::Standard, "fill", 250))
+        .await
+        .unwrap();
+    let before = micro_free(&svc, "eu-west");
+    let err = svc
+        .update(ACME, &pt.id, None, to(Tier::Agentic))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ServiceError::Capacity(PlanError::CapacityUnavailable { .. })
+    ));
+    assert_eq!(svc.get(ACME, &pt.id).await.unwrap().tier, Tier::Standard);
+    assert_eq!(micro_free(&svc, "eu-west"), before, "nothing leaked");
+}
+
+#[tokio::test]
+async fn a_scheduled_tier_change_that_no_longer_fits_keeps_the_tier() {
+    let (svc, clock) = setup();
+    let pt = svc
+        .create(ACME, None, at(Tier::Standard, "batch", 100))
+        .await
+        .unwrap()
+        .resource;
+    let upd = UpdateRequest {
+        tier: Some(Tier::Agentic),
+        ..Default::default()
+    };
+    let pt = svc.update(ACME, &pt.id, None, upd).await.unwrap();
+    assert_eq!(
+        pt.pending_changes.as_ref().unwrap().tier,
+        Some(Tier::Agentic)
+    );
+    // Someone else buys most of the pool before renewal.
+    svc.create(ACME, None, at(Tier::Standard, "fill", 250))
+        .await
+        .unwrap();
+    let before = micro_free(&svc, "eu-west");
+
+    clock.set(pt.term_end);
+    svc.run_lifecycle().await;
+    let pt = svc.get(ACME, &pt.id).await.unwrap();
+    assert_eq!(pt.tier, Tier::Standard, "renewed at the tier that fits");
+    assert!(pt
+        .events
+        .iter()
+        .any(|e| matches!(e.kind, EventKind::ScheduledChangeFailed { .. })));
+    assert_eq!(micro_free(&svc, "eu-west"), before);
+}
+
+#[test]
+fn a_pool_must_cost_every_tier_its_model_offers() {
+    let mut c = config();
+    // Maverick is sold at Interactive; a profile with no Interactive capacity can't cost it.
+    let profile = c.capacity[0].profile.clone();
+    c.profiles
+        .iter_mut()
+        .find(|p| p.name == profile)
+        .unwrap()
+        .capacity_wu_per_s
+        .interactive = 0.0;
+    let err = c.validate().unwrap_err().to_string();
+    assert!(err.contains("no interactive capacity"), "{err}");
 }

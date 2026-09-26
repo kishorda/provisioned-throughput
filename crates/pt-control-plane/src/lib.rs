@@ -7,6 +7,7 @@ pub mod api;
 pub mod background;
 pub mod billing;
 pub mod billing_api;
+pub mod capacity;
 pub mod clock;
 pub mod config;
 pub mod failover;
@@ -63,7 +64,7 @@ pub fn in_memory<C: Clock>(
     config: ControlPlaneConfig,
     clock: C,
 ) -> Arc<Service<MemoryStore, MemoryPlanner, C>> {
-    let planner = MemoryPlanner::new(&config.capacity);
+    let planner = MemoryPlanner::new(&config.capacity, capacity::Costs::from_config(&config));
     let store = MemoryStore::starting_at(clock.now().as_millisecond().max(1) as u64);
     Arc::new(Service::new(store, planner, clock, config))
 }
@@ -75,10 +76,17 @@ pub async fn with_sql<C: Clock>(
     store: sql::SqlStore,
     clock: C,
 ) -> Result<Arc<Service<sql::SqlStore, sql_planner::SqlPlanner, C>>, store::StoreError> {
-    let planner = sql_planner::SqlPlanner::new(store.pool().clone(), &config.capacity)
-        .await
-        .map_err(|e| store::StoreError::Unavailable(e.to_string()))?;
+    let planner = sql_planner::SqlPlanner::new(
+        store.pool().clone(),
+        &config.capacity,
+        capacity::Costs::from_config(&config),
+    )
+    .await
+    .map_err(|e| store::StoreError::Unavailable(e.to_string()))?;
     let svc = Arc::new(Service::new(store, planner, clock, config));
+    // Counts pools in replicas for the first time after the upgrade (ADR-031); otherwise a
+    // no-op, because the database is authoritative.
+    svc.restore_capacity().await?;
     svc.init_version().await?;
     Ok(svc)
 }
@@ -90,7 +98,7 @@ pub async fn with_store<S: store::Store, C: Clock>(
     store: S,
     clock: C,
 ) -> Result<Arc<Service<S, MemoryPlanner, C>>, store::StoreError> {
-    let planner = MemoryPlanner::new(&config.capacity);
+    let planner = MemoryPlanner::new(&config.capacity, capacity::Costs::from_config(&config));
     let svc = Arc::new(Service::new(store, planner, clock, config));
     svc.restore_capacity().await?;
     svc.init_version().await?;

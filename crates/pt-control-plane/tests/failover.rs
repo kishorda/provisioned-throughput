@@ -2,6 +2,7 @@
 
 mod common;
 
+use pt_core::Tier;
 use std::sync::Arc;
 
 use common::*;
@@ -27,7 +28,9 @@ fn setup() -> (Svc, ManualClock) {
 }
 
 fn available(svc: &Svc, region: &str) -> u32 {
-    svc.planner.available(region, MAVERICK).unwrap()
+    svc.planner
+        .available(region, MAVERICK, Tier::Agentic)
+        .unwrap()
 }
 
 async fn beat(svc: &Svc, region: &str, gateway: &str, serving: bool) {
@@ -60,7 +63,7 @@ async fn multi_region_holds_failover_headroom_in_the_paired_region() {
         shares(&[("eu-central", 10), ("eu-west", 4)])
     );
     // Each region holds its own share plus the other's.
-    assert_eq!(available(&svc, "eu-west"), 200 - 10 - 4);
+    assert_eq!(available(&svc, "eu-west"), 227 - 10 - 4);
     assert_eq!(available(&svc, "eu-central"), 100 - 4 - 10);
     // The price covers the shares only, with the Multi-region surcharge of 0.2 × base:
     // Agentic is 1.5 + 0.2 = 1.7 × 150,000 cents per CU.
@@ -78,7 +81,7 @@ async fn multi_region_holds_failover_headroom_in_the_paired_region() {
         pt.failover_headroom,
         shares(&[("eu-central", 12), ("eu-west", 4)])
     );
-    assert_eq!(available(&svc, "eu-west"), 200 - 12 - 4);
+    assert_eq!(available(&svc, "eu-west"), 227 - 12 - 4);
     assert_eq!(available(&svc, "eu-central"), 100 - 4 - 12);
 
     // Regional reservations hold no headroom.
@@ -89,7 +92,7 @@ async fn multi_region_holds_failover_headroom_in_the_paired_region() {
         .resource;
     assert!(regional.failover_headroom.is_empty());
     assert_eq!(regional.price.per_cu_monthly, 225_000, "no surcharge");
-    assert_eq!(available(&svc, "eu-west"), 200 - 12 - 4 - 5);
+    assert_eq!(available(&svc, "eu-west"), 227 - 12 - 4 - 5);
 }
 
 #[tokio::test]
@@ -106,7 +109,7 @@ async fn headroom_must_fit_or_nothing_is_reserved() {
         ),
         "{err:?}"
     );
-    assert_eq!(available(&svc, "eu-west"), 200);
+    assert_eq!(available(&svc, "eu-west"), 227);
     assert_eq!(available(&svc, "eu-central"), 100);
 
     // Increases that would overflow the pair are refused too.
@@ -123,9 +126,9 @@ async fn headroom_must_fit_or_nothing_is_reserved() {
     req.sku = Sku::MultiRegion;
     req.start_at = Some(t0() + SignedDuration::from_hours(24));
     let later = svc.create(ACME, None, req).await.unwrap().resource.id;
-    assert_eq!(available(&svc, "eu-west"), 200 - 50 - 1 - 3 - 2);
+    assert_eq!(available(&svc, "eu-west"), 227 - 50 - 1 - 3 - 2);
     svc.delete(ACME, &later, None).await.unwrap();
-    assert_eq!(available(&svc, "eu-west"), 200 - 50 - 1);
+    assert_eq!(available(&svc, "eu-west"), 227 - 50 - 1);
     assert_eq!(available(&svc, "eu-central"), 100 - 1 - 50);
 }
 

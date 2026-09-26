@@ -572,16 +572,14 @@ where
         };
         let capacity = config.capacity_for(region, &model_id).expect("validated");
         let profile = config.profile(&capacity.profile).expect("validated config");
-        let current_here = current
+        // What the reservation already holds here, in micro-replicas at its own tier.
+        let current_micro = current
             .as_ref()
-            .and_then(|c| c.regions.iter().find(|r| r.region == *region))
-            .map_or(0, |r| r.cus);
-        let available = svc
-            .planner
-            .available_cus(region, &model_id)
-            .await
-            .unwrap_or(0)
-            + current_here;
+            .and_then(|c| {
+                let share = c.regions.iter().find(|r| r.region == *region)?;
+                svc.costs().share(&model_id, c.tier, share)
+            })
+            .unwrap_or(0);
         let one = [RegionShare {
             region: region.clone(),
             cus: 1,
@@ -593,6 +591,16 @@ where
             .is_ok();
 
         for &tier in &tiers {
+            // A CU costs a different share of a replica at each tier (ADR-031).
+            let available = svc
+                .planner
+                .available_cus(region, &model_id, tier)
+                .await
+                .unwrap_or(0)
+                + svc
+                    .costs()
+                    .cus_in(region, &model_id, tier, current_micro)
+                    .unwrap_or(0);
             let demand = workload.demand(profile, tier);
             let (recommended, peak, policy, mut notes) = size(&demand, wu_per_cu);
             let feasible = serves_context && available >= recommended;
@@ -602,7 +610,9 @@ where
                     capacity.max_context
                 ));
             } else if available < recommended {
-                notes.push(format!("{region} has only {available} CUs available."));
+                notes.push(format!(
+                    "{region} has only {available} {tier} CUs available."
+                ));
             }
             let per_request = demand.wu_per_request.max(f64::MIN_POSITIVE);
             let rpm_per_cu = wu_per_cu * 60.0 / per_request;

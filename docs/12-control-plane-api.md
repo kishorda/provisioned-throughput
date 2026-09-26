@@ -67,7 +67,7 @@ Errors use the same shape as the gateway:
 |--------|--------|------|
 | 401 | `invalid_api_key` | Missing or unknown management key |
 | 404 | `not_found` | Unknown id, or the id belongs to another tenant |
-| 409 | `capacity_unavailable` | Not enough CUs in a region |
+| 409 | `capacity_unavailable` | Not enough CUs at the requested tier in a region. A CU's cost depends on its tier ([ADR-031](adr/ADR-031-capacity-in-replicas-per-tier.md)) |
 | 409 | `name_taken`, `idempotency_key_reused`, `no_next_term`, `inactive`, `concurrent_modification` | State conflicts |
 | 412 | `version_mismatch` | `If-Match` doesn't match the current version |
 | 422 | `invalid_request` (with `field`), `invalid_json`, `not_offered`, `shape_unsupported` | Validation |
@@ -182,7 +182,7 @@ stateDiagram-v2
 **Several instances** ([ADR-023](adr/ADR-023-multi-instance-control-plane.md)). With the SQL
 store, any number of instances can serve the API behind a load balancer. These are shared
 through the database:
-- capacity counters (`capacity_pools`), reserved with conditional UPDATEs;
+- capacity counters (`capacity_pools`, in micro-replicas, ADR-031), reserved with conditional UPDATEs;
 - the entitlement version (`control_plane_state`), polled every 500 ms to wake long-polls;
 - gateway heartbeats;
 - a leader lease.
@@ -307,8 +307,9 @@ and `total`, in minor units.
 
 ## 8. Not yet built
 
-- A remote Capacity Planner client. The SQL planner counts CUs per region and model,
-  regardless of tier.
+- A remote Capacity Planner client, with lead times and placement across pools. The SQL
+  planner counts each region's pool in replicas and costs CUs by tier (ADR-031), but a
+  region is one pool per model.
 - Signing in a KMS or secret store. The signing key is read from configuration.
 - Invoice adjustments, taxes, and payment collection. Final invoices are immutable, but
   there's no adjustment line for corrections yet.

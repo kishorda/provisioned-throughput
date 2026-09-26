@@ -43,7 +43,7 @@ crates/
   pt-mock-engine/               # OpenAI-compatible mock with TTFT/TPOT, simulated prefix cache, contention.rs (continuous-batching model)
   pt-crds/                      # kube-rs CRD types + crdgen binary; tests/manifests.rs checks deploy/ drift
   pt-operator/                  # capacity controller: sizing.rs, render.rs (DGD + PDB), plan.rs (pure), controller.rs (kube I/O), leader.rs (election settings from env)
-  pt-control-plane/             # customer API: service.rs (rules), api.rs (HTTP), quote.rs + quote_api.rs (sizing), telemetry.rs (Directory impl), store.rs (trait + MemoryStore), sql.rs (SqlStore), planner.rs, migrations/ (CockroachDB/PostgreSQL)
+  pt-control-plane/             # customer API: service.rs (rules), api.rs (HTTP), quote.rs + quote_api.rs (sizing), telemetry.rs (Directory impl), store.rs (trait + MemoryStore), sql.rs (SqlStore), planner.rs + sql_planner.rs + capacity.rs (replicas per tier), migrations/ (CockroachDB/PostgreSQL)
 config/gateway.toml             # example local config (stands in for the entitlement snapshot)
 config/control-plane.toml       # tenants, model catalog, regional capacity, [[profiles]] (Profile Registry stand-in), region tokens, dev signing key; loaded by tests
 config/gateway-eu-west.toml     # gateway that syncs eu-west snapshots and uses the quota coordinator
@@ -59,7 +59,7 @@ docs/
   01-requirements-and-traceability.md   # blog problems P1–P20 → requirements → sections; NFRs N1–N10
   02 … 11-*.md                  # unit/cost model, system, request path, isolation, capacity,
                                 # multi-region, K8s+Dynamo, metering/SLA, lifecycle, roadmap
-  adr/ADR-001 … ADR-027-*.md    # Nygard format: Status, Date, Context, Decision, Consequences
+  adr/ADR-001 … ADR-031-*.md    # Nygard format: Status, Date, Context, Decision, Consequences
 ```
 Published summary page (private Artifact): https://claude.ai/artifact/HMSSEEU8fb8tWSrGE9NmSH
 Its source HTML lived in a session scratchpad, not in this repo. To update it, republish with that URL after reading it.
@@ -87,6 +87,7 @@ Its source HTML lived in a session scratchpad, not in this repo. To update it, r
 - Usage records (ADR-019): `UsageStore` methods return `Result`. Never turn a `UsageError` into empty usage: it becomes a 503, and invoice finalisation fails and retries. `UsageBackend` picks memory or `ClickHouseUsageStore` at startup (`app_with_usage`). ClickHouse goes over HTTP with `{name:Type}` query parameters. `record` (JSON) is the source of truth, reads use `LIMIT 1 BY request_id`, and retention is the table TTL set by `migrate()`.
 - Telemetry must not depend on control-plane storage. It reads reservations through the `pt_telemetry::Directory` trait (`CpDirectory` in `pt-control-plane/src/telemetry.rs`). `pt_control_plane::app(svc)` merges the customer API, snapshots, and telemetry routes.
 - Gateways stamp `received_at_ms` with wall time. Tests that query telemetry through the control plane must use `SystemClock` (or explicit `from`/`to`), or the default window misses the records.
+- Capacity by tier (ADR-031): `[[capacity]] replicas` is the pool size; `capacity::Costs` gives micro-replicas per CU per (region, model, tier) = ceil(1e6 × wu_per_cu ÷ (profile capacity × 0.8)). Every `CapacityPlanner` call takes the reservation's tier, and `PlanOp` records it. A tier change moves capacity: at once before the start (fails cleanly), at renewal otherwise (`ScheduledChangeFailed` if it doesn't fit). `SqlPlanner` uses `capacity_micro`/`reserved_micro`; `restore` recomputes pools with `micro_counted = false` once, under `FOR UPDATE`. Tests: eu-west has 8 replicas = 227 Agentic / 371 Standard CUs; eu-central 6 = 100 Agentic.
 - Quote sizing constants (80% target utilisation, busiest-hour sustained, busiest-10 s peak) are in `pt-control-plane/src/quote.rs`. Requests are priced with the region pool's profile from `config.profiles`, and every `[[capacity]]` entry must name a profile that exists there.
 - pt-router: keep `scheduler.rs`, `workers.rs`, and `dispatch.rs` pure and synchronous. `workers.rs` placement functions are meant to become Dynamo `WorkerFilter`/`WorkerScorer` plugins (docs/13 §3). In `http.rs`, a dispatched request's `Go` owns a `Release` guard, so capacity is freed on every exit. Never release capacity outside that guard, except in `pump` (which holds the lock) when the client has already gone.
 - `TermMonths` lives in `pt-core` and is shared by the CRDs and the control plane.
@@ -146,7 +147,7 @@ These are recorded in `docs/11-roadmap-risks-open-questions.md` §4. Treat them 
 
 ## Open items
 - **Pricing:** no PM questions are open. `[[payg_prices]]` must mirror the regular PAYG price list; the values in `config/control-plane.toml` are development numbers.
-- **Not built:** metering of preempted PAYG; hot spares rendered as router workers (router `hot_spare` flags are hand-configured); chat-template rendering for token counts; a KV-event-fed prefix index (the gateway uses its own history, ADR-030); capacity planning by tier; KMS signing; a separate customer-API listener; home-gateway routing; controller drain workflow and Dynamo Planner floor integration. `README.md` ("Not built yet") has the full list.
+- **Not built:** metering of preempted PAYG; hot spares rendered as router workers (router `hot_spare` flags are hand-configured); chat-template rendering for token counts; a KV-event-fed prefix index (the gateway uses its own history, ADR-030); pool placement and lead times in the planner; KMS signing; a separate customer-API listener; home-gateway routing; controller drain workflow and Dynamo Planner floor integration. `README.md` ("Not built yet") has the full list.
 - **Needs a cluster or GPUs:** the Kubernetes Lease backend and `deploy/` manifests (never run), the Dockerfiles, the Dynamo router plugins and engine KV-budget patch, the staging interference soak, a weight-prefetch DaemonSet, and a GeoDNS/anycast controller for `/internal/v1/steering`.
 - **Known failover limits (ADR-014):** activation needs the control plane, so a region failure during a control-plane outage doesn't fail over. A partition between a healthy region and the control plane makes the reservation over-serve briefly, never under-serve. During the return ramp, a gateway's limiter can run up to 1% above the entitlement, because rate changes under 1% are skipped.
 - **Top technical risks:** Dynamo API churn and fork maintenance, and upstream acceptance of the engine KV-budget patch.

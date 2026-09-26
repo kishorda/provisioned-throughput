@@ -4,6 +4,7 @@
 
 mod common;
 
+use pt_core::Tier;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -48,7 +49,7 @@ async fn store(name: &str) -> Option<SqlStore> {
         .await
         .unwrap();
     let store = SqlStore::from_pool(pool);
-    assert_eq!(store.migrate().await.unwrap(), [1, 2, 3, 4]);
+    assert_eq!(store.migrate().await.unwrap(), [1, 2, 3, 4, 5]);
     assert!(store.migrate().await.unwrap().is_empty(), "idempotent");
     Some(store)
 }
@@ -108,9 +109,9 @@ async fn state_survives_a_restart() {
         .unwrap();
     let before = svc.get(ACME, &id).await.unwrap();
     let snapshot_before = svc.snapshot("eu-central").await.unwrap().unwrap();
-    let avail = |s: &Svc, r| s.planner.available(r, MAVERICK).unwrap();
+    let avail = |s: &Svc, r| s.planner.available(r, MAVERICK, Tier::Agentic).unwrap();
     let (west, central) = (avail(&svc, "eu-west"), avail(&svc, "eu-central"));
-    assert_eq!(west, 200 - 8 - 2, "shares plus headroom");
+    assert_eq!(west, 227 - 8 - 2, "shares plus headroom");
     drop(svc);
 
     // A new process over the same database.
@@ -158,7 +159,7 @@ async fn state_survives_a_restart() {
     .unwrap();
     clock.set(after.term_end + SignedDuration::from_secs(1));
     assert_eq!(svc.run_lifecycle().await.ended, 1);
-    assert_eq!(avail(&svc, "eu-west"), 200);
+    assert_eq!(avail(&svc, "eu-west"), 227);
     assert!(svc.list(ACME, None, false).await.unwrap().is_empty());
     assert_eq!(svc.list(ACME, None, true).await.unwrap().len(), 1);
 }

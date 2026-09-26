@@ -1,6 +1,6 @@
 # 06 · Capacity Planning & Reliability (Hidden Headroom)
 
-> Decision record: [ADR-006](adr/ADR-006-headroom-backfill.md)
+> Decision records: [ADR-006](adr/ADR-006-headroom-backfill.md), [ADR-031](adr/ADR-031-capacity-in-replicas-per-tier.md)
 
 ## 1. What the planner must answer
 
@@ -9,6 +9,12 @@
 2. **Continuously:** which pools host which reservations, and how many replicas does each
    pool need, including headroom?
 3. **During events** (failure, drain, upgrade): is there enough headroom to proceed?
+
+> **Implementation** ([ADR-031](adr/ADR-031-capacity-in-replicas-per-tier.md)): the
+> control plane answers (1) against each region's pool of `replicas`. A CU at tier T costs
+> `wu_per_cu ÷ (replica_cap(T) · target_util)` replicas, counted in micro-replicas, so
+> Agentic, Interactive, and Standard CUs draw what each really needs from the same pool.
+> Lead times and pool placement aren't built. A region is one pool per model.
 
 ## 2. Sizing formula
 
@@ -22,7 +28,8 @@ N(p)            = ceil( (demand_wu + burst_wu) / (replica_cap · target_util) )
 replicas(p)     = N(p) + k(p)
 ```
 
-- `target_util` (≈ 0.85) leaves room for estimation error and scheduling inefficiency.
+- `target_util` (0.8, a placeholder, the same value quotes use) leaves room for estimation
+  error and scheduling inefficiency.
 - `k(p)` is the **failure-domain headroom**: the maximum number of replicas lost to any
   single failure domain the pool spans (a node, an NVL72 rack, a switch), plus one
   maintenance slot. For pools with ≥ 3 clusters in a region, one cluster loss can also be

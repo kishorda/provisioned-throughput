@@ -12,7 +12,7 @@ use pt_control_plane::planner::MemoryPlanner;
 use pt_control_plane::store::MemoryStore;
 use pt_control_plane::telemetry::CpTelemetry;
 use pt_control_plane::{app, in_memory, Service};
-use pt_core::{Outcome, RejectReason, Timings, TokenBreakdown, TrafficClass, UsageRecord};
+use pt_core::{Outcome, RejectReason, Tier, Timings, TokenBreakdown, TrafficClass, UsageRecord};
 use pt_telemetry::UsageStore;
 
 type Svc = Arc<Service<MemoryStore, MemoryPlanner, ManualClock>>;
@@ -89,7 +89,9 @@ async fn cus_in(svc: &Svc, region: &str, id: &str) -> u32 {
 }
 
 fn available(svc: &Svc, region: &str) -> u32 {
-    svc.planner.available(region, MAVERICK).unwrap()
+    svc.planner
+        .available(region, MAVERICK, Tier::Agentic)
+        .unwrap()
 }
 
 #[tokio::test]
@@ -124,7 +126,7 @@ async fn split_follows_demand_and_returns() {
     // Gateways enforce the new split; the planner holds it.
     assert_eq!(cus_in(&svc, "eu-central", &pt.id).await, 6);
     assert_eq!(cus_in(&svc, "eu-west", &pt.id).await, 4);
-    assert_eq!(available(&svc, "eu-west"), 200 - 4);
+    assert_eq!(available(&svc, "eu-west"), 227 - 4);
     assert_eq!(available(&svc, "eu-central"), 100 - 6);
 
     // Within the cooldown, nothing moves.
@@ -144,7 +146,7 @@ async fn split_follows_demand_and_returns() {
     assert_eq!(r.moved, [(pt.id.clone(), pt.regions.clone())]);
     let now = svc.get(ACME, &pt.id).await.unwrap();
     assert!(now.effective_regions.is_empty());
-    assert_eq!(available(&svc, "eu-west"), 200 - 6);
+    assert_eq!(available(&svc, "eu-west"), 227 - 6);
     assert_eq!(available(&svc, "eu-central"), 100 - 4);
 }
 
@@ -242,7 +244,7 @@ async fn a_cu_increase_resets_the_split() {
         .resource;
     traffic(&svc, &tel, &pt.id, 40, 160).await;
     svc.run_rebalance(&tel.store).await.unwrap();
-    assert_eq!(available(&svc, "eu-west"), 196);
+    assert_eq!(available(&svc, "eu-west"), 223);
     // The new contract replaces the rebalanced split; the planner follows exactly.
     let up = svc
         .update(
@@ -257,7 +259,7 @@ async fn a_cu_increase_resets_the_split() {
         .await
         .unwrap();
     assert!(up.effective_regions.is_empty());
-    assert_eq!(available(&svc, "eu-west"), 200 - 7);
+    assert_eq!(available(&svc, "eu-west"), 227 - 7);
     assert_eq!(available(&svc, "eu-central"), 100 - 4);
 }
 

@@ -59,6 +59,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "rebalance",
         include_str!("../migrations/0004_rebalance.sql"),
     ),
+    (
+        5,
+        "capacity_replicas",
+        include_str!("../migrations/0005_capacity_replicas.sql"),
+    ),
 ];
 
 /// Idempotency keys older than this are ignored and may be reused.

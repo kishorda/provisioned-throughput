@@ -11,7 +11,22 @@ pub enum Tier {
     Standard,
 }
 
+impl std::fmt::Display for Tier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl Tier {
+    /// The name used in the API and configuration.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Tier::Interactive => "interactive",
+            Tier::Agentic => "agentic",
+            Tier::Standard => "standard",
+        }
+    }
+
     /// p95 TPOT target in seconds. Used to estimate KV residency at admission.
     /// Placeholder until calibration runs.
     pub fn tpot_target_s(self) -> f64 {
