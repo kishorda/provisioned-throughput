@@ -18,7 +18,10 @@ cache_entries = 100000   # messages whose counts are cached
 # [[tokenization.tokenizers]]
 # model = "llama-4-maverick"
 # path = "tokenizers/llama-4-maverick/tokenizer.json"   # the model's own tokenizer.json
-# message_overhead = 4   # tokens the chat template adds per message (calibrate per model)
+# chat_template = "tokenizers/llama-4-maverick/tokenizer_config.json"   # default: the file
+#                        # beside `path`, if it has a chat_template (ADR-032)
+# message_overhead = 4   # without a chat template: tokens added per message
+# image_tokens = 576     # tokens per image part (placeholder, depends on the vision encoder)
 
 # Expected cache hits for prefixes this gateway sent recently, per reservation (ADR-030).
 [prefix_cache]

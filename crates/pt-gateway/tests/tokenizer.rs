@@ -25,6 +25,7 @@ fn spec(model: &str) -> TokenizerSpec {
         model: model.into(),
         path: FIXTURE.into(),
         message_overhead: 4,
+        ..Default::default()
     }
 }
 
@@ -225,4 +226,77 @@ async fn a_missing_tokenizer_file_is_a_config_error() {
         .err()
         .expect("fails");
     assert!(err.to_string().contains("tokenizer for m"), "{err}");
+}
+
+/// Tokens the fixture's word-level tokenizer makes of `text`: runs of word characters and
+/// runs of other non-space characters.
+fn word_level(text: &str) -> u64 {
+    let mut n = 0;
+    let mut prev: Option<bool> = None; // Some(is_word) inside a run
+    for c in text.chars() {
+        let class = if c.is_whitespace() {
+            None
+        } else {
+            Some(c.is_alphanumeric() || c == '_')
+        };
+        if class.is_some() && class != prev {
+            n += 1;
+        }
+        prev = class;
+    }
+    n
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_chat_template_counts_tools_tool_calls_and_images() {
+    let (engine, seen) = engine().await;
+    let mut c = config(&engine, 100_000);
+    let template = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../pt-tokenize/tests/fixtures/chatml.jinja"
+    );
+    c.tokenization.tokenizers[0].chat_template = Some(template.into());
+    c.tokenization.tokenizers[0].image_tokens = 100;
+    let app = AppState::new(&c, Arc::new(MemorySink::default())).unwrap();
+    let gw = serve(router(app.clone())).await;
+
+    let tools = json!([{ "type": "function", "function": {
+        "name": "search", "description": "Search the code base.",
+        "parameters": { "type": "object", "properties": { "q": { "type": "string" } } }
+    } }]);
+    let messages = json!([
+        { "role": "user", "content": [
+            { "type": "text", "text": "what is in this picture ?" },
+            { "type": "image_url", "image_url": { "url": "data:image/png;base64,AAAA" } }
+        ] },
+        { "role": "assistant", "content": "", "tool_calls": [
+            { "type": "function", "function": { "name": "search", "arguments": { "q": "picture" } } }
+        ] },
+        { "role": "tool", "content": "no results" },
+    ]);
+    let resp = reqwest::Client::new()
+        .post(format!("{gw}/v1/chat/completions"))
+        .bearer_auth(KEY)
+        .json(&json!({ "model": "m", "max_tokens": 2, "messages": messages, "tools": tools }))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    let body = resp.text().await.unwrap();
+    assert_eq!(status, 200, "{body}");
+
+    // What the engine sees: the whole rendered prompt, plus the image's own tokens.
+    let t = pt_tokenize::ChatTemplate::load(std::path::Path::new(template)).unwrap();
+    let prompt = t.render(&messages, Some(&tools)).unwrap();
+    let expected = word_level(&prompt) + 100;
+    let counted = seen.lock().unwrap()[0];
+    // Text and template are tokenized apart, so a token can split where they meet ("?"
+    // then "<image>" here): at most one per message.
+    assert!(counted.abs_diff(expected) <= 3, "{counted} vs {expected}");
+    // Far more than the text alone.
+    assert!(expected > 60, "{expected}: {prompt}");
+
+    let s = model_status(&gw).await;
+    assert_eq!(s["chat_template"], true);
+    assert_eq!(s["template_errors"], 0);
 }

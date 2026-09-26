@@ -68,6 +68,9 @@ Input tokens are counted with each model's own `tokenizer.json`, listed under
 message, so an agent's repeated context costs a hash lookup. New text beyond
 `inline_bytes` (4 KB) is estimated by a learned bytes-per-token ratio, then tokenized in
 the background. Models without a tokenizer use a ratio learned from the engine's counts.
+The model's chat template (from `tokenizer_config.json` beside `tokenizer.json`) is
+rendered without message text, so tool schemas, tool calls, and system defaults count
+too (ADR-032).
 The gateway passes its count to the router in `x-pt-prompt-tokens`.
 
 Repeated context is also priced as cached prefill (ADR-030). The gateway remembers the
@@ -314,9 +317,8 @@ Follow-ups from the roadmap in docs/11, grouped by what they need.
   tokens it delivered, but there's no PAYG metering path yet (ADR-015).
 - **Hot spares rendered as router workers.** Router `hot_spare` flags are set by hand in
   config. The capacity controller doesn't render spares as separately addressable workers.
-- **Chat templates.** Token counts use each model's tokenizer, but the chat template is
-  approximated by a per-model `message_overhead`, and tool definitions and image parts
-  aren't counted (ADR-028).
+- **Image token costs.** Each image part costs a fixed `image_tokens` per model (ADR-032),
+  not what its size and tiling really cost.
 - **Prefix-cache index from Dynamo KV events.** The gateway predicts cache hits from its own
   history (ADR-030). It doesn't see evictions or other replicas' traffic.
 - **Capacity placement across pools.** The planner counts each region's pool in replicas

@@ -85,12 +85,16 @@ pub async fn chat_completions(
         .unwrap_or_default();
     let count = if app.tokens.uncached_bytes(&res.model, &messages) == 0 {
         app.tokens
-            .count_within(&res.model, &messages, app.inline_bytes)
+            .count_within(&res.model, &messages, Some(&req), app.inline_bytes)
     } else {
         let (tokens, model, budget) =
             (Arc::clone(&app.tokens), res.model.clone(), app.inline_bytes);
-        match tokio::task::spawn_blocking(move || tokens.count_within(&model, &messages, budget))
-            .await
+        // The template sees the request's messages (tool calls, image parts) and tools.
+        let request = json!({ "messages": req.get("messages"), "tools": req.get("tools") });
+        match tokio::task::spawn_blocking(move || {
+            tokens.count_within(&model, &messages, Some(&request), budget)
+        })
+        .await
         {
             Ok(c) => c,
             Err(e) => {

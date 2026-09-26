@@ -49,6 +49,7 @@ async fn main() -> anyhow::Result<()> {
             model: pt_tokenize::ANY_MODEL.into(),
             path: path.into(),
             message_overhead: env_or("MOCK_MESSAGE_OVERHEAD", pt_tokenize::MESSAGE_OVERHEAD)?,
+            ..Default::default()
         };
         let tokens = pt_tokenize::Tokenizers::load(&[spec], 100_000)?;
         engine = engine.with_tokenizers(std::sync::Arc::new(tokens));

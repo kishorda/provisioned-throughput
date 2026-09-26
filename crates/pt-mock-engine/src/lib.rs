@@ -165,8 +165,21 @@ impl MockEngine {
 #[derive(Debug, Deserialize)]
 struct ChatMessage {
     role: String,
-    #[serde(default)]
+    /// A string, or an array of parts whose text parts are joined (images are ignored).
+    #[serde(default, deserialize_with = "content_text")]
     content: String,
+}
+
+fn content_text<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    Ok(match Value::deserialize(d)? {
+        Value::String(s) => s,
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|p| p.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    })
 }
 
 #[derive(Debug, Deserialize)]

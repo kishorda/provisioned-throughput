@@ -1,6 +1,6 @@
 # 04 · Request Lifecycle & Admission Control
 
-> Decision records: [ADR-002](adr/ADR-002-debt-based-wu-bucket.md), [ADR-003](adr/ADR-003-lease-based-distributed-quota.md), [ADR-012](adr/ADR-012-single-instance-quota-coordinator.md), [ADR-027](adr/ADR-027-quota-coordinator-standby.md), [ADR-028](adr/ADR-028-input-token-counting.md), [ADR-030](adr/ADR-030-gateway-prefix-cache-index.md)
+> Decision records: [ADR-002](adr/ADR-002-debt-based-wu-bucket.md), [ADR-003](adr/ADR-003-lease-based-distributed-quota.md), [ADR-012](adr/ADR-012-single-instance-quota-coordinator.md), [ADR-027](adr/ADR-027-quota-coordinator-standby.md), [ADR-028](adr/ADR-028-input-token-counting.md), [ADR-030](adr/ADR-030-gateway-prefix-cache-index.md), [ADR-032](adr/ADR-032-chat-template-token-counts.md)
 
 ## 1. End-to-end sequence
 
@@ -59,8 +59,10 @@ its output length.
 - **Prefill: exact.** Tokenisation gives input length. Messages seen before come from a
   per-message cache. A new message longer than the inline budget is estimated at the
   model's learned bytes-per-token ratio for this request only, and is exact on the next
-  one ([ADR-028](adr/ADR-028-input-token-counting.md)). The gateway passes its count to
-  the router in `x-pt-prompt-tokens`. The prefix hashes are checked
+  one ([ADR-028](adr/ADR-028-input-token-counting.md)). The model's chat template is
+  rendered without message text, so tool schemas, tool calls, system defaults, and role
+  markers are counted as well ([ADR-032](adr/ADR-032-chat-template-token-counts.md)).
+  The gateway passes its count to the router in `x-pt-prompt-tokens`. The prefix hashes are checked
   against a gateway-local, approximate **prefix-cache index**: a Bloom filter per pool, fed
   from Dynamo KV events via NATS. That gives an expected `cached_prefill_tokens` value. A
   wrong guess only changes the estimate, and settlement fixes it.

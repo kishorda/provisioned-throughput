@@ -26,6 +26,10 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+pub mod template;
+pub use template::{ChatTemplate, Framing, TemplateError};
 
 pub use pt_core::tokens::MESSAGE_OVERHEAD;
 
@@ -49,13 +53,40 @@ pub struct TokenizerSpec {
     pub model: String,
     /// Path to the model's `tokenizer.json`.
     pub path: PathBuf,
-    /// Tokens the chat template adds per message (role markers, separators).
+    /// The model's chat template: a `tokenizer_config.json` or a `.jinja` file (ADR-032).
+    /// Defaults to `tokenizer_config.json` beside `path`, if it has a `chat_template`.
+    #[serde(default)]
+    pub chat_template: Option<PathBuf>,
+    /// Without a chat template: tokens it adds per message (role markers, separators).
     #[serde(default = "default_overhead")]
     pub message_overhead: u64,
+    /// Tokens one image part costs. The template only adds a marker for it. Placeholder:
+    /// depends on the model's vision encoder and the image size.
+    #[serde(default = "default_image_tokens")]
+    pub image_tokens: u64,
+}
+
+impl Default for TokenizerSpec {
+    fn default() -> Self {
+        Self {
+            model: String::new(),
+            path: PathBuf::new(),
+            chat_template: None,
+            message_overhead: default_overhead(),
+            image_tokens: default_image_tokens(),
+        }
+    }
 }
 
 fn default_overhead() -> u64 {
     MESSAGE_OVERHEAD
+}
+
+/// Placeholder until calibrated per model.
+pub const DEFAULT_IMAGE_TOKENS: u64 = 576;
+
+fn default_image_tokens() -> u64 {
+    DEFAULT_IMAGE_TOKENS
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -68,6 +99,11 @@ pub enum LoadError {
     },
     #[error("two tokenizers for model {0}")]
     Duplicate(String),
+    #[error("chat template for {model}: {source}")]
+    Template {
+        model: String,
+        source: TemplateError,
+    },
 }
 
 /// How a model's tokens are counted.
@@ -82,8 +118,12 @@ pub enum Method {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Count {
     pub tokens: u64,
-    /// Each message's tokens, in order. They sum to `tokens`.
+    /// Each message's tokens, in order. They sum to `tokens`. The chat template's
+    /// framing (tools, system defaults, generation prompt) is counted in the first.
     pub per_message: Vec<u64>,
+    /// Tokens the chat template adds around message text, and image tokens. Included in
+    /// `per_message`.
+    pub framing: u64,
     /// Every message was counted by the tokenizer (now or from the cache).
     pub exact: bool,
     /// Messages estimated by ratio because they didn't fit the budget. Tokenize them in
@@ -106,11 +146,20 @@ pub struct ModelStatus {
     /// Messages counted exactly (tokenized now or cached) and by ratio.
     pub exact_messages: u64,
     pub estimated_messages: u64,
+    /// The model's chat template is rendered to count framing (ADR-032). Otherwise each
+    /// message adds `message_overhead`.
+    pub chat_template: bool,
+    /// Requests the template couldn't render, counted with `message_overhead` instead.
+    pub template_errors: u64,
 }
 
 struct ModelTokenizer {
     tokenizer: tokenizers::Tokenizer,
     overhead: u64,
+    /// With a template, messages are counted by their text alone, and the template's
+    /// framing separately.
+    template: Option<ChatTemplate>,
+    image_tokens: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -120,6 +169,7 @@ struct Learned {
     observations: u64,
     exact_messages: u64,
     estimated_messages: u64,
+    template_errors: u64,
 }
 
 /// A bounded map from message hash to token count. Oldest entries go first.
@@ -188,9 +238,34 @@ impl Tokenizers {
                 })?;
             // The first encode initialises lazily built state; don't make a request pay it.
             let _ = tokenizer.encode_fast("Hello, world.", false);
+            let template = match &s.chat_template {
+                Some(path) => Some(ChatTemplate::load(path).map_err(|e| LoadError::Template {
+                    model: s.model.clone(),
+                    source: e,
+                })?),
+                // Beside the tokenizer, as Hugging Face ships it. Absent or without a
+                // chat_template: count by message_overhead.
+                None => s
+                    .path
+                    .parent()
+                    .map(|d| d.join("tokenizer_config.json"))
+                    .filter(|p| p.exists())
+                    .and_then(|p| match ChatTemplate::load(&p) {
+                        Ok(t) => Some(Ok(t)),
+                        Err(TemplateError::Missing { .. }) => None,
+                        Err(e) => Some(Err(e)),
+                    })
+                    .transpose()
+                    .map_err(|e| LoadError::Template {
+                        model: s.model.clone(),
+                        source: e,
+                    })?,
+            };
             let entry = ModelTokenizer {
                 tokenizer,
                 overhead: s.message_overhead,
+                template,
+                image_tokens: s.image_tokens,
             };
             if models.insert(s.model.clone(), entry).is_some() {
                 return Err(LoadError::Duplicate(s.model.clone()));
@@ -231,6 +306,16 @@ impl Tokenizers {
         self.hasher.hash_one((model, role, content))
     }
 
+    /// A message's cache key. With a template a message is counted by its text alone, so
+    /// the role isn't part of it, and the key can't collide with the overhead scheme's.
+    fn message_key(&self, model: &str, t: &ModelTokenizer, role: &str, content: &str) -> u64 {
+        if t.template.is_some() {
+            self.hasher.hash_one(("text", model, content))
+        } else {
+            self.key(model, role, content)
+        }
+    }
+
     fn cached(&self, key: u64) -> Option<u64> {
         self.cache
             .lock()
@@ -244,23 +329,38 @@ impl Tokenizers {
         if self.tokenizer(model).is_none() {
             return 0;
         }
+        let Some(t) = self.tokenizer(model) else {
+            return 0;
+        };
         let cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         messages
             .iter()
-            .filter(|(role, content)| cache.get(self.key(model, role, content)).is_none())
+            .filter(|(role, content)| {
+                cache
+                    .get(self.message_key(model, t, role, content))
+                    .is_none()
+            })
             .map(|(role, content)| role.len() + content.len())
             .sum()
     }
 
     /// Input tokens of a chat request, tokenizing every message however long it is.
     pub fn count(&self, model: &str, messages: &[(String, String)]) -> u64 {
-        self.count_within(model, messages, usize::MAX).tokens
+        self.count_within(model, messages, None, usize::MAX).tokens
     }
 
-    /// Input tokens of a chat request: every message's role and content, plus the chat
-    /// template's per-message overhead. Tokenizes at most `budget` bytes of uncached
-    /// messages; those that don't fit are estimated by ratio and returned as `deferred`.
-    pub fn count_within(&self, model: &str, messages: &[(String, String)], budget: usize) -> Count {
+    /// Input tokens of a chat request. `messages` are the (role, text) pairs, and
+    /// `request` is the request JSON when there is one: its `messages` (with tool calls and
+    /// image parts) and `tools` are rendered through the model's chat template (ADR-032).
+    /// Message text is tokenized and cached per message, at most `budget` bytes of it now;
+    /// messages that don't fit are estimated by ratio and returned as `deferred`.
+    pub fn count_within(
+        &self,
+        model: &str,
+        messages: &[(String, String)],
+        request: Option<&Value>,
+        budget: usize,
+    ) -> Count {
         let ratio = self.bytes_per_token(model);
         let by_ratio = |role: &str, content: &str| {
             MESSAGE_OVERHEAD + ratio_tokens(role.len(), ratio) + ratio_tokens(content.len(), ratio)
@@ -271,6 +371,7 @@ impl Tokenizers {
             return Count {
                 tokens: per_message.iter().sum(),
                 per_message,
+                framing: 0,
                 exact: false,
                 deferred: vec![],
             };
@@ -280,7 +381,7 @@ impl Tokenizers {
         let mut deferred = Vec::new();
         let (mut exact_n, mut estimated_n) = (0, 0);
         for (role, content) in messages {
-            let key = self.key(model, role, content);
+            let key = self.message_key(model, t, role, content);
             if let Some(n) = self.cached(key) {
                 per_message.push(n);
                 exact_n += 1;
@@ -295,9 +396,14 @@ impl Tokenizers {
             }
             // Too long to tokenize now: estimate, and tokenize it in the background once.
             // Shorter messages after it may still fit what's left of the budget.
-            per_message.push(
-                t.overhead + ratio_tokens(role.len(), ratio) + ratio_tokens(content.len(), ratio),
-            );
+            per_message.push(match t.template {
+                Some(_) => ratio_tokens(content.len(), ratio),
+                None => {
+                    t.overhead
+                        + ratio_tokens(role.len(), ratio)
+                        + ratio_tokens(content.len(), ratio)
+                }
+            });
             estimated_n += 1;
             if self
                 .filling
@@ -309,11 +415,99 @@ impl Tokenizers {
             }
         }
         self.tally(model, exact_n, estimated_n);
+        let framing = self.add_framing(model, t, messages, request, &mut per_message);
         Count {
             tokens: per_message.iter().sum(),
             per_message,
+            framing,
             exact: estimated_n == 0,
             deferred,
+        }
+    }
+
+    /// Add what the chat template renders around message text, and image tokens, to
+    /// `per_message`. Returns how much was added.
+    fn add_framing(
+        &self,
+        model: &str,
+        t: &ModelTokenizer,
+        messages: &[(String, String)],
+        request: Option<&Value>,
+        per_message: &mut [u64],
+    ) -> u64 {
+        let built;
+        let json = match request.and_then(|r| r.get("messages")) {
+            Some(m) => m,
+            None => {
+                built = Value::Array(
+                    messages
+                        .iter()
+                        .map(|(r, c)| serde_json::json!({ "role": r, "content": c }))
+                        .collect(),
+                );
+                &built
+            }
+        };
+        let mut added = 0;
+        // Images, in the message that carries them.
+        for (i, m) in json.as_array().into_iter().flatten().enumerate() {
+            let images = m
+                .get("content")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|p| {
+                    matches!(
+                        p.get("type").and_then(Value::as_str),
+                        Some("image_url" | "image" | "input_image")
+                    )
+                })
+                .count() as u64;
+            if let Some(n) = per_message.get_mut(i) {
+                *n += images * t.image_tokens;
+                added += images * t.image_tokens;
+            }
+        }
+        let Some(template) = &t.template else {
+            return added;
+        };
+        let tools = request.and_then(|r| r.get("tools"));
+        match template.framing(json, tools) {
+            Ok(f) => {
+                let key = self.hasher.hash_one(("framing", model, f.text.as_str()));
+                let n = match self.cached(key) {
+                    Some(n) => n,
+                    None => {
+                        let n = encode(&t.tokenizer, &f.text);
+                        self.cache
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(key, n);
+                        n
+                    }
+                };
+                // Mostly at the start: tools and system defaults come first.
+                if let Some(first) = per_message.first_mut() {
+                    *first += n;
+                }
+                added + n
+            }
+            Err(e) => {
+                // Count as if there were no template, and say so in the status.
+                tracing::debug!(%model, error = %e, "chat template failed");
+                let mut learned = self.learned.lock().unwrap_or_else(|e| e.into_inner());
+                learned
+                    .entry(model.to_string())
+                    .or_default()
+                    .template_errors += 1;
+                drop(learned);
+                for ((role, _), n) in messages.iter().zip(per_message.iter_mut()) {
+                    let extra = t.overhead + encode(&t.tokenizer, role);
+                    *n += extra;
+                    added += extra;
+                }
+                added
+            }
         }
     }
 
@@ -324,7 +518,7 @@ impl Tokenizers {
             return;
         };
         for (role, content) in messages {
-            let key = self.key(model, role, content);
+            let key = self.message_key(model, t, role, content);
             if self.cached(key).is_none() {
                 self.tokenize(model, t, key, role, content);
             }
@@ -345,7 +539,11 @@ impl Tokenizers {
         content: &str,
     ) -> u64 {
         let content_tokens = encode(&t.tokenizer, content);
-        let n = t.overhead + encode(&t.tokenizer, role) + content_tokens;
+        // With a template, roles and markers are counted in its framing.
+        let n = match t.template {
+            Some(_) => content_tokens,
+            None => t.overhead + encode(&t.tokenizer, role) + content_tokens,
+        };
         self.cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -417,6 +615,8 @@ impl Tokenizers {
                     observations: l.observations,
                     exact_messages: l.exact_messages,
                     estimated_messages: l.estimated_messages,
+                    chat_template: self.tokenizer(m).is_some_and(|t| t.template.is_some()),
+                    template_errors: l.template_errors,
                 }
             })
             .collect()
@@ -482,6 +682,7 @@ mod tests {
                 model: "m".into(),
                 path: concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/wordlevel.json").into(),
                 message_overhead: 4,
+                ..Default::default()
             }],
             100,
         )
@@ -531,6 +732,7 @@ mod tests {
                 model: "m".into(),
                 path: concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/wordlevel.json").into(),
                 message_overhead: 4,
+                ..Default::default()
             }],
             2,
         )
@@ -576,6 +778,7 @@ mod tests {
                 model: ANY_MODEL.into(),
                 path: concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/wordlevel.json").into(),
                 message_overhead: 0,
+                ..Default::default()
             }],
             10,
         )
@@ -587,6 +790,7 @@ mod tests {
                 model: "m".into(),
                 path: "/nonexistent/tokenizer.json".into(),
                 message_overhead: 3,
+                ..Default::default()
             }],
             10,
         )
@@ -600,15 +804,15 @@ mod tests {
         let long = "hello world ".repeat(100); // 1,200 bytes, 200 tokens
         let m = msgs(&[("system", "hello"), ("user", &long)]);
         // A 100-byte budget covers the system message but not the long one.
-        let c = t.count_within("m", &m, 100);
+        let c = t.count_within("m", &m, None, 100);
         assert!(!c.exact);
         assert_eq!(c.deferred, msgs(&[("user", &long)]));
         // Estimated at 4 bytes per token until something is learned: 4 + 1 + 300.
         assert_eq!(c.tokens, (4 + 1 + 1) + 305);
         // Asked again while it's being filled: estimated, but not deferred twice.
-        assert!(t.count_within("m", &m, 100).deferred.is_empty());
+        assert!(t.count_within("m", &m, None, 100).deferred.is_empty());
         t.fill("m", &c.deferred);
-        let c = t.count_within("m", &m, 100);
+        let c = t.count_within("m", &m, None, 100);
         assert!(c.exact);
         assert_eq!(c.tokens, 6 + (4 + 1 + 200));
         // The fill taught the model's ratio: 6 bytes per token here.
