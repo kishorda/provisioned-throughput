@@ -289,6 +289,7 @@ async fn stack(chunked: bool, allocations: Vec<AllocationConfig>, adaptive: bool
         }],
         allocations,
         report: None,
+        discovery: None,
     };
     router_cfg.validate().unwrap();
     let router = serve(http::router(http::Shared::new(&router_cfg))).await;

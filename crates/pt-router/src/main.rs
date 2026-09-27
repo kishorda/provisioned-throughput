@@ -2,7 +2,7 @@
 
 use anyhow::Context;
 use pt_router::config::RouterConfig;
-use pt_router::{http, report};
+use pt_router::{discovery, http, report};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -18,8 +18,14 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&config.listen)
         .await
         .with_context(|| format!("binding {}", config.listen))?;
-    tracing::info!(listen = %config.listen, workers = config.workers.len(), "router listening");
+    tracing::info!(listen = %config.listen, workers = config.workers.len(), discovery = config.discovery.is_some(), "router listening");
     let shared = http::Shared::new(&config);
+    if let Some(d) = &config.discovery {
+        // Find workers before serving, so the first requests have somewhere to go.
+        let mut discovery = discovery::Discovery::new(d.clone());
+        discovery.refresh(&shared).await;
+        tokio::spawn(discovery.run(shared.clone()));
+    }
     if let Some(r) = &config.report {
         let reporter = report::Reporter::new(r).context("status reporting")?;
         tokio::spawn(reporter.run(shared.clone()));

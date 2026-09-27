@@ -46,6 +46,15 @@ reservation = "res-acme-agents"
 wu_per_sec = 2000.0
 kv_share = 0.5
 
+# Find workers through the pool's headless Services instead of [[workers]] (ADR-044). The
+# capacity controller renders <pool>-workers and <pool>-spares and labels pods floor/spare.
+# [discovery]
+# workers_dns = "maverick-b200-a1-workers.pt-serving.svc.cluster.local:8000"
+# spares_dns = "maverick-b200-a1-spares.pt-serving.svc.cluster.local:8000"
+# slots = 8
+# kv_blocks = 4096
+# refresh_secs = 5
+
 # Send this router's status to the control plane for the system dashboard (ADR-043).
 # [report]
 # control_plane_url = "http://127.0.0.1:8090"

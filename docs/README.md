@@ -102,6 +102,7 @@ The design rests on six decisions:
 | [041](adr/ADR-041-sales-holds.md) | Pause new sales on a pool during an expedited drain, through expiring holds |
 | [042](adr/ADR-042-gateway-peer-discovery.md) | Discover gateway peers from a headless Service's DNS, for affinity (extends 040) |
 | [043](adr/ADR-043-dashboards.md) | Operator and customer dashboards served by the control plane, fed by controller and router reports |
+| [044](adr/ADR-044-hot-spares-as-router-workers.md) | Hot spares found by routers through labelled headless Services (extends 015) |
 
 ## Glossary
 

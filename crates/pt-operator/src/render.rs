@@ -1,5 +1,6 @@
-//! Render child objects for a `ModelPool`: a Dynamo `DynamoGraphDeployment` (DGD) and one
-//! `PodDisruptionBudget` per worker role.
+//! Render child objects for a `ModelPool`: a Dynamo `DynamoGraphDeployment` (DGD), one
+//! `PodDisruptionBudget` per worker role, and the headless Services routers use to find
+//! floor workers and hot spares (ADR-044).
 //!
 //! The DGD layout follows Dynamo's `nvidia.com/v1alpha1` examples: a `Frontend` service
 //! running the KV-aware router, and worker services with `componentType: worker` and
@@ -9,6 +10,7 @@
 
 use std::collections::BTreeMap;
 
+use k8s_openapi::api::core::v1::{Service, ServiceSpec};
 use k8s_openapi::api::policy::v1::{PodDisruptionBudget, PodDisruptionBudgetSpec};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta, OwnerReference};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
@@ -224,6 +226,53 @@ pub fn disruption_budgets(
         .collect()
 }
 
+/// The role routers send requests to. In a disaggregated pool the router picks the decode
+/// worker, which pulls the prefill (the decode-first flow in Dynamo's examples). Check this
+/// against the Dynamo release you deploy.
+pub fn routed_role(desired: &RoleReplicas) -> Role {
+    if desired.prefill > 0 || desired.decode > 0 {
+        Role::Decode
+    } else {
+        Role::Aggregated
+    }
+}
+
+/// Name of the headless Service for a pool's floor workers (`spare = false`) or hot spares.
+pub fn worker_service_name(pool: &str, spare: bool) -> String {
+    format!("{pool}-{}", if spare { "spares" } else { "workers" })
+}
+
+/// Two headless Services over the routed role's Ready pods: floor workers and hot spares,
+/// told apart by the `pt.example.com/serving` label the controller sets (ADR-044). DNS for
+/// each returns one address per Ready pod. They have no ports: routers configure the
+/// worker port.
+pub fn worker_services(pool: &PoolRef<'_>, desired: &RoleReplicas) -> Vec<Service> {
+    let role = routed_role(desired);
+    [(false, labels::FLOOR), (true, labels::SPARE)]
+        .into_iter()
+        .map(|(spare, serving)| {
+            let mut selector = pod_labels(pool.name, role.as_str());
+            selector.insert(labels::SERVING.to_string(), serving.to_string());
+            Service {
+                metadata: ObjectMeta {
+                    name: Some(worker_service_name(pool.name, spare)),
+                    namespace: Some(pool.namespace.to_string()),
+                    labels: Some(object_labels(pool.name)),
+                    owner_references: Some(vec![pool.owner.clone()]),
+                    ..Default::default()
+                },
+                spec: Some(ServiceSpec {
+                    cluster_ip: Some("None".into()),
+                    selector: Some(selector),
+                    publish_not_ready_addresses: Some(false),
+                    ..Default::default()
+                }),
+                status: None,
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,6 +339,46 @@ mod tests {
             controller: Some(true),
             block_owner_deletion: Some(true),
         }
+    }
+
+    #[test]
+    fn worker_services_select_the_routed_role_by_serving_label() {
+        let s = spec(Backend::Trtllm, true);
+        let p = PoolRef {
+            name: "maverick",
+            namespace: "pt",
+            owner: owner(),
+            spec: &s,
+        };
+        let disagg = RoleReplicas {
+            prefill: 2,
+            decode: 6,
+            total: 8,
+            ..Default::default()
+        };
+        let svcs = worker_services(&p, &disagg);
+        let names: Vec<_> = svcs
+            .iter()
+            .map(|s| s.metadata.name.clone().unwrap())
+            .collect();
+        assert_eq!(names, ["maverick-workers", "maverick-spares"]);
+        for (svc, serving) in svcs.iter().zip(["floor", "spare"]) {
+            let spec = svc.spec.as_ref().unwrap();
+            assert_eq!(spec.cluster_ip.as_deref(), Some("None"));
+            let sel = spec.selector.as_ref().unwrap();
+            assert_eq!(sel[labels::ROLE], "decode");
+            assert_eq!(sel[labels::POOL], "maverick");
+            assert_eq!(sel[labels::SERVING], serving);
+            assert_eq!(
+                svc.metadata.owner_references.as_ref().unwrap()[0].uid,
+                "uid-1"
+            );
+        }
+        let agg = worker_services(&p, &RoleReplicas::aggregated(4));
+        assert_eq!(
+            agg[0].spec.as_ref().unwrap().selector.as_ref().unwrap()[labels::ROLE],
+            "aggregated"
+        );
     }
 
     #[test]

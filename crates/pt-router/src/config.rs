@@ -1,5 +1,6 @@
-//! Router configuration. Workers and allocations are static here; in production they come
-//! from Dynamo's discovery (etcd) and the `PoolAllocation` CRDs (docs/08 §2).
+//! Router configuration. Workers are static `[[workers]]`, or found through the pool's
+//! headless Services with `[discovery]` (ADR-044). Allocations are static here; in
+//! production they come from the `PoolAllocation` CRDs (docs/08 §2).
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -41,12 +42,43 @@ pub struct RouterConfig {
     pub adaptive_backfill: Option<AdaptiveBackfillConfig>,
     #[serde(default)]
     pub weights: Option<WeightsConfig>,
+    #[serde(default)]
     pub workers: Vec<WorkerConfig>,
+    /// Find workers and hot spares through DNS instead of `[[workers]]` (ADR-044).
+    #[serde(default)]
+    pub discovery: Option<DiscoveryConfig>,
     #[serde(default)]
     pub allocations: Vec<AllocationConfig>,
     /// Send `/v1/router/status` to the control plane for the system dashboard (ADR-043).
     #[serde(default)]
     pub report: Option<ReportConfig>,
+}
+
+/// `[discovery]`: the pool's headless Services, which the capacity controller renders
+/// (`<pool>-workers` and `<pool>-spares`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryConfig {
+    /// `host:port` of the floor workers' Service, for example
+    /// `maverick-workers.pt-serving.svc.cluster.local:8000`.
+    pub workers_dns: String,
+    /// `host:port` of the hot spares' Service. Without it, there are no hot spares.
+    #[serde(default)]
+    pub spares_dns: Option<String>,
+    /// Every discovered worker's batch slots and KV blocks: one pool, one size.
+    pub slots: u32,
+    pub kv_blocks: u32,
+    #[serde(default = "default_refresh_secs")]
+    pub refresh_secs: u64,
+}
+
+fn default_refresh_secs() -> u64 {
+    5
+}
+
+fn host_port(v: &str) -> bool {
+    v.rsplit_once(':')
+        .is_some_and(|(h, p)| !h.is_empty() && p.parse::<u16>().is_ok_and(|p| p > 0))
 }
 
 /// `[report]`.
@@ -180,7 +212,32 @@ impl RouterConfig {
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
-        anyhow::ensure!(!self.workers.is_empty(), "configure at least one worker");
+        match &self.discovery {
+            None => anyhow::ensure!(!self.workers.is_empty(), "configure at least one worker"),
+            Some(d) => {
+                anyhow::ensure!(
+                    self.workers.is_empty(),
+                    "use either [[workers]] or [discovery], not both"
+                );
+                for name in std::iter::once(&d.workers_dns).chain(&d.spares_dns) {
+                    anyhow::ensure!(host_port(name), "discovery: {name} must be host:port");
+                }
+                anyhow::ensure!(
+                    d.slots > 0 && d.kv_blocks > 0,
+                    "discovery needs slots and kv_blocks"
+                );
+                anyhow::ensure!(
+                    d.refresh_secs > 0,
+                    "discovery.refresh_secs must be positive"
+                );
+                anyhow::ensure!(
+                    self.allocations
+                        .iter()
+                        .all(|a| a.dedicated_workers.is_empty()),
+                    "dedicated_workers name static workers; they can't be used with [discovery]"
+                );
+            }
+        }
         if let Some(r) = &self.report {
             anyhow::ensure!(r.interval_secs > 0, "report.interval_secs must be positive");
             r.tls

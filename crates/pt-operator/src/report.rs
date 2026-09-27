@@ -67,6 +67,7 @@ pub fn pool_report(
                 message: c.message.clone(),
             })
             .collect(),
+        spare_pods: vec![],
     }
 }
 

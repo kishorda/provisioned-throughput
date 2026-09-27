@@ -1,6 +1,6 @@
 # 06 · Capacity Planning & Reliability (Hidden Headroom)
 
-> Decision records: [ADR-006](adr/ADR-006-headroom-backfill.md), [ADR-031](adr/ADR-031-capacity-in-replicas-per-tier.md), [ADR-033](adr/ADR-033-surge-before-drain.md)
+> Decision records: [ADR-006](adr/ADR-006-headroom-backfill.md), [ADR-031](adr/ADR-031-capacity-in-replicas-per-tier.md), [ADR-033](adr/ADR-033-surge-before-drain.md), [ADR-044](adr/ADR-044-hot-spares-as-router-workers.md)
 
 ## 1. What the planner must answer
 
@@ -51,8 +51,10 @@ executes gradually.
 | **Warm spare** | Pod scheduled, weights on node-local NVMe / host RAM, GPU free | < 2 min | GPU can run short preemptible batch jobs |
 | **Cold** | Node in the cluster, nothing loaded | < 15 min | Any preemptible use |
 
-The `k(p)` headroom is kept **hot**, because it must absorb failures instantly. During a
-region failover, the router reclaims hot spares from PAYG by fencing and then preempting
+The `k(p)` headroom is kept **hot**, because it must absorb failures instantly. The
+capacity controller labels which Ready pods are hot spares (only pods beyond the floor
+plus failure headroom), and routers find them through the pool's spare Service
+([ADR-044](adr/ADR-044-hot-spares-as-router-workers.md)). During a region failover, the router reclaims hot spares from PAYG by fencing and then preempting
 it ([13 §2](13-tenant-aware-routing.md#2-algorithms), [ADR-015](adr/ADR-015-failover-payg-preemption.md)).
 The capacity controller then loads warm spares for any failover demand the hot spares
 can't cover, and releases them when the failover ends ([ADR-016](adr/ADR-016-warm-spare-loading.md)). The

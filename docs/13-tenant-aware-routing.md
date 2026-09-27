@@ -1,6 +1,6 @@
 # 13 · Tenant-Aware Routing
 
-> Decision records: [ADR-013](adr/ADR-013-tenant-scheduling-tier.md), [ADR-004](adr/ADR-004-three-level-fairness.md), [ADR-015](adr/ADR-015-failover-payg-preemption.md)
+> Decision records: [ADR-013](adr/ADR-013-tenant-scheduling-tier.md), [ADR-004](adr/ADR-004-three-level-fairness.md), [ADR-015](adr/ADR-015-failover-payg-preemption.md), [ADR-044](adr/ADR-044-hot-spares-as-router-workers.md)
 
 ## 1. What it does
 
@@ -91,7 +91,19 @@ without delaying provisioned work.
   waives the prompt.
 - Only `payg` is preempted. Spillover is a PT customer's overflow and is never aborted.
 - `/v1/router/status` reports `failover_active` and `preempted`, and flags each worker's
-  `hot_spare`.
+  `hot_spare` and `retired`.
+
+**Finding workers and spares** (`discovery.rs`, [ADR-044](adr/ADR-044-hot-spares-as-router-workers.md)).
+The capacity controller labels each Ready worker pod `pt.example.com/serving=floor` or
+`=spare`, and renders two headless Services per pool, `<pool>-workers` and
+`<pool>-spares`. With `[discovery]`, the router resolves both every 5 s and applies the
+result through `Dispatcher::set_workers`:
+- a new address becomes a worker, and one from the spares Service is a hot spare;
+- a worker whose label changes flips between floor and spare in place;
+- a worker that disappears is retired: no new work, and its running requests finish.
+
+A failed or empty floor lookup keeps the last known workers, so a DNS hiccup never empties
+the pool.
 
 ## 3. Mapping onto Dynamo
 
@@ -142,8 +154,10 @@ impl WorkerFilter for PtPlacementFilter {
 
 ## 4. Deployment path
 
-1. **Now: a tier in front of Dynamo.** Each Dynamo frontend or pool is a pt-router
-   "worker", with slots and KV blocks sized from its capacity. pt-router provides
+1. **Now: a tier in front of Dynamo.** Each routed worker (a pod that serves the
+   OpenAI-compatible API, for example through a per-worker frontend) is a pt-router
+   "worker", with slots and KV blocks sized from its capacity, found through the pool's
+   worker and spare Services (ADR-044). pt-router provides
    ordering and cross-tenant fairness. Dynamo provides KV-aware selection inside the pool.
    This needs no Dynamo changes.
 2. **Next: selection plugins.** Move placement and KV budgets into Dynamo's
@@ -156,14 +170,14 @@ impl WorkerFilter for PtPlacementFilter {
 
 - Iteration-level preemption inside the engine (docs/05 §4). The router preempts only
   by aborting whole PAYG requests, and only during a failover.
-- Rendering hot spares as separately addressable workers. The capacity controller sizes
-  `headroom.hotSpares` into the pool's replicas, but the router's `hot_spare` flags come
-  from `config/router.toml`. In the tier deployment, each hot spare needs its own frontend
-  (or DGD service) registered as a router worker. With selection plugins, the fence
-  becomes a `WorkerFilter` on a spare label.
+- Serving the OpenAI API from each routed worker pod. Discovery (ADR-044) finds floor
+  workers and hot spares, but Dynamo workers take requests over Dynamo's request plane,
+  so the tier deployment needs a per-worker frontend. This is unverified without a
+  cluster. With selection plugins, the fence becomes a `WorkerFilter` on the
+  `pt.example.com/serving` label instead.
 - The engine KV-budget adapter (docs/05 §4). The router enforces budgets at placement
   only.
-- Credits and prefix state from real Dynamo metrics and KV events. Workers and
+- Credits and prefix state from real Dynamo metrics and KV events. Worker sizes and
   allocations come from `config/router.toml`.
 - Multiple router replicas. Each replica has its own queues and capacity view, so run
   one per pool until state is shared.

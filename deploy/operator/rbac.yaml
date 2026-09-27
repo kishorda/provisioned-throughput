@@ -28,8 +28,16 @@ rules:
     verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
   # Surge before drains (ADR-033): which nodes are cordoned, and which pool pods run there.
   - apiGroups: [""]
-    resources: ["nodes", "pods"]
+    resources: ["nodes"]
     verbs: ["get", "list", "watch"]
+  # Hot spares (ADR-044): label worker pods floor or spare, and render the pool's headless
+  # worker and spare Services that routers resolve.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "create", "patch", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

@@ -58,6 +58,8 @@ pub struct Worker {
     /// Slots and KV blocks held by backfill (PAYG and spillover).
     pub backfill_slots: u32,
     pub backfill_kv: u32,
+    /// Gone from discovery (ADR-044): takes no new work; running requests finish.
+    pub retired: bool,
 }
 
 impl Worker {
@@ -73,6 +75,7 @@ impl Worker {
             hot_spare: false,
             backfill_slots: 0,
             backfill_kv: 0,
+            retired: false,
         }
     }
 
@@ -137,6 +140,13 @@ impl PrefixIndex {
     }
 
     /// Tokens of the longest prefix `worker` has seen.
+    /// Forget everything recorded for `worker`, before its slot is reused.
+    pub fn forget(&mut self, worker: usize) {
+        for set in self.by_hash.values_mut() {
+            set.remove(&worker);
+        }
+    }
+
     pub fn overlap(&self, prefixes: &[(u64, u64)], worker: usize) -> u64 {
         prefixes
             .iter()
@@ -209,6 +219,9 @@ pub fn eligible(
     (0..workers.len())
         .filter(|&i| {
             let w = &workers[i];
+            if w.retired {
+                return false;
+            }
             // Placement: dedicated workers serve their reservation, plus PAYG backfill.
             let owner_ok = match dedicated_to.get(w.id.as_str()) {
                 Some(owner) => *owner == p.reservation || payg,

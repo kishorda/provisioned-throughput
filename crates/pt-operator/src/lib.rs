@@ -22,3 +22,4 @@ pub mod plan;
 pub mod render;
 pub mod report;
 pub mod sizing;
+pub mod spares;

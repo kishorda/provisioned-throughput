@@ -51,6 +51,7 @@ fn config(workers: &[(&str, u32, u32)], allocations: Vec<AllocationConfig>) -> R
             .collect(),
         allocations,
         report: None,
+        discovery: None,
     }
 }
 

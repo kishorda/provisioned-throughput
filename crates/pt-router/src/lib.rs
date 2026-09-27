@@ -7,6 +7,7 @@
 //! mapping onto Dynamo's plugins.
 
 pub mod config;
+pub mod discovery;
 pub mod dispatch;
 pub mod http;
 pub mod report;

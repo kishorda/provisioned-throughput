@@ -6,38 +6,44 @@ named latency tier.
 
 - **Design:** [`docs/`](docs/README.md). Start with the executive summary.
 - **Code:** a Rust workspace with:
-  - The P0 admission path (docs/04). The gateway counts input tokens, estimates WU, admits
-    against a debt-based bucket with boundary policies, streams from the engine, settles on
-    the engine's actual usage, and writes a usage record for every request.
-  - The P1 custom resources and the Regional Capacity Controller (docs/06, docs/08).
-  - The control-plane API that lets customers create, update, and delete Provisioned
-    Throughput for a model (docs/12), on a durable SQL store, with quotes, monthly
-    invoices, and usage and SLA reports.
-  - Signed entitlement snapshots that gateways follow, and a Quota Coordinator that
-    shares each entitlement across gateway replicas (active/standby).
-  - The tenant-aware router tier (docs/13).
-  - Automatic region failover, warm spares, and share rebalancing between regions
-    (docs/07).
-  - An interference test suite that checks tenant isolation against a mock engine that
-    models continuous batching (docs/05 §7).
+  - **Gateway** (docs/04): counts input tokens with each model's tokenizer and chat
+    template, predicts prefix-cache hits, estimates WU, admits against a debt-based bucket
+    with boundary policies, streams from the engine, settles on the engine's usage, and
+    records every request. Replicas share entitlements through the **Quota Coordinator**,
+    and sessions and small reservations stick to one replica.
+  - **Router** (docs/13): priority classes, WFQ by WU, KV-aware placement, a backfill cap
+    for PAYG, and hot spares that PAYG gives up during a region failover.
+  - **Control plane** (docs/12): the customer API to buy and change Provisioned
+    Throughput, quotes, monthly invoices, usage and SLA reports, and signed entitlement
+    snapshots for gateways. It runs as several instances on CockroachDB or PostgreSQL, with
+    usage in ClickHouse, and serves operator and customer **dashboards**.
+  - **Regional Capacity Controller** (docs/06, docs/08): custom resources, pool sizing,
+    Dynamo deployments and disruption budgets, surges before node drains, and warm spares
+    for failover demand.
+  - **Multi-region** (docs/07): automatic region failover, DNS steering weights, and share
+    rebalancing between regions.
+  - **Interference suite** (docs/05 §7): checks tenant isolation against a mock engine
+    that models continuous batching.
+
+What isn't built yet is listed at the [end](#not-built-yet).
 
 ## Crates
 
 | Crate | What it does |
 |-------|--------------|
-| `pt-core` | Shared types: WU cost model and `PerformanceProfile`, tiers and CU pricing, workload shape, token counting, usage records |
-| `pt-admission` | Debt-based WU bucket (ADR-002), burst bank, boundary-policy chain (burst → queue → spillover → reject), `continuation` reserve, output-length estimator |
-| `pt-tokenize` | Input token counting: each model's `tokenizer.json` (HF `tokenizers`, pure Rust), a per-message cache, an inline byte budget with background fill, and learned bytes-per-token ratios (ADR-028) |
-| `pt-gateway` | OpenAI-compatible gateway (axum): auth, estimate, admit, proxy/stream, settle, usage JSONL, `/v1/pt/status`. Loads entitlements from signed control-plane snapshots or a static file |
-| `pt-router` | Tenant-aware router tier (docs/13): priority classes, WFQ by WU, pull-based dispatch on worker slots and KV, dedicated placement, per-reservation KV budgets, prefix and session affinity, hot spares with PAYG preemption during failover |
-| `pt-quota` | Regional Quota Coordinator: leases that split each reservation's entitlement across gateway replicas without overselling (ADR-012), active/standby on a Kubernetes Lease (ADR-027) |
-| `pt-telemetry` | Customer usage, latency, session, and monthly SLA reports built from gateway usage records (docs/09 §5), served by the control plane |
-| `pt-entitlement` | Snapshot format shared by the control plane and gateways, Ed25519 signing and verification, API-key hashing |
-| `pt-mock-engine` | Stand-in for a Dynamo frontend: OpenAI chat API with configurable TTFT/TPOT, simulated prefix caching, and an optional continuous-batching contention model |
-| `pt-crds` | Custom resources (docs/08 §2): `PerformanceProfile`, `ModelPool`, `PoolAllocation`, `CapacityReservation`, and the `crdgen` binary |
-| `pt-control-plane` | Customer REST API (docs/12): create, get, list, update, and delete Provisioned Throughput; commercial rules; capacity checks; renewal lifecycle; durable SQL store (CockroachDB or PostgreSQL) or in-memory |
+| `pt-core` | Shared types: WU cost model and `PerformanceProfile`, tiers and CU pricing, workload shape, term lengths, usage records |
+| `pt-admission` | Debt-based WU bucket (ADR-002), burst bank, boundary-policy chain (burst → queue → spillover → reject), `continuation` reserve, output-length estimator, prefix-cache predictions (ADR-030) |
+| `pt-tokenize` | Input token counting: each model's `tokenizer.json` (HF `tokenizers`, pure Rust), chat templates (minijinja), image parts, a per-message cache, an inline byte budget with background fill, and learned bytes-per-token ratios (ADR-028, ADR-032, ADR-036) |
+| `pt-gateway` | OpenAI-compatible gateway (axum): auth, estimate, admit, proxy and stream, settle, usage export, `/v1/pt/status`. Follows signed control-plane snapshots or a static file, leases its share from the Quota Coordinator, heartbeats region health, and forwards sessions to their home replica (ADR-040, ADR-042) |
+| `pt-router` | Tenant-aware router (docs/13): priority classes, WFQ by WU, pull-based dispatch on worker slots and KV, dedicated placement, per-reservation KV budgets, prefix and session affinity, backfill cap, hot spares with PAYG preemption, status reports for the dashboard |
+| `pt-quota` | Quota Coordinator: leases that split each reservation's entitlement across gateway replicas without overselling (ADR-012), active/standby on a Kubernetes Lease (ADR-027) |
 | `pt-election` | Active/standby leader election on a Kubernetes Lease (or in memory), shared by the Quota Coordinator and the controller (ADR-027, ADR-029) |
-| `pt-operator` | Regional Capacity Controller: sizes each `ModelPool` from its allocations (docs/06 §2), applies a `DynamoGraphDeployment` and per-role PodDisruptionBudgets, loads warm spares for failover demand from the regional snapshot, and reports status |
+| `pt-telemetry` | Usage store (in memory or ClickHouse) and the usage, latency, session, and monthly SLA reports built from gateway usage records (docs/09 §5) |
+| `pt-entitlement` | Snapshot format shared by the control plane and gateways, Ed25519 signing and verification, API-key hashing, TLS for control-plane clients, and the pool and router reports behind the dashboards |
+| `pt-control-plane` | Customer API (docs/12): reservations, deployments and keys, quotes, invoices, capacity by tier with scheduled arrivals, region failover and rebalancing, snapshot signing (local key or Vault Transit), dashboards; SQL store (CockroachDB or PostgreSQL) or in memory |
+| `pt-crds` | Custom resources (docs/08 §2): `PerformanceProfile`, `ModelPool`, `PoolAllocation`, `CapacityReservation`, and the `crdgen` binary |
+| `pt-operator` | Regional Capacity Controller: sizes each `ModelPool` from its allocations (docs/06 §2), applies a `DynamoGraphDeployment` and per-role PodDisruptionBudgets, surges before node drains, loads warm spares for failover demand, pauses sales during expedited drains, and reports pools to the control plane |
+| `pt-mock-engine` | Stand-in for a Dynamo frontend: OpenAI chat API with configurable TTFT/TPOT, simulated prefix caching, and an optional continuous-batching contention model |
 
 ## Run locally
 
@@ -70,8 +76,8 @@ message, so an agent's repeated context costs a hash lookup. New text beyond
 the background. Models without a tokenizer use a ratio learned from the engine's counts.
 The model's chat template (from `tokenizer_config.json` beside `tokenizer.json`) is
 rendered without message text, so tool schemas, tool calls, and system defaults count
-too (ADR-032).
-The gateway passes its count to the router in `x-pt-prompt-tokens`.
+too (ADR-032). Inline images are priced from their size and the model's tiling rules
+(ADR-036). The gateway passes its count to the router in `x-pt-prompt-tokens`.
 
 Repeated context is also priced as cached prefill (ADR-030). The gateway remembers the
 message prefixes each reservation sent recently. It estimates the longest match as cached,
@@ -118,6 +124,16 @@ curl -s -X DELETE http://127.0.0.1:8090/v1/provisioned-throughput/<id> \
 ```
 
 See [docs/12](docs/12-control-plane-api.md) for all rules and error codes.
+
+Server options in `config/control-plane.toml`:
+- `[server.tls]` serves HTTPS, optionally requiring client certificates (ADR-022).
+- `[server.internal]` moves the region and operator endpoints (`/internal/...`) to their
+  own listener, so only the customer API faces the internet (ADR-034).
+- `[entitlements.vault]` signs snapshots with a key held in Vault Transit instead of the
+  local `signing_key` (ADR-038).
+- `[[capacity_changes]]` schedules capacity that arrives later. Reservations that start
+  after it arrives can be sold now, and a create that doesn't fit yet returns
+  `capacity_unavailable` with `available_from` (ADR-037).
 
 Rotate inference keys without downtime (docs/12 §3):
 
@@ -213,6 +229,12 @@ curl -s 127.0.0.1:8095/v1/leases -H 'Authorization: Bearer quota-token-eu-west-d
 `unleased`, or `disabled`. To run a second replica, copy the config with a different
 `listen` port and `cache_path`.
 
+With `[affinity]` (commented out in `config/gateway.toml`), replicas forward each agent
+session (`x-pt-session-id`), and every reservation below `home_below_cus` CUs, to one
+owner replica, so its prefix cache and bucket stay in one place (ADR-040). List the
+replicas in `peers`, or set `discovery_dns` to a headless Service to find them (ADR-042).
+If the owner is unreachable, the receiving replica serves the request.
+
 In production, the coordinator runs as two replicas that elect a leader through a
 Kubernetes Lease (`[election]` in its config, and `deploy/quota/quota.yaml`). Gateways
 list every replica in `coordinator_url` and `standby_urls`. A standby answers 503
@@ -265,15 +287,19 @@ Responses carry `x-pt-router-worker` and `x-pt-router-queue-ms`. If the router c
 serve a request it returns `x-pt-reason`: `router_queue_timeout`,
 `router_request_too_large`, or `router_no_worker`.
 
-Workers marked `hot_spare` serve PAYG until a region failover needs them. Gateways mark
+With `[discovery]` instead of `[[workers]]`, the router finds workers through the pool's
+headless Services, which the capacity controller renders: `<pool>-workers` for floor pods
+and `<pool>-spares` for hot spares. It resolves both every 5 s, flips spares in place,
+and retires workers that disappear once their running requests finish (ADR-044).
+
+Hot spares serve PAYG until a region failover needs them. Gateways mark
 provisioned requests that use a failover entitlement with `x-pt-failover`. While that
 marker keeps arriving, the router keeps new PAYG off hot spares. If provisioned work
 waits 250 ms, it aborts running PAYG, which then gets `x-pt-reason: preempted` (503,
 `Retry-After: 1`) or a final SSE error event (docs/13 §2, ADR-015). Both carry `usage`
 with the completion tokens actually delivered, so PAYG metering bills only those
-(ADR-035). On other workers,
-PAYG and spillover may hold at most `backfill_ratio` (0.5) of the slots and KV, so
-provisioned work always finds room (ADR-026). With `[adaptive_backfill]`, that share
+(ADR-035). On other workers, PAYG and spillover may hold at most `backfill_ratio` (0.5)
+of the slots and KV, so provisioned work always finds room (ADR-026). With `[adaptive_backfill]`, that share
 follows the floor's expected provisioned load instead (ADR-039).
 
 ## Interference suite
@@ -319,8 +345,18 @@ For each `ModelPool` it:
   wait for replacements instead of using the failure headroom (`status.drainSurge`, the
   `Draining` condition). Annotate a node `pt.example.com/drain=expedite` to drain it
   through the maintenance slots at once (ADR-033)
+- while a node drains expedited, pauses new sales of the pool's model in the region
+  through the control plane (a hold that expires unless renewed, ADR-041)
+- labels each Ready worker pod `pt.example.com/serving=floor` or `=spare`, keeping
+  `hotSpares` spares per role beyond the floor plus failure headroom, and renders the
+  headless Services `<pool>-workers` and `<pool>-spares` that routers resolve (ADR-044)
+- reports the pool, with ready replicas per role, to the control plane for the
+  dashboard (ADR-043)
 - refuses to touch children, and sets `Ready=False`, when the profile is missing, the
   engine version doesn't match the profile, or a strict-dedicated pool enables PAYG backfill
+
+Sales holds and pool reports need the snapshot settings above, because they use the same
+control-plane connection.
 
 ## Test
 
@@ -338,8 +374,6 @@ Follow-ups from the roadmap in docs/11, grouped by what they need.
 
 ### Not built
 
-- **Hot spares rendered as router workers.** Router `hot_spare` flags are set by hand in
-  config. The capacity controller doesn't render spares as separately addressable workers.
 - **Remote image sizes.** Inline (`data:`) images are priced by size and the model's
   tiling (ADR-036). Images given by URL cost the flat `image_tokens`, because the gateway
   doesn't fetch them.
@@ -353,9 +387,12 @@ Follow-ups from the roadmap in docs/11, grouped by what they need.
   (`[entitlements.vault]`, ADR-038). AWS and Google Cloud KMS aren't supported.
 - **Redpanda.** Gateways push usage to the control plane, which writes it to ClickHouse
   (ADR-019). Usage and SLA aggregation runs in Rust, not ClickHouse SQL.
-- **Controller workflows:** no Dynamo Planner floor integration. An expedited drain pauses
-  sales of the whole model in the region, not only its pool (ADR-041). The controller owns `replicas` on the DGD, so don't enable Planner
-  autoscaling on PT pools yet.
+- **Dynamo Planner floor integration.** The controller owns `replicas` on the DGD, so
+  don't enable Planner autoscaling on PT pools yet.
+- **Sales holds per pool.** An expedited drain pauses sales of the whole model in the
+  region, not only the draining pool (ADR-041).
+- **Dashboard history.** Pool and router reports replace the previous one, so the
+  dashboards show the latest state only (ADR-043).
 
 ### Needs a cluster, Docker, or GPUs (none on the development machine)
 
@@ -368,6 +405,9 @@ Follow-ups from the roadmap in docs/11, grouped by what they need.
   you deploy.
 - **Dynamo router extensions** (tenant WFQ, KV budgets as plugins, docs/13 §3) and the
   engine KV-budget adapter.
+- **Routed worker endpoints.** Router discovery (ADR-044) addresses worker pods directly,
+  so each needs to serve the OpenAI-compatible API, for example through a per-worker
+  frontend. Dynamo workers normally take requests over Dynamo's request plane.
 - **Interference soak on real workers.** The suite runs against the mock's contention
   model (ADR-025). The staging-pool soak on Dynamo workers, and a scenario for PAYG
   preemption on hot spares, need a GPU pool.
@@ -382,7 +422,5 @@ Follow-ups from the roadmap in docs/11, grouped by what they need.
   volume. Each gateway replica keeps its own token-count cache (ADR-028).
 - **Transport.** Gateway → Quota Coordinator and gateway → engine are plain HTTP within a
   region.
-- **Dashboards show the latest state, not history.** Pool and router reports replace the
-  previous one; use Prometheus for trends (ADR-043).
 - **In-memory store.** It's single-instance. Use the SQL store to run several
   control-plane instances (ADR-023).

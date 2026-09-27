@@ -62,6 +62,9 @@ pub struct PoolReport {
     pub failover_wu_per_sec: f64,
     #[serde(default)]
     pub conditions: Vec<ReportCondition>,
+    /// Ready pods labelled as hot spares (ADR-044).
+    #[serde(default)]
+    pub spare_pods: Vec<String>,
 }
 
 impl PoolReport {

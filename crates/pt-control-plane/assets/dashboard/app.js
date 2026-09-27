@@ -267,7 +267,7 @@ const PT = (() => {
       return `<tr><td>${esc(p.region)}</td><td>${esc(p.id)}</td><td>${esc(r.catalog_model || r.model)}<div class="small muted">${esc(r.engine)} · ${esc(r.profile)}</div></td>
         <td class="num">${r.ready.total} / ${r.desired.total}</td><td>${bar(r.ready.total, r.desired.total || 1, readyCls)}<div class="small muted">${roles(r.ready)} of ${roles(r.desired)}</div></td>
         <td class="num">${roles(r.floor)}</td><td class="num">${roles(r.min_available)}</td>
-        <td class="num">${r.hot_spares} hot${r.warm_spares_loaded.total ? ` · ${r.warm_spares_loaded.total} warm loaded` : ""}</td>
+        <td class="num"${(r.spare_pods || []).length ? ` title="${esc(r.spare_pods.join(", "))}"` : ""}>${(r.spare_pods || []).length}/${r.hot_spares} hot${r.warm_spares_loaded.total ? ` · ${r.warm_spares_loaded.total} warm loaded` : ""}</td>
         <td class="num">${num(r.allocations)} · ${compact(r.allocated_wu_per_sec)} WU/s${r.failover_wu_per_sec ? `<div class="small">+${compact(r.failover_wu_per_sec)} failover</div>` : ""}</td>
         <td>${r.draining_nodes.length ? `${r.draining_nodes.map(esc).join(", ")}${r.drain_surge.total ? ` (+${r.drain_surge.total} surge)` : ""}` : "–"}</td>
         <td>${conds}</td><td class="small ${p.stale ? "error" : "muted"}">${ago(p.age_secs)}</td></tr>`;
@@ -291,7 +291,7 @@ const PT = (() => {
     const cls = ["provisioned", "burst", "spillover", "payg"];
     const workers = (s.workers || []).map((w) => {
       const tenants = Object.keys(w.kv_by_reservation || {}).length;
-      return `<tr><td>${esc(w.id)}${w.hot_spare ? " " + pill("hot spare", "info") : ""}<div class="small muted">${esc(w.url)}</div></td>
+      return `<tr><td>${esc(w.id)}${w.hot_spare ? " " + pill("hot spare", "info") : ""}${w.retired ? " " + pill("retiring", "warning") : ""}<div class="small muted">${esc(w.url)}</div></td>
         <td class="num">${w.slots_used} / ${w.slots}</td><td>${bar(w.slots_used, w.slots)}</td>
         <td class="num">${num(w.kv_used)} / ${num(w.kv_blocks)}</td><td>${bar(w.kv_used, w.kv_blocks)}</td>
         <td class="num">${w.backfill_slots} slots · ${num(w.backfill_kv)} KV</td><td class="num">${tenants}</td></tr>`;

@@ -35,6 +35,8 @@ pub struct PoolInput<'a> {
 pub struct Children {
     pub dgd: Value,
     pub pdbs: Vec<PodDisruptionBudget>,
+    /// Headless Services for floor workers and hot spares (ADR-044).
+    pub services: Vec<k8s_openapi::api::core::v1::Service>,
 }
 
 pub struct Plan {
@@ -184,6 +186,7 @@ pub fn plan(
     let children = Children {
         dgd,
         pdbs: render::disruption_budgets(&pool_ref, &sizing.min_available),
+        services: render::worker_services(&pool_ref, &desired),
     };
     Plan {
         status,

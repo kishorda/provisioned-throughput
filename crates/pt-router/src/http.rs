@@ -38,7 +38,7 @@ use serde_json::{json, Value};
 use tokio::sync::oneshot;
 
 use crate::config::RouterConfig;
-use crate::dispatch::Dispatcher;
+use crate::dispatch::{Dispatcher, WorkerChanges, WorkerSpec};
 use crate::workers::{NoWorker, Placement};
 
 /// Sent to a waiting request when it's dispatched.
@@ -130,6 +130,11 @@ impl Shared {
             preempted_prompt_tokens: AtomicU64::new(0),
             preempted_completion_tokens: AtomicU64::new(0),
         })
+    }
+
+    /// Replace the worker set, from discovery (ADR-044).
+    pub fn set_workers(&self, want: &[WorkerSpec]) -> WorkerChanges {
+        self.lock().dispatcher.set_workers(want)
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {

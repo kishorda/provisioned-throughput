@@ -31,6 +31,11 @@ pub mod labels {
     pub const ROLE: &str = "pt.example.com/role";
     pub const MANAGED_BY: &str = "app.kubernetes.io/managed-by";
     pub const MANAGER: &str = "pt-operator";
+    /// On Ready worker pods: `floor` or `spare` (a hot spare). The pool's worker Services
+    /// select on it, so routers find floor workers and spares apart (ADR-044).
+    pub const SERVING: &str = "pt.example.com/serving";
+    pub const FLOOR: &str = "floor";
+    pub const SPARE: &str = "spare";
 }
 
 /// Every CRD, in install order.

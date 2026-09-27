@@ -51,6 +51,7 @@ async fn gateway_classes_reach_the_router() {
         }],
         allocations: vec![],
         report: None,
+        discovery: None,
     };
     let router = serve(http::router(http::Shared::new(&router_cfg))).await;
 

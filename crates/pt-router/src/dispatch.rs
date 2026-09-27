@@ -209,7 +209,7 @@ impl<T> Dispatcher<T> {
         let floor: u32 = self
             .workers
             .iter()
-            .filter(|w| !w.hot_spare)
+            .filter(|w| !w.hot_spare && !w.retired)
             .map(|w| w.slots)
             .sum();
         if floor == 0 {
@@ -221,6 +221,57 @@ impl<T> Dispatcher<T> {
 
     pub fn worker(&self, i: usize) -> &Worker {
         &self.workers[i]
+    }
+
+    /// Make the worker set match `want`, from discovery (ADR-044). A listed worker that's
+    /// known gets its spare flag and size updated, and comes back if it was retired. An
+    /// unlisted one is retired: it takes no new work, and its running requests finish. A
+    /// new one takes the slot of a retired worker with nothing running, if any, after that
+    /// slot's prefix and session hints are forgotten.
+    pub fn set_workers(&mut self, want: &[WorkerSpec]) -> WorkerChanges {
+        let mut changes = WorkerChanges::default();
+        let wanted: HashMap<&str, &WorkerSpec> = want.iter().map(|w| (w.id.as_str(), w)).collect();
+        for w in &mut self.workers {
+            match wanted.get(w.id.as_str()) {
+                Some(spec) => {
+                    if w.retired {
+                        w.retired = false;
+                        changes.added.push(w.id.clone());
+                    } else if w.hot_spare != spec.hot_spare {
+                        changes.spare_changed.push(w.id.clone());
+                    }
+                    w.hot_spare = spec.hot_spare;
+                    w.url = spec.url.clone();
+                    w.slots = spec.slots;
+                    w.kv_blocks = spec.kv_blocks;
+                }
+                None if !w.retired => {
+                    w.retired = true;
+                    changes.retired.push(w.id.clone());
+                }
+                None => {}
+            }
+        }
+        for spec in want {
+            if self.workers.iter().any(|w| w.id == spec.id) {
+                continue;
+            }
+            let fresh = Worker::new(&spec.id, &spec.url, spec.slots, spec.kv_blocks)
+                .with_hot_spare(spec.hot_spare);
+            let reusable = self.workers.iter().position(|w| {
+                w.retired && w.slots_used == 0 && !wanted.contains_key(w.id.as_str())
+            });
+            match reusable {
+                Some(i) => {
+                    self.index.forget(i);
+                    self.sessions.retain(|_, w| *w != i);
+                    self.workers[i] = fresh;
+                }
+                None => self.workers.push(fresh),
+            }
+            changes.added.push(spec.id.clone());
+        }
+        changes
     }
 
     /// Queue a request. Fails at once if no worker could ever take it.
@@ -469,6 +520,31 @@ impl<T> Dispatcher<T> {
     }
 }
 
+/// A worker discovery says the router should have (ADR-044).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerSpec {
+    pub id: String,
+    pub url: String,
+    pub slots: u32,
+    pub kv_blocks: u32,
+    pub hot_spare: bool,
+}
+
+/// What [`Dispatcher::set_workers`] changed, by worker id.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkerChanges {
+    pub added: Vec<String>,
+    pub retired: Vec<String>,
+    /// Moved between floor and hot spare.
+    pub spare_changed: Vec<String>,
+}
+
+impl WorkerChanges {
+    pub fn is_empty(&self) -> bool {
+        self.added.is_empty() && self.retired.is_empty() && self.spare_changed.is_empty()
+    }
+}
+
 fn is_backfill(p: &Placement) -> bool {
     matches!(p.class, TrafficClass::Payg | TrafficClass::Spillover)
 }
@@ -508,6 +584,86 @@ mod tests {
             backfill_ratio: 1.0,
             ..Weights::default()
         }
+    }
+
+    fn spec(id: &str, hot_spare: bool) -> WorkerSpec {
+        WorkerSpec {
+            id: id.into(),
+            url: format!("http://{id}"),
+            slots: 1,
+            kv_blocks: 100,
+            hot_spare,
+        }
+    }
+
+    #[test]
+    fn discovery_adds_retires_and_flips_spares() {
+        let mut d: Dispatcher<u32> = Dispatcher::new(vec![], HashMap::new(), full_backfill(), 0);
+        let t = Instant::now();
+        // No workers yet: nothing can be placed.
+        assert_eq!(
+            d.enqueue(
+                p("a", TrafficClass::Provisioned, 1),
+                1.0,
+                None,
+                t,
+                later(),
+                0
+            ),
+            Err(NoWorker::NoEligible)
+        );
+        let c = d.set_workers(&[spec("a", false), spec("b", true)]);
+        assert_eq!(c.added, ["a", "b"]);
+        assert!(d
+            .set_workers(&[spec("a", false), spec("b", true)])
+            .is_empty());
+
+        // Provisioned work runs on "a"; then "a" leaves discovery and "b" becomes floor.
+        d.enqueue(
+            p("r", TrafficClass::Provisioned, 1),
+            1.0,
+            None,
+            t,
+            later(),
+            1,
+        )
+        .unwrap();
+        let running = d.dispatch(t);
+        assert_eq!(d.worker(running[0].worker).id, "a");
+        let c = d.set_workers(&[spec("b", false)]);
+        assert_eq!(
+            (c.retired.clone(), c.spare_changed.clone()),
+            (vec!["a".to_string()], vec!["b".to_string()])
+        );
+        assert!(d.worker(0).retired && !d.worker(1).hot_spare);
+
+        // New work never goes to the retired worker, even when it's idle.
+        d.enqueue(
+            p("r", TrafficClass::Provisioned, 1),
+            1.0,
+            None,
+            t,
+            later(),
+            2,
+        )
+        .unwrap();
+        let second = d.dispatch(t);
+        assert_eq!(d.worker(second[0].worker).id, "b");
+
+        // A new worker doesn't take the retired slot while its request runs...
+        d.set_workers(&[spec("b", false), spec("c", false)]);
+        assert_eq!(d.status(t).workers.len(), 3);
+        // ...but does once it's released.
+        d.release(running[0].id);
+        d.set_workers(&[spec("b", false), spec("c", false), spec("e", false)]);
+        let ids: Vec<_> = d.status(t).workers.iter().map(|w| w.id.clone()).collect();
+        assert_eq!(ids, ["e", "b", "c"]);
+
+        // A retired worker that comes back keeps its slot.
+        d.set_workers(&[spec("b", false), spec("e", false)]);
+        let c = d.set_workers(&[spec("b", false), spec("c", false), spec("e", false)]);
+        assert_eq!(c.added, ["c"]);
+        assert_eq!(d.status(t).workers.len(), 3);
     }
 
     #[test]

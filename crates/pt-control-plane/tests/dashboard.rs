@@ -95,6 +95,7 @@ fn pool(ready: u32, conditions: &[(&str, &str, &str)]) -> PoolReport {
                 message: String::new(),
             })
             .collect(),
+        spare_pods: vec![],
     }
 }
 

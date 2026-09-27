@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
-use k8s_openapi::api::core::v1::{Node, Pod};
+use k8s_openapi::api::core::v1::{Node, Pod, Service};
 use k8s_openapi::api::policy::v1::PodDisruptionBudget;
 use kube::api::{
     Api, ApiResource, DeleteParams, DynamicObject, GroupVersionKind, ListParams, Patch, PatchParams,
@@ -30,6 +30,7 @@ pub use crate::failover::SnapshotRx;
 use crate::plan::{self, PoolInput};
 use crate::render::Role;
 use crate::report;
+use crate::spares;
 
 /// Resync even without changes, to repair drift in children.
 const RESYNC: Duration = Duration::from_secs(300);
@@ -179,7 +180,7 @@ async fn reconcile(pool: Arc<ModelPool>, ctx: Arc<Ctx>) -> Result<Action, Error>
         .get_opt(&pool.spec.profile_ref)
         .await?;
 
-    let (drain, ready) = drain_state(client, &ns, &name).await?;
+    let (drain, ready, serving) = drain_state(client, &ns, &name).await?;
     let input = PoolInput {
         name: &name,
         namespace: &ns,
@@ -212,6 +213,12 @@ async fn reconcile(pool: Arc<ModelPool>, ctx: Arc<Ctx>) -> Result<Action, Error>
         for pdb in &children.pdbs {
             pdb_api
                 .patch(&pdb.name_any(), &apply, &Patch::Apply(pdb))
+                .await?;
+        }
+        let svc_api = Api::<Service>::namespaced(client.clone(), &ns);
+        for svc in &children.services {
+            svc_api
+                .patch(&svc.name_any(), &apply, &Patch::Apply(svc))
                 .await?;
         }
         // Remove budgets for roles the pool no longer has (aggregated ↔ disaggregated).
@@ -249,9 +256,34 @@ async fn reconcile(pool: Arc<ModelPool>, ctx: Arc<Ctx>) -> Result<Action, Error>
         }
     }
 
+    // Label hot spares so routers find them through the spares Service (ADR-044). Only
+    // for a pool that reconciled, and best effort: a failed patch is retried next time.
+    let spare_changes = if plan.children.is_some() {
+        let min = &plan.status.min_available;
+        spares::assign(&serving, pool.spec.headroom.hot_spares, |role| match role {
+            Role::Aggregated => min.aggregated,
+            Role::Prefill => min.prefill,
+            Role::Decode => min.decode,
+        })
+    } else {
+        vec![]
+    };
+    let pods = Api::<Pod>::namespaced(client.clone(), &ns);
+    for (pod, value) in &spare_changes {
+        let patch = json!({ "metadata": { "labels": { labels::SERVING: value } } });
+        if let Err(e) = pods
+            .patch(pod, &PatchParams::default(), &Patch::Merge(&patch))
+            .await
+        {
+            tracing::warn!(pool = %name, pod = %pod, error = %e, "couldn't label the pod");
+        }
+    }
+    let spare_pods = spares::spares_after(&serving, &spare_changes);
+
     // Report the pool for the system dashboard (ADR-043). Best effort, like the holds.
     if let Some(cp) = &ctx.holds {
-        let r = report::pool_report(&ns, &name, &pool.spec, &plan.status, ready);
+        let mut r = report::pool_report(&ns, &name, &pool.spec, &plan.status, ready);
+        r.spare_pods = spare_pods.clone();
         if let Err(e) = cp.report_pool(&r).await {
             tracing::warn!(pool = %name, error = %e, "couldn't report the pool");
         }
@@ -271,6 +303,7 @@ async fn reconcile(pool: Arc<ModelPool>, ctx: Arc<Ctx>) -> Result<Action, Error>
         desired = plan.status.desired_replicas.total,
         failover_wu_per_sec = plan.status.failover_wu_per_sec,
         warm_spares_loaded = plan.status.warm_spares_loaded.total,
+        hot_spares = spare_pods.len(),
         applied = plan.children.is_some(),
         "reconciled"
     );
@@ -293,12 +326,20 @@ fn node_state(n: &Node) -> NodeState {
 }
 
 /// The pool's worker pods and the state of the nodes they run on.
-/// Also returns the Ready worker pods per role, for the pool report.
+/// Also returns the Ready worker pods per role, for the pool report, and each worker pod's
+/// serving state, for choosing hot spares.
 async fn drain_state(
     client: &Client,
     ns: &str,
     pool: &str,
-) -> Result<(drain::Drain, pt_entitlement::report::Roles), Error> {
+) -> Result<
+    (
+        drain::Drain,
+        pt_entitlement::report::Roles,
+        Vec<spares::PodServing>,
+    ),
+    Error,
+> {
     let pods = Api::<Pod>::namespaced(client.clone(), ns)
         .list(&ListParams::default().labels(&format!("{}={pool}", labels::POOL)))
         .await?
@@ -310,11 +351,19 @@ async fn drain_state(
                 node: p.spec.as_ref()?.node_name.clone()?,
                 role: Role::parse(p.labels().get(labels::ROLE)?)?,
                 terminating: p.metadata.deletion_timestamp.is_some(),
-                ready: p
-                    .status
-                    .as_ref()
-                    .and_then(|s| s.conditions.as_ref())
-                    .is_some_and(|cs| cs.iter().any(|c| c.type_ == "Ready" && c.status == "True")),
+                ready: pod_ready(p),
+            })
+        })
+        .collect();
+    let serving: Vec<spares::PodServing> = pods
+        .iter()
+        .filter_map(|p| {
+            Some(spares::PodServing {
+                name: p.metadata.name.clone()?,
+                role: Role::parse(p.labels().get(labels::ROLE)?)?,
+                ready: pod_ready(p),
+                terminating: p.metadata.deletion_timestamp.is_some(),
+                serving: p.labels().get(labels::SERVING).cloned(),
             })
         })
         .collect();
@@ -328,7 +377,18 @@ async fn drain_state(
             states.insert(name, node_state(&node));
         }
     }
-    Ok((drain::assess(&workers, &states), report::ready(&workers)))
+    Ok((
+        drain::assess(&workers, &states),
+        report::ready(&workers),
+        serving,
+    ))
+}
+
+fn pod_ready(p: &Pod) -> bool {
+    p.status
+        .as_ref()
+        .and_then(|s| s.conditions.as_ref())
+        .is_some_and(|cs| cs.iter().any(|c| c.type_ == "Ready" && c.status == "True"))
 }
 
 fn error_policy(pool: Arc<ModelPool>, err: &Error, _ctx: Arc<Ctx>) -> Action {

@@ -779,6 +779,7 @@ mod tests {
                     reason: reason.into(),
                     message: String::new(),
                 }],
+                spare_pods: vec![],
             },
         }
     }
