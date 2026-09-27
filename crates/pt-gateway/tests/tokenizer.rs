@@ -95,6 +95,7 @@ fn config(engine: &str, inline_bytes: usize) -> GatewayConfig {
             inline_bytes,
         },
         prefix_cache: Default::default(),
+        affinity: None,
         usage_export: None,
         reservations: vec![ReservationConfig {
             id: "res".into(),

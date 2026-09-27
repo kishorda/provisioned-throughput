@@ -29,6 +29,9 @@ pub struct GatewayConfig {
     /// How input tokens are counted before admission (ADR-028).
     #[serde(default)]
     pub tokenization: TokenizationConfig,
+    /// Send each session, and small reservations, to one replica (ADR-040).
+    #[serde(default)]
+    pub affinity: Option<crate::affinity::AffinityConfig>,
     /// Expect cache hits for prefixes this gateway sent recently (ADR-030).
     #[serde(default)]
     pub prefix_cache: PrefixCacheSettings,

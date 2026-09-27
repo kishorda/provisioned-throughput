@@ -98,6 +98,7 @@ The design rests on six decisions:
 | [037](adr/ADR-037-planner-lead-times.md) | Sell capacity scheduled to arrive, from the date it arrives ("yes, from date D") |
 | [038](adr/ADR-038-vault-transit-signing.md) | Sign snapshots with a key held in Vault Transit, never in configuration |
 | [039](adr/ADR-039-adaptive-backfill.md) | Size the floor's room for provisioned work from its expected load, opt-in (refines 026) |
+| [040](adr/ADR-040-gateway-affinity.md) | Route sessions and small reservations to one gateway replica (home gateways) |
 
 ## Glossary
 

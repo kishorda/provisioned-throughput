@@ -82,6 +82,7 @@ async fn gateway(prefix_cache: PrefixCacheSettings) -> (String, Arc<MemorySink>)
         quota: None,
         tokenization: Default::default(),
         prefix_cache,
+        affinity: None,
         usage_export: None,
         reservations: vec![reservation("res-a"), reservation("res-b")],
         deployments: vec![

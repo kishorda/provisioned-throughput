@@ -91,6 +91,7 @@ fn config_with(engine: &str, coordinators: &[&str], gateway_id: &str) -> Gateway
         }),
         tokenization: Default::default(),
         prefix_cache: Default::default(),
+        affinity: None,
         usage_export: None,
         reservations: vec![ReservationConfig {
             id: "res-1".into(),

@@ -238,6 +238,8 @@ pub struct Inner {
     pub tokens: Arc<Tokenizers>,
     /// Most uncached bytes tokenized before admission.
     pub inline_bytes: usize,
+    /// Which replica serves a request (ADR-040).
+    pub affinity: Option<Arc<crate::affinity::Affinity>>,
     /// Recently sent prefixes, for expected cache hits (ADR-030). `None` when disabled.
     pub prefix_cache: Option<(PrefixKeys, Mutex<PrefixCache>)>,
 }
@@ -292,6 +294,12 @@ impl AppState {
             sink,
             tokens: Arc::new(tokens),
             inline_bytes: t.inline_bytes,
+            affinity: match &config.affinity {
+                Some(a) => Some(Arc::new(
+                    crate::affinity::Affinity::new(a).map_err(ConfigError::Invalid)?,
+                )),
+                None => None,
+            },
             prefix_cache: config.prefix_cache.enabled.then(|| {
                 let cache = PrefixCache::new(config.prefix_cache.config());
                 (cache.key_builder(), Mutex::new(cache))

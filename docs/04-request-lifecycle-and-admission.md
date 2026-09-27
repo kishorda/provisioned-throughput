@@ -160,7 +160,10 @@ on the hot path ([ADR-003](adr/ADR-003-lease-based-distributed-quota.md)):
 > entitlement. A gateway is granted `min(fair target, entitlement − other unexpired
 > grants)`, so grants never oversell, even mid-rebalance. Burst credit accrues from the
 > local lease instead of separate burst slices. Gateways apply leases by resizing their
-> limiters in place. Home-gateway routing isn't built yet.
+> limiters in place. Home gateways are built as gateway-to-gateway forwarding
+> ([ADR-040](adr/ADR-040-gateway-affinity.md)): with `[affinity]`, a reservation of at
+> most `home_below_cus` CUs, and every session, is served by one replica chosen by
+> rendezvous hashing.
 >
 > **High availability** ([ADR-027](adr/ADR-027-quota-coordinator-standby.md)). Two
 > replicas run active/standby on a Kubernetes Lease instead of Raft. Only the leader

@@ -79,6 +79,7 @@ fn gateway(source: EntitlementSourceConfig) -> AppState {
         quota: None,
         tokenization: Default::default(),
         prefix_cache: Default::default(),
+        affinity: None,
         usage_export: None,
         reservations: vec![],
         deployments: vec![],

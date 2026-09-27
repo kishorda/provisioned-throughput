@@ -1,5 +1,6 @@
 //! Provisioned Throughput gateway (docs/03 §2.2, docs/04).
 
+pub mod affinity;
 pub mod chat;
 pub mod config;
 pub mod health;

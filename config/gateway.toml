@@ -25,6 +25,13 @@ cache_entries = 100000   # messages whose counts are cached
 # image = { tile_px = 336, tokens_per_tile = 144, max_tiles = 16, base_tokens = 144 }
 #                        # the model's tiling, to price inline images by size (ADR-036)
 
+# Send each session, and small reservations, to one replica (ADR-040). List every replica.
+# [affinity]
+# self_url = "http://pt-gateway-0.pt-gateway:8080"
+# peers = ["http://pt-gateway-0.pt-gateway:8080", "http://pt-gateway-1.pt-gateway:8080"]
+# home_below_cus = 4       # reservations this small get home gateways
+# home_gateways = 2
+
 # Expected cache hits for prefixes this gateway sent recently, per reservation (ADR-030).
 [prefix_cache]
 enabled = true

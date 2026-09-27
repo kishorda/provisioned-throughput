@@ -21,6 +21,7 @@ use pt_core::{
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use crate::affinity::{Affinity, Route, FORWARDED_HEADER};
 use crate::sse::{EngineUsage, Observations, SseInspector};
 use crate::state::{AppState, Deployment};
 
@@ -44,6 +45,22 @@ pub async fn chat_completions(
         );
     };
     let res = Arc::clone(&dep.reservation);
+
+    // The session's replica, or a small reservation's home gateway, serves it (ADR-040).
+    if let (Some(aff), None) = (&app.affinity, headers.get(FORWARDED_HEADER)) {
+        let session = header_str(&headers, "x-pt-session-id");
+        let spread = request_id.as_u128() as u64;
+        if let Route::Forward(owner) = aff.route(session, &dep.id, res.cus, spread, Instant::now())
+        {
+            match forward(aff, &owner, &headers, body.clone()).await {
+                Ok(resp) => return resp,
+                Err(e) => {
+                    tracing::warn!(%owner, error = %e, "owner unreachable; serving here");
+                    aff.mark_down(&owner, Instant::now());
+                }
+            }
+        }
+    }
 
     let mut req: Value = match serde_json::from_slice(&body) {
         Ok(v @ Value::Object(_)) => v,
@@ -640,4 +657,46 @@ fn parse_messages(req: &Value) -> Result<Vec<(String, String)>, &'static str> {
             Ok((role.to_owned(), text))
         })
         .collect()
+}
+
+/// Hand a request to the replica that owns it, and stream its answer back.
+async fn forward(
+    aff: &Affinity,
+    owner: &str,
+    headers: &HeaderMap,
+    body: Bytes,
+) -> Result<Response, reqwest::Error> {
+    let mut req = aff
+        .http
+        .post(format!("{owner}/v1/chat/completions"))
+        .header(FORWARDED_HEADER, "1")
+        .body(body);
+    for (name, value) in headers {
+        let n = name.as_str();
+        if n == "authorization"
+            || n == "content-type"
+            || n.starts_with("x-pt-")
+            || n == "x-request-id"
+        {
+            req = req.header(name, value);
+        }
+    }
+    let resp = req.send().await?;
+    let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let mut out = HeaderMap::new();
+    for (name, value) in resp.headers() {
+        if name != header::CONTENT_LENGTH
+            && name != header::TRANSFER_ENCODING
+            && name != header::CONNECTION
+        {
+            out.insert(name.clone(), value.clone());
+        }
+    }
+    if let Ok(v) = HeaderValue::from_str(owner) {
+        out.insert("x-pt-served-by", v);
+    }
+    let stream = resp
+        .bytes_stream()
+        .map(|c| c.map_err(std::io::Error::other));
+    Ok((status, out, Body::from_stream(stream)).into_response())
 }
