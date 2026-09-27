@@ -255,7 +255,7 @@ struct Stack {
     engine: MockEngine,
 }
 
-async fn stack(chunked: bool, allocations: Vec<AllocationConfig>) -> Stack {
+async fn stack(chunked: bool, allocations: Vec<AllocationConfig>, adaptive: bool) -> Stack {
     let engine = MockEngine::new(MockConfig {
         name: "engine".into(),
         ttft: Duration::ZERO,
@@ -273,6 +273,12 @@ async fn stack(chunked: bool, allocations: Vec<AllocationConfig>) -> Stack {
         failover_hold_ms: 30_000,
         preempt_grace_ms: 250,
         backfill_ratio: pt_router::workers::DEFAULT_BACKFILL_RATIO,
+        adaptive_backfill: adaptive.then_some(pt_router::config::AdaptiveBackfillConfig {
+            headroom: 1.25,
+            min_ratio: 0.1,
+            max_ratio: 0.9,
+            half_life_secs: 60,
+        }),
         weights: None,
         workers: vec![WorkerConfig {
             id: "w0".into(),
@@ -384,10 +390,11 @@ async fn scenario(
     run: Duration,
     control_chunked: bool,
     allocations: Vec<AllocationConfig>,
+    adaptive: bool,
 ) -> (Outcome, Outcome) {
     let _serial = SERIAL.lock().await;
 
-    let s = stack(true, allocations).await;
+    let s = stack(true, allocations, adaptive).await;
     let until = Instant::now() + run;
     let noisy_url = if noisy.payg {
         s.router.clone()
@@ -430,7 +437,7 @@ async fn long_prompts(run: Duration) {
         rate: None,
         output_jitter: 0,
     };
-    let (protected, control) = scenario("long prompts", b, run, false, vec![]).await;
+    let (protected, control) = scenario("long prompts", b, run, false, vec![], false).await;
     assert!(protected.meets_slo(), "A's SLO must hold: {protected:?}");
     assert!(
         protected.ok * 100 >= protected.requests * 95,
@@ -461,7 +468,7 @@ async fn kv_hog(run: Duration) {
         kv_share: Some(0.25),
         dedicated_workers: vec![],
     }];
-    let (protected, control) = scenario("KV hog", c, run, true, budget).await;
+    let (protected, control) = scenario("KV hog", c, run, true, budget, false).await;
     assert!(protected.meets_slo(), "A's SLO must hold: {protected:?}");
     assert_eq!(protected.preemptions, 0, "no recompute: {protected:?}");
     assert!(
@@ -477,7 +484,7 @@ async fn kv_hog(run: Duration) {
 /// A PAYG flood at 3× the pool's slots. Protection: pull-based dispatch keeps the batch
 /// within the pool's slots, strict priority puts A first, and the backfill cap keeps
 /// PAYG to half of each floor worker, so A never waits for a PAYG request to finish.
-async fn payg_flood(run: Duration) {
+async fn payg_flood(run: Duration, adaptive: bool) {
     let payg = Tenant {
         tag: "payg",
         key: "",
@@ -489,7 +496,19 @@ async fn payg_flood(run: Duration) {
         // 100–200 tokens, so completions don't all land in the same step.
         output_jitter: 100,
     };
-    let (protected, control) = scenario("PAYG flood", payg, run, true, vec![]).await;
+    // With adaptive backfill, A's allocation sizes the room PAYG leaves (ADR-039).
+    let (name, allocations) = if adaptive {
+        let a = AllocationConfig {
+            reservation: "a".into(),
+            wu_per_sec: f64::from(A_CUS) * 1_000.0,
+            kv_share: None,
+            dedicated_workers: vec![],
+        };
+        ("PAYG flood (adaptive)", vec![a])
+    } else {
+        ("PAYG flood", vec![])
+    };
+    let (protected, control) = scenario(name, payg, run, true, allocations, adaptive).await;
     assert!(protected.meets_slo(), "A's SLO must hold: {protected:?}");
     assert!(
         protected.ok * 100 >= protected.requests * 95,
@@ -513,7 +532,12 @@ async fn kv_hogs_cannot_evict_a_reservation() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn payg_floods_cannot_slow_a_reservation() {
-    payg_flood(secs()).await;
+    payg_flood(secs(), false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn payg_floods_cannot_slow_a_reservation_with_adaptive_backfill() {
+    payg_flood(secs(), true).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -531,5 +555,5 @@ async fn soak_kv_hog() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "soak: PT_SOAK_SECS (default 60) per scenario"]
 async fn soak_payg_flood() {
-    payg_flood(soak_secs()).await;
+    payg_flood(soak_secs(), false).await;
 }

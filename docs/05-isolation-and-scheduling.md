@@ -115,7 +115,8 @@ The threshold (default 1 replica-set) and the backfill ratio are Planner paramet
 tuned per model. The **backfill ratio** is the share of each floor worker's slots and KV
 blocks that PAYG and spillover may hold. It defaults to 0.5 (a placeholder), and hot
 spares aren't capped. It keeps room on the floor for provisioned work without aborting
-PAYG outside a failover ([ADR-026](adr/ADR-026-backfill-ratio.md)).
+PAYG outside a failover ([ADR-026](adr/ADR-026-backfill-ratio.md)). It can instead follow
+the floor's expected provisioned load ([ADR-039](adr/ADR-039-adaptive-backfill.md)).
 
 ## 7. Validation: interference test suite
 

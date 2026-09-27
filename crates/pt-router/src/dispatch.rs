@@ -61,8 +61,41 @@ pub struct Status {
     pub preempted: u64,
     /// A region failover is active: PAYG is fenced off hot spares.
     pub failover_active: bool,
+    /// Share of each floor worker backfill may hold now (ADR-039).
+    pub backfill_ratio: f64,
+    /// Provisioned and burst slots the floor should expect: from allocations and the
+    /// learned slot-seconds per WU (`None` until learned), and the recent peak.
+    pub expected_provisioned_slots: Option<f64>,
+    pub peak_provisioned_slots: f64,
     pub workers: Vec<Worker>,
 }
+
+/// Size the floor's room for provisioned work from its expected load, instead of a fixed
+/// `backfill_ratio` (ADR-039).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AdaptiveBackfill {
+    /// Reserve this multiple of the expected provisioned slots.
+    pub headroom: f64,
+    /// Bounds on the share of each floor worker backfill may hold.
+    pub min_ratio: f64,
+    pub max_ratio: f64,
+    /// How fast the observed peak decays.
+    pub half_life: Duration,
+}
+
+impl Default for AdaptiveBackfill {
+    fn default() -> Self {
+        Self {
+            headroom: 1.25,
+            min_ratio: 0.1,
+            max_ratio: 0.9,
+            half_life: Duration::from_secs(60),
+        }
+    }
+}
+
+/// Weight of each completed request in the learned slot-seconds per WU.
+const LEARN: f64 = 0.05;
 
 /// A dispatched request, until it's released.
 struct Active {
@@ -70,6 +103,8 @@ struct Active {
     placement: Placement,
     seq: u64,
     preempting: bool,
+    wu: f64,
+    started: Instant,
 }
 
 pub struct Dispatcher<T> {
@@ -87,6 +122,14 @@ pub struct Dispatcher<T> {
     weights: Weights,
     next_id: u64,
     dispatched: ClassCounts,
+    adaptive: Option<AdaptiveBackfill>,
+    /// The fixed ratio, used until anything is learned.
+    fixed_ratio: f64,
+    /// Slot-seconds a WU of provisioned or burst work holds, learned from completions.
+    slot_secs_per_wu: Option<f64>,
+    /// Decaying peak of provisioned and burst slots in use on the floor.
+    peak: f64,
+    peak_at: Option<Instant>,
 }
 
 impl<T> Dispatcher<T> {
@@ -107,10 +150,73 @@ impl<T> Dispatcher<T> {
             index: PrefixIndex::new(100_000),
             sessions: HashMap::new(),
             session_order: VecDeque::new(),
+            fixed_ratio: weights.backfill_ratio,
             weights,
             next_id: 1,
             dispatched: ClassCounts::default(),
+            adaptive: None,
+            slot_secs_per_wu: None,
+            peak: 0.0,
+            peak_at: None,
         }
+    }
+
+    /// Size the backfill share from expected provisioned load (ADR-039).
+    pub fn with_adaptive_backfill(mut self, a: AdaptiveBackfill) -> Self {
+        self.adaptive = Some(a);
+        self
+    }
+
+    fn is_floor_provisioned(&self, a: &Active) -> bool {
+        !is_backfill(&a.placement) && !self.workers[a.worker].hot_spare
+    }
+
+    /// Update the decaying peak of provisioned slots in use on the floor.
+    fn track_peak(&mut self, now: Instant) {
+        let Some(a) = self.adaptive else { return };
+        let current = self
+            .running
+            .values()
+            .filter(|r| self.is_floor_provisioned(r))
+            .count() as f64;
+        let decayed = match self.peak_at {
+            Some(t) => {
+                let dt = now.saturating_duration_since(t).as_secs_f64();
+                self.peak * 0.5f64.powf(dt / a.half_life.as_secs_f64().max(1e-3))
+            }
+            None => 0.0,
+        };
+        self.peak = current.max(decayed);
+        self.peak_at = Some(now);
+    }
+
+    /// Provisioned slots the allocations should need, once slot-seconds per WU is learned.
+    fn expected_slots(&self) -> Option<f64> {
+        let per_wu = self.slot_secs_per_wu?;
+        let wu: f64 = self.allocations.values().map(|a| a.wu_per_sec).sum();
+        (wu > 0.0).then_some(wu * per_wu)
+    }
+
+    /// The share of each floor worker backfill may hold now.
+    fn backfill_ratio(&self) -> f64 {
+        let Some(a) = self.adaptive else {
+            return self.fixed_ratio;
+        };
+        let expected = self.expected_slots();
+        if expected.is_none() && self.peak == 0.0 {
+            return self.fixed_ratio; // nothing learned yet
+        }
+        let floor: u32 = self
+            .workers
+            .iter()
+            .filter(|w| !w.hot_spare)
+            .map(|w| w.slots)
+            .sum();
+        if floor == 0 {
+            return self.fixed_ratio;
+        }
+        let reserve = expected.unwrap_or(0.0).max(self.peak) * a.headroom;
+        (1.0 - reserve / f64::from(floor)).clamp(a.min_ratio, a.max_ratio)
     }
 
     pub fn worker(&self, i: usize) -> &Worker {
@@ -168,6 +274,8 @@ impl<T> Dispatcher<T> {
     /// skipped, so it doesn't block the others.
     pub fn dispatch(&mut self, now: Instant) -> Vec<Assignment<T>> {
         let fence = self.failover_active(now);
+        self.track_peak(now);
+        self.weights.backfill_ratio = self.backfill_ratio();
         let mut out = Vec::new();
         loop {
             let mut placed = None;
@@ -191,6 +299,7 @@ impl<T> Dispatcher<T> {
             }
             let Some((h, w)) = placed else { break };
             let q = self.scheduler.take(&h).expect("peeked above");
+            let wu = q.wu;
             let (placement, _, payload) = q.payload;
             self.reserve(w, &placement);
             self.dispatched.bump(placement.class);
@@ -202,8 +311,11 @@ impl<T> Dispatcher<T> {
                     placement: placement.clone(),
                     seq: self.seq,
                     preempting: false,
+                    wu,
+                    started: now,
                 },
             );
+            self.track_peak(now);
             out.push(Assignment {
                 id: q.id,
                 worker: w,
@@ -284,6 +396,24 @@ impl<T> Dispatcher<T> {
         victims
     }
 
+    /// Like [`Dispatcher::release`], and learn from it: a provisioned or burst request on
+    /// the floor tells how many slot-seconds a WU holds (ADR-039).
+    pub fn finish(&mut self, id: u64, now: Instant) -> bool {
+        if let Some(a) = self.running.get(&id) {
+            if self.adaptive.is_some() && self.is_floor_provisioned(a) && a.wu > 0.0 {
+                let secs = now.saturating_duration_since(a.started).as_secs_f64();
+                let seen = secs / a.wu;
+                self.slot_secs_per_wu = Some(match self.slot_secs_per_wu {
+                    Some(p) => p + LEARN * (seen - p),
+                    None => seen,
+                });
+            }
+        }
+        let released = self.release(id);
+        self.track_peak(now);
+        released
+    }
+
     /// A dispatched request finished, failed, or was preempted: free its slot and KV
     /// blocks. Returns false if it was already released.
     pub fn release(&mut self, id: u64) -> bool {
@@ -331,6 +461,9 @@ impl<T> Dispatcher<T> {
             dispatched: self.dispatched.clone(),
             preempted: self.preempted,
             failover_active: self.failover_active(now),
+            backfill_ratio: self.backfill_ratio(),
+            expected_provisioned_slots: self.expected_slots(),
+            peak_provisioned_slots: self.peak,
             workers: self.workers.clone(),
         }
     }
@@ -642,5 +775,128 @@ mod tests {
             "payg3",
             "the fence lifts"
         );
+    }
+
+    fn adaptive(allocations: HashMap<String, Allocation>) -> Dispatcher<u32> {
+        Dispatcher::new(
+            vec![Worker::new("w0", "http://x", 10, 1_000)],
+            allocations,
+            Weights::default(),
+            0,
+        )
+        .with_adaptive_backfill(AdaptiveBackfill::default())
+    }
+
+    fn far(t: Instant) -> Instant {
+        t + Duration::from_secs(3_600)
+    }
+
+    #[test]
+    fn room_for_provisioned_work_comes_from_its_allocations() {
+        let allocations = HashMap::from([(
+            "a".to_string(),
+            Allocation {
+                wu_per_sec: 20.0,
+                ..Default::default()
+            },
+        )]);
+        let mut d = adaptive(allocations);
+        let t0 = Instant::now();
+        // Nothing learned yet: the fixed ratio.
+        assert_eq!(d.status(t0).backfill_ratio, 0.5);
+
+        // One provisioned request of 10 WU holds a slot for a second: 0.1 slot-s per WU,
+        // so 20 WU/s of allocations need 2 slots, and 2.5 are kept free.
+        d.enqueue(
+            p("a", TrafficClass::Provisioned, 1),
+            10.0,
+            None,
+            t0,
+            far(t0),
+            0,
+        )
+        .unwrap();
+        let a = d.dispatch(t0);
+        let t1 = t0 + Duration::from_secs(1);
+        d.finish(a[0].id, t1);
+        let s = d.status(t1);
+        assert_eq!(s.expected_provisioned_slots, Some(2.0));
+        assert!(
+            (s.backfill_ratio - 0.75).abs() < 1e-9,
+            "{}",
+            s.backfill_ratio
+        );
+
+        // PAYG gets 7 of the 10 slots, not 5.
+        for n in 0..10 {
+            d.enqueue(p("payg", TrafficClass::Payg, 1), 1.0, None, t1, far(t1), n)
+                .unwrap();
+        }
+        assert_eq!(d.dispatch(t1).len(), 7);
+    }
+
+    #[test]
+    fn without_allocations_the_recent_peak_sets_the_room() {
+        let mut d = adaptive(HashMap::new());
+        let t0 = Instant::now();
+        for n in 0..4 {
+            d.enqueue(
+                p("a", TrafficClass::Provisioned, 1),
+                10.0,
+                None,
+                t0,
+                far(t0),
+                n,
+            )
+            .unwrap();
+        }
+        let ids: Vec<u64> = d.dispatch(t0).iter().map(|a| a.id).collect();
+        assert_eq!(ids.len(), 4);
+        // A peak of 4 keeps 5 slots free.
+        assert!((d.status(t0).backfill_ratio - 0.5).abs() < 1e-9);
+        for id in ids {
+            d.finish(id, t0);
+        }
+        assert_eq!(
+            d.status(t0).expected_provisioned_slots,
+            None,
+            "no allocations"
+        );
+        // Two half-lives later the peak is 1, so PAYG may take more.
+        let t = t0 + Duration::from_secs(120);
+        d.dispatch(t);
+        let s = d.status(t);
+        assert!((s.peak_provisioned_slots - 1.0).abs() < 1e-9);
+        assert!(
+            (s.backfill_ratio - 0.875).abs() < 1e-9,
+            "{}",
+            s.backfill_ratio
+        );
+    }
+
+    #[test]
+    fn the_ratio_stays_within_its_bounds() {
+        let allocations = HashMap::from([(
+            "a".to_string(),
+            Allocation {
+                wu_per_sec: 1_000.0,
+                ..Default::default()
+            },
+        )]);
+        let mut d = adaptive(allocations);
+        let t0 = Instant::now();
+        d.enqueue(
+            p("a", TrafficClass::Provisioned, 1),
+            10.0,
+            None,
+            t0,
+            far(t0),
+            0,
+        )
+        .unwrap();
+        let a = d.dispatch(t0);
+        d.finish(a[0].id, t0 + Duration::from_secs(1));
+        // 100 expected slots on a 10-slot floor: PAYG keeps only the minimum.
+        assert_eq!(d.status(t0).backfill_ratio, 0.1);
     }
 }

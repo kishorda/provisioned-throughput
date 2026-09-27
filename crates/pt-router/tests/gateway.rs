@@ -40,6 +40,7 @@ async fn gateway_classes_reach_the_router() {
         failover_hold_ms: 30_000,
         preempt_grace_ms: 250,
         backfill_ratio: 1.0,
+        adaptive_backfill: None,
         weights: None,
         workers: vec![WorkerConfig {
             id: "w0".into(),

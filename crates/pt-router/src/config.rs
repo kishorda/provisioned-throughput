@@ -35,11 +35,55 @@ pub struct RouterConfig {
     /// §6). Hot spares aren't capped. Use 1.0 for a PAYG-only pool.
     #[serde(default = "default_backfill_ratio")]
     pub backfill_ratio: f64,
+    /// Size the floor's room for provisioned work from expected load instead (ADR-039).
+    /// `backfill_ratio` applies until anything is learned.
+    #[serde(default)]
+    pub adaptive_backfill: Option<AdaptiveBackfillConfig>,
     #[serde(default)]
     pub weights: Option<WeightsConfig>,
     pub workers: Vec<WorkerConfig>,
     #[serde(default)]
     pub allocations: Vec<AllocationConfig>,
+}
+
+/// `[adaptive_backfill]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdaptiveBackfillConfig {
+    #[serde(default = "default_headroom")]
+    pub headroom: f64,
+    #[serde(default = "default_min_ratio")]
+    pub min_ratio: f64,
+    #[serde(default = "default_max_ratio")]
+    pub max_ratio: f64,
+    #[serde(default = "default_half_life_secs")]
+    pub half_life_secs: u64,
+}
+
+fn default_headroom() -> f64 {
+    crate::dispatch::AdaptiveBackfill::default().headroom
+}
+fn default_min_ratio() -> f64 {
+    crate::dispatch::AdaptiveBackfill::default().min_ratio
+}
+fn default_max_ratio() -> f64 {
+    crate::dispatch::AdaptiveBackfill::default().max_ratio
+}
+fn default_half_life_secs() -> u64 {
+    crate::dispatch::AdaptiveBackfill::default()
+        .half_life
+        .as_secs()
+}
+
+impl AdaptiveBackfillConfig {
+    pub fn policy(&self) -> crate::dispatch::AdaptiveBackfill {
+        crate::dispatch::AdaptiveBackfill {
+            headroom: self.headroom,
+            min_ratio: self.min_ratio,
+            max_ratio: self.max_ratio,
+            half_life: std::time::Duration::from_secs(self.half_life_secs.max(1)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -119,6 +163,16 @@ impl RouterConfig {
             (0.0..=1.0).contains(&self.backfill_ratio),
             "backfill_ratio must be in [0, 1]"
         );
+        if let Some(a) = &self.adaptive_backfill {
+            anyhow::ensure!(
+                0.0 <= a.min_ratio && a.min_ratio <= a.max_ratio && a.max_ratio <= 1.0,
+                "adaptive_backfill needs 0 <= min_ratio <= max_ratio <= 1"
+            );
+            anyhow::ensure!(
+                a.headroom >= 1.0,
+                "adaptive_backfill.headroom must be at least 1"
+            );
+        }
         let mut ids = HashSet::new();
         for w in &self.workers {
             anyhow::ensure!(ids.insert(w.id.as_str()), "duplicate worker {}", w.id);

@@ -11,6 +11,14 @@ failover_hold_ms = 30000    # an x-pt-failover request keeps the failover fence 
 preempt_grace_ms = 250      # in a failover, provisioned work waiting this long preempts PAYG
 backfill_ratio = 0.5        # PAYG/spillover may hold at most half of each floor worker (not hot spares)
 
+# Size that share from expected provisioned load instead (ADR-039). backfill_ratio applies
+# until anything is learned.
+# [adaptive_backfill]
+# headroom = 1.25           # keep this multiple of the expected provisioned slots free
+# min_ratio = 0.1
+# max_ratio = 0.9
+# half_life_secs = 60       # decay of the observed provisioned peak
+
 [weights]
 overlap = 1.0               # prefer workers that already hold the prompt's prefix
 load = 1.0                  # prefer less-loaded workers

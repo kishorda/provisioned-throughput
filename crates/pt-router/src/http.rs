@@ -62,7 +62,7 @@ impl Drop for Release {
         if self.armed {
             let mut s = self.shared.lock();
             s.aborts.remove(&self.id);
-            s.dispatcher.release(self.id);
+            s.dispatcher.finish(self.id, Instant::now());
             drop(s);
             self.shared.pump();
         }
@@ -107,12 +107,18 @@ impl Shared {
     pub fn new(config: &RouterConfig) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(Inner {
-                dispatcher: Dispatcher::new(
-                    config.workers(),
-                    config.allocations(),
-                    config.weights(),
-                    config.payg_guard_every,
-                ),
+                dispatcher: {
+                    let d = Dispatcher::new(
+                        config.workers(),
+                        config.allocations(),
+                        config.weights(),
+                        config.payg_guard_every,
+                    );
+                    match &config.adaptive_backfill {
+                        Some(a) => d.with_adaptive_backfill(a.policy()),
+                        None => d,
+                    }
+                },
                 aborts: HashMap::new(),
             }),
             http: reqwest::Client::new(),
@@ -160,7 +166,7 @@ impl Shared {
                     Err(mut go) => {
                         // The client already left. We hold the lock, so release directly.
                         go.release.armed = false;
-                        s.dispatcher.release(a.id);
+                        s.dispatcher.finish(a.id, now);
                     }
                 }
             }

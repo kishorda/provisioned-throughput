@@ -36,6 +36,7 @@ fn config(workers: &[(&str, u32, u32)], allocations: Vec<AllocationConfig>) -> R
         failover_hold_ms: 30_000,
         preempt_grace_ms: 250,
         backfill_ratio: 1.0,
+        adaptive_backfill: None,
         weights: None,
         workers: workers
             .iter()

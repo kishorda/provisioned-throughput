@@ -255,7 +255,8 @@ waits 250 ms, it aborts running PAYG, which then gets `x-pt-reason: preempted` (
 with the completion tokens actually delivered, so PAYG metering bills only those
 (ADR-035). On other workers,
 PAYG and spillover may hold at most `backfill_ratio` (0.5) of the slots and KV, so
-provisioned work always finds room (ADR-026).
+provisioned work always finds room (ADR-026). With `[adaptive_backfill]`, that share
+follows the floor's expected provisioned load instead (ADR-039).
 
 ## Interference suite
 
@@ -339,8 +340,6 @@ Follow-ups from the roadmap in docs/11, grouped by what they need.
 - **Controller workflows:** no Dynamo Planner floor integration, and an expedited drain
   doesn't pause sales (ADR-033). The controller owns `replicas` on the DGD, so don't enable Planner
   autoscaling on PT pools yet.
-- **Floor room from expected concurrency.** The router keeps a fixed `backfill_ratio` of
-  each floor worker free of PAYG, not tuned per model or reservation (ADR-026).
 
 ### Needs a cluster, Docker, or GPUs (none on the development machine)
 
