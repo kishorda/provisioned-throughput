@@ -15,6 +15,8 @@ tokenizers.workspace = true
 minijinja = { version = "2", features = ["loop_controls", "serde"] }
 minijinja-contrib = { version = "2", features = ["pycompat"] }
 serde_json.workspace = true
+# Reading inline image headers (ADR-036).
+base64 = "0.22"
 tracing.workspace = true
 jiff.workspace = true
 

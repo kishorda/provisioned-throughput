@@ -27,6 +27,7 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+base64 = "0.22"
 rcgen.workspace = true
 pt-telemetry.workspace = true
 pt-mock-engine.workspace = true

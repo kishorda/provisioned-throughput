@@ -94,6 +94,7 @@ The design rests on six decisions:
 | [033](adr/ADR-033-surge-before-drain.md) | Surge a replica for every pool pod on a cordoned node, so drains never use the failure headroom |
 | [034](adr/ADR-034-separate-internal-listener.md) | Serve region traffic (`/internal/...`) on its own listener, with its own TLS (amends 022) |
 | [035](adr/ADR-035-preempted-payg-delivered-tokens.md) | Preempted PAYG responses report the tokens they delivered, so metering bills only those |
+| [036](adr/ADR-036-image-tokens-by-size.md) | Price inline images by their size (read from the header) and the model's tiling |
 
 ## Glossary
 

@@ -2320,6 +2320,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.22.1",
  "bytes",
  "futures",
  "jiff",
@@ -2446,6 +2447,7 @@ dependencies = [
 name = "pt-tokenize"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "jiff",
  "minijinja",
  "minijinja-contrib",

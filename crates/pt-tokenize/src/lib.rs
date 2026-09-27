@@ -28,7 +28,9 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod image;
 pub mod template;
+pub use image::ImageTiling;
 pub use template::{ChatTemplate, Framing, TemplateError};
 
 pub use pt_core::tokens::MESSAGE_OVERHEAD;
@@ -64,6 +66,10 @@ pub struct TokenizerSpec {
     /// depends on the model's vision encoder and the image size.
     #[serde(default = "default_image_tokens")]
     pub image_tokens: u64,
+    /// How the model's vision encoder tiles images, so inline images cost what their size
+    /// needs (ADR-036). Without it, every image costs `image_tokens`.
+    #[serde(default)]
+    pub image: Option<ImageTiling>,
 }
 
 impl Default for TokenizerSpec {
@@ -74,6 +80,7 @@ impl Default for TokenizerSpec {
             chat_template: None,
             message_overhead: default_overhead(),
             image_tokens: default_image_tokens(),
+            image: None,
         }
     }
 }
@@ -160,6 +167,7 @@ struct ModelTokenizer {
     /// framing separately.
     template: Option<ChatTemplate>,
     image_tokens: u64,
+    image: Option<ImageTiling>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -266,6 +274,7 @@ impl Tokenizers {
                 overhead: s.message_overhead,
                 template,
                 image_tokens: s.image_tokens,
+                image: s.image,
             };
             if models.insert(s.model.clone(), entry).is_some() {
                 return Err(LoadError::Duplicate(s.model.clone()));
@@ -449,23 +458,18 @@ impl Tokenizers {
             }
         };
         let mut added = 0;
-        // Images, in the message that carries them.
+        // Images, in the message that carries them, priced by size where possible.
         for (i, m) in json.as_array().into_iter().flatten().enumerate() {
-            let images = m
+            let images: u64 = m
                 .get("content")
                 .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
-                .filter(|p| {
-                    matches!(
-                        p.get("type").and_then(Value::as_str),
-                        Some("image_url" | "image" | "input_image")
-                    )
-                })
-                .count() as u64;
+                .filter_map(|p| image::part_tokens(p, t.image.as_ref(), t.image_tokens))
+                .sum();
             if let Some(n) = per_message.get_mut(i) {
-                *n += images * t.image_tokens;
-                added += images * t.image_tokens;
+                *n += images;
+                added += images;
             }
         }
         let Some(template) = &t.template else {

@@ -321,8 +321,9 @@ Follow-ups from the roadmap in docs/11, grouped by what they need.
 
 - **Hot spares rendered as router workers.** Router `hot_spare` flags are set by hand in
   config. The capacity controller doesn't render spares as separately addressable workers.
-- **Image token costs.** Each image part costs a fixed `image_tokens` per model (ADR-032),
-  not what its size and tiling really cost.
+- **Remote image sizes.** Inline (`data:`) images are priced by size and the model's
+  tiling (ADR-036). Images given by URL cost the flat `image_tokens`, because the gateway
+  doesn't fetch them.
 - **Prefix-cache index from Dynamo KV events.** The gateway predicts cache hits from its own
   history (ADR-030). It doesn't see evictions or other replicas' traffic.
 - **Capacity placement across pools.** The planner counts each region's pool in replicas

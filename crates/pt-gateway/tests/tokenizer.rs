@@ -300,3 +300,42 @@ async fn the_chat_template_counts_tools_tool_calls_and_images() {
     assert_eq!(s["chat_template"], true);
     assert_eq!(s["template_errors"], 0);
 }
+
+fn png_data_url(w: u32, h: u32) -> String {
+    use base64::Engine;
+    let mut b = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+    b.extend(w.to_be_bytes());
+    b.extend(h.to_be_bytes());
+    b.extend([8, 2, 0, 0, 0]);
+    format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(b)
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inline_images_cost_what_their_size_needs() {
+    let (engine, seen) = engine().await;
+    let mut c = config(&engine, 100_000);
+    c.tokenization.tokenizers[0].image = Some(pt_tokenize::ImageTiling {
+        tile_px: 336,
+        tokens_per_tile: 144,
+        max_tiles: 16,
+        base_tokens: 144,
+    });
+    let app = AppState::new(&c, Arc::new(MemorySink::default())).unwrap();
+    let gw = serve(router(app)).await;
+    for (w, h) in [(300, 300), (672, 336)] {
+        chat(
+            &gw,
+            &json!([{ "role": "user", "content": [
+                { "type": "text", "text": "hello" },
+                { "type": "image_url", "image_url": { "url": png_data_url(w, h) } }
+            ] }]),
+        )
+        .await;
+    }
+    let seen = seen.lock().unwrap().clone();
+    // One tile and a thumbnail, then two tiles and a thumbnail (ADR-036).
+    assert_eq!(seen[1] - seen[0], 144, "{seen:?}");
+}

@@ -62,6 +62,8 @@ its output length.
   one ([ADR-028](adr/ADR-028-input-token-counting.md)). The model's chat template is
   rendered without message text, so tool schemas, tool calls, system defaults, and role
   markers are counted as well ([ADR-032](adr/ADR-032-chat-template-token-counts.md)).
+  Inline images cost what the model's tiling needs for their size, read from the image
+  header ([ADR-036](adr/ADR-036-image-tokens-by-size.md)).
   The gateway passes its count to the router in `x-pt-prompt-tokens`. The prefix hashes are checked
   against a gateway-local, approximate **prefix-cache index**: a Bloom filter per pool, fed
   from Dynamo KV events via NATS. That gives an expected `cached_prefill_tokens` value. A
