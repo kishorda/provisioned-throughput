@@ -163,7 +163,8 @@ on the hot path ([ADR-003](adr/ADR-003-lease-based-distributed-quota.md)):
 > limiters in place. Home gateways are built as gateway-to-gateway forwarding
 > ([ADR-040](adr/ADR-040-gateway-affinity.md)): with `[affinity]`, a reservation of at
 > most `home_below_cus` CUs, and every session, is served by one replica chosen by
-> rendezvous hashing.
+> rendezvous hashing. Peers can be discovered from a headless Service's DNS
+> ([ADR-042](adr/ADR-042-gateway-peer-discovery.md)).
 >
 > **High availability** ([ADR-027](adr/ADR-027-quota-coordinator-standby.md)). Two
 > replicas run active/standby on a Kubernetes Lease instead of Raft. Only the leader

@@ -100,6 +100,7 @@ The design rests on six decisions:
 | [039](adr/ADR-039-adaptive-backfill.md) | Size the floor's room for provisioned work from its expected load, opt-in (refines 026) |
 | [040](adr/ADR-040-gateway-affinity.md) | Route sessions and small reservations to one gateway replica (home gateways) |
 | [041](adr/ADR-041-sales-holds.md) | Pause new sales on a pool during an expedited drain, through expiring holds |
+| [042](adr/ADR-042-gateway-peer-discovery.md) | Discover gateway peers from a headless Service's DNS, for affinity (extends 040) |
 
 ## Glossary
 

@@ -65,6 +65,7 @@ fn config(engine: &str, me: &str, peers: &[&str]) -> GatewayConfig {
             peers: peers.iter().map(|p| p.to_string()).collect(),
             home_below_cus: 4,
             home_gateways: 1,
+            ..Default::default()
         }),
         usage_export: None,
         reservations: vec![reservation("big", 20), reservation("small", 2)],

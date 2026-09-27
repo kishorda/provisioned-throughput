@@ -333,8 +333,6 @@ Follow-ups from the roadmap in docs/11, grouped by what they need.
   isn't scheduled.
 - **Signing in a cloud KMS.** Snapshots can be signed by a key in Vault Transit
   (`[entitlements.vault]`, ADR-038). AWS and Google Cloud KMS aren't supported.
-- **Peer discovery for gateway affinity.** `[affinity] peers` (ADR-040) is a list in
-  configuration, not discovered from Kubernetes.
 - **Redpanda.** Gateways push usage to the control plane, which writes it to ClickHouse
   (ADR-019). Usage and SLA aggregation runs in Rust, not ClickHouse SQL.
 - **Controller workflows:** no Dynamo Planner floor integration. An expedited drain pauses

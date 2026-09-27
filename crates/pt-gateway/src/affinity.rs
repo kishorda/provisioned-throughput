@@ -19,7 +19,7 @@
 //! the request is served where it is and the owner is skipped for a while.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -31,14 +31,27 @@ pub const FORWARDED_HEADER: &str = "x-pt-forwarded";
 const DOWN_FOR: Duration = Duration::from_secs(10);
 
 /// `[affinity]`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AffinityConfig {
-    /// This replica's URL, as it appears in `peers`.
+    /// This replica's URL, as it appears in `peers`. With `self_ip_env`, it can be left
+    /// empty.
+    #[serde(default)]
     pub self_url: String,
     /// Every replica in the region, including this one, for example the pods of a
-    /// StatefulSet behind a headless Service.
+    /// StatefulSet behind a headless Service. Empty with `discovery_dns`.
+    #[serde(default)]
     pub peers: Vec<String>,
+    /// Discover peers from DNS instead: a headless Service's `host:port`, resolved every
+    /// `refresh_secs`. Each address becomes a peer `http://ip:port` (ADR-042).
+    #[serde(default)]
+    pub discovery_dns: Option<String>,
+    #[serde(default = "default_refresh_secs")]
+    pub refresh_secs: u64,
+    /// Environment variable holding this pod's IP (Kubernetes' `status.podIP`), to build
+    /// `self_url` as `http://ip:port` with the port of `discovery_dns`.
+    #[serde(default)]
+    pub self_ip_env: Option<String>,
     /// Reservations of at most this many CUs are served by home gateways. 0 turns it off.
     #[serde(default)]
     pub home_below_cus: u32,
@@ -50,6 +63,20 @@ pub struct AffinityConfig {
 fn default_home_gateways() -> usize {
     2
 }
+fn default_refresh_secs() -> u64 {
+    10
+}
+
+/// Peers resolved from `host:port`, as `http://ip:port`, sorted.
+pub async fn resolve_peers(dns: &str) -> std::io::Result<Vec<String>> {
+    let mut peers: Vec<String> = tokio::net::lookup_host(dns)
+        .await?
+        .map(|a| format!("http://{a}"))
+        .collect();
+    peers.sort();
+    peers.dedup();
+    Ok(peers)
+}
 
 /// Where a request should be served.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -60,7 +87,9 @@ pub enum Route {
 
 pub struct Affinity {
     self_url: String,
-    peers: Vec<String>,
+    /// Refreshed from DNS with `discovery_dns`.
+    peers: RwLock<Vec<String>>,
+    discovery: Option<(String, Duration)>,
     home_below_cus: u32,
     home_gateways: usize,
     pub http: reqwest::Client,
@@ -70,19 +99,50 @@ pub struct Affinity {
 impl Affinity {
     pub fn new(config: &AffinityConfig) -> Result<Self, String> {
         let norm = |u: &str| u.trim_end_matches('/').to_string();
-        let self_url = norm(&config.self_url);
+        let self_url = match (&config.self_ip_env, &config.discovery_dns) {
+            (Some(var), Some(dns)) => {
+                let ip = std::env::var(var).map_err(|_| format!("set {var} to this pod's IP"))?;
+                let port = dns
+                    .rsplit_once(':')
+                    .map(|(_, p)| p)
+                    .ok_or("affinity.discovery_dns must be host:port")?;
+                let host = if ip.contains(':') {
+                    format!("[{ip}]")
+                } else {
+                    ip
+                };
+                format!("http://{host}:{port}")
+            }
+            (Some(_), None) => return Err("affinity.self_ip_env needs discovery_dns".into()),
+            (None, _) => norm(&config.self_url),
+        };
+        if self_url.is_empty() {
+            return Err("affinity needs self_url or self_ip_env".into());
+        }
         let mut peers: Vec<String> = config.peers.iter().map(|p| norm(p)).collect();
+        match &config.discovery_dns {
+            Some(_) if !peers.is_empty() => {
+                return Err("set affinity.peers or discovery_dns, not both".into())
+            }
+            // Until the first lookup, this replica is the only peer it knows.
+            Some(_) => peers.push(self_url.clone()),
+            None if !peers.contains(&self_url) => {
+                return Err(format!("affinity.peers must include self_url {self_url}"))
+            }
+            None => {}
+        }
         peers.sort();
         peers.dedup();
-        if !peers.contains(&self_url) {
-            return Err(format!("affinity.peers must include self_url {self_url}"));
-        }
         if config.home_gateways == 0 {
             return Err("affinity.home_gateways must be at least 1".into());
         }
         Ok(Self {
             self_url,
-            peers,
+            peers: RwLock::new(peers),
+            discovery: config
+                .discovery_dns
+                .clone()
+                .map(|d| (d, Duration::from_secs(config.refresh_secs.max(1)))),
             home_below_cus: config.home_below_cus,
             home_gateways: config.home_gateways,
             http: reqwest::Client::new(),
@@ -91,16 +151,57 @@ impl Affinity {
     }
 
     /// Peers by rendezvous rank for `key`, highest first, skipping ones marked down.
-    fn ranked(&self, key: &str, now: Instant) -> Vec<&String> {
+    fn ranked(&self, key: &str, now: Instant) -> Vec<String> {
         let down = self.down.lock().unwrap_or_else(|e| e.into_inner());
-        let mut ranked: Vec<(u64, &String)> = self
-            .peers
+        let peers = self.peers.read().unwrap_or_else(|e| e.into_inner());
+        let mut ranked: Vec<(u64, &String)> = peers
             .iter()
             .filter(|p| **p == self.self_url || down.get(*p).is_none_or(|until| now >= *until))
             .map(|p| (fnv1a(&[key.as_bytes(), b"\0", p.as_bytes()]), p))
             .collect();
         ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
-        ranked.into_iter().map(|(_, p)| p).collect()
+        ranked.into_iter().map(|(_, p)| p.clone()).collect()
+    }
+
+    /// The peers known now.
+    pub fn peers(&self) -> Vec<String> {
+        self.peers.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Replace the peers (from discovery). This replica always stays one. An empty list
+    /// is ignored, so a failed lookup keeps the last known peers. Returns whether the set
+    /// changed.
+    pub fn set_peers(&self, mut peers: Vec<String>) -> bool {
+        if peers.is_empty() {
+            return false;
+        }
+        peers.push(self.self_url.clone());
+        peers.sort();
+        peers.dedup();
+        let mut current = self.peers.write().unwrap_or_else(|e| e.into_inner());
+        let changed = *current != peers;
+        *current = peers;
+        changed
+    }
+
+    /// With `discovery_dns`, refresh the peers from DNS forever.
+    pub async fn discover(self: std::sync::Arc<Self>) {
+        let Some((dns, every)) = self.discovery.clone() else {
+            return;
+        };
+        let mut tick = tokio::time::interval(every);
+        loop {
+            tick.tick().await;
+            match resolve_peers(&dns).await {
+                Ok(peers) if !peers.is_empty() => {
+                    if self.set_peers(peers) {
+                        tracing::info!(peers = ?self.peers(), "gateway peers from DNS");
+                    }
+                }
+                Ok(_) => tracing::warn!(%dns, "no gateway peers in DNS; keeping the last known"),
+                Err(e) => tracing::warn!(%dns, error = %e, "gateway peer lookup failed"),
+            }
+        }
     }
 
     /// Where to serve a request. `spread` picks among home gateways (a request id works).
@@ -113,19 +214,19 @@ impl Affinity {
         now: Instant,
     ) -> Route {
         let owner = if let Some(s) = session {
-            self.ranked(&format!("session:{s}"), now).first().copied()
+            self.ranked(&format!("session:{s}"), now).first().cloned()
         } else if reservation_cus > 0 && reservation_cus <= self.home_below_cus {
             let homes = self.ranked(&format!("home:{deployment}"), now);
             let homes = &homes[..homes.len().min(self.home_gateways)];
-            if homes.contains(&&self.self_url) {
+            if homes.contains(&self.self_url) {
                 return Route::Here;
             }
-            homes.get(spread as usize % homes.len().max(1)).copied()
+            homes.get(spread as usize % homes.len().max(1)).cloned()
         } else {
             None
         };
         match owner {
-            Some(o) if *o != self.self_url => Route::Forward(o.clone()),
+            Some(o) if o != self.self_url => Route::Forward(o),
             _ => Route::Here,
         }
     }
@@ -161,6 +262,7 @@ mod tests {
             peers: peers.iter().map(|p| p.to_string()).collect(),
             home_below_cus: home_below,
             home_gateways: homes,
+            ..Default::default()
         })
         .unwrap()
     }
@@ -237,7 +339,73 @@ mod tests {
             peers: vec!["http://a".into()],
             home_below_cus: 0,
             home_gateways: 2,
+            ..Default::default()
         })
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn peers_come_from_dns_and_survive_a_failed_lookup() {
+        // localhost resolves to at least the loopback address.
+        let peers = resolve_peers("localhost:8080").await.unwrap();
+        assert!(
+            peers.iter().any(|p| p == "http://127.0.0.1:8080"),
+            "{peers:?}"
+        );
+
+        // SAFETY: only this test reads this variable.
+        unsafe { std::env::set_var("PT_TEST_POD_IP", "10.0.0.5") };
+        let a = Affinity::new(&AffinityConfig {
+            discovery_dns: Some("pt-gateway.pt-system.svc:8080".into()),
+            self_ip_env: Some("PT_TEST_POD_IP".into()),
+            home_gateways: 2,
+            refresh_secs: 10,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(
+            a.peers(),
+            ["http://10.0.0.5:8080"],
+            "itself until the first lookup"
+        );
+        a.set_peers(vec![
+            "http://10.0.0.6:8080".into(),
+            "http://10.0.0.7:8080".into(),
+        ]);
+        assert_eq!(a.peers().len(), 3, "discovered peers plus itself");
+        a.set_peers(vec![]);
+        assert_eq!(a.peers().len(), 3, "a failed lookup keeps the last known");
+        // Sessions now spread over all three.
+        let t = Instant::now();
+        let owners: std::collections::HashSet<Route> = (0..50)
+            .map(|n| a.route(Some(&format!("s{n}")), "d", 1, 0, t))
+            .collect();
+        assert_eq!(owners.len(), 3);
+    }
+
+    #[test]
+    fn discovery_config_rules() {
+        let base = AffinityConfig {
+            home_gateways: 2,
+            refresh_secs: 10,
+            ..Default::default()
+        };
+        let both = AffinityConfig {
+            self_url: "http://a".into(),
+            peers: vec!["http://a".into()],
+            discovery_dns: Some("x:80".into()),
+            ..base.clone()
+        };
+        assert!(Affinity::new(&both).is_err());
+        let no_self = AffinityConfig {
+            discovery_dns: Some("x:80".into()),
+            ..base.clone()
+        };
+        assert!(Affinity::new(&no_self).is_err());
+        let ip_without_dns = AffinityConfig {
+            self_ip_env: Some("POD_IP".into()),
+            ..base
+        };
+        assert!(Affinity::new(&ip_without_dns).is_err());
     }
 }

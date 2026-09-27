@@ -29,6 +29,10 @@ cache_entries = 100000   # messages whose counts are cached
 # [affinity]
 # self_url = "http://pt-gateway-0.pt-gateway:8080"
 # peers = ["http://pt-gateway-0.pt-gateway:8080", "http://pt-gateway-1.pt-gateway:8080"]
+# Or discover peers from a headless Service instead of listing them (ADR-042):
+# discovery_dns = "pt-gateway.pt-system.svc.cluster.local:8080"
+# self_ip_env = "POD_IP"   # this pod's IP (status.podIP), instead of self_url
+# refresh_secs = 10
 # home_below_cus = 4       # reservations this small get home gateways
 # home_gateways = 2
 

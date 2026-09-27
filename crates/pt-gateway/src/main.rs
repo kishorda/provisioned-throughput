@@ -33,6 +33,10 @@ async fn main() -> anyhow::Result<()> {
     }
     let sink: Arc<dyn UsageSink> = Arc::new(pt_gateway::usage::TeeSink(sinks));
     let app = AppState::new(&config, sink)?;
+    // Refresh gateway peers from DNS, when affinity discovers them (ADR-042).
+    if let Some(aff) = app.affinity.clone() {
+        tokio::spawn(aff.discover());
+    }
 
     if let Some(source) = config.entitlements.clone() {
         let client = pt_gateway::sync::SnapshotClient::new(source.clone())?;
