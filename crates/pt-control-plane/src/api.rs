@@ -122,7 +122,7 @@ pub struct ApiError {
 }
 
 impl ApiError {
-    fn new(status: StatusCode, code: &str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(status: StatusCode, code: &str, message: impl Into<String>) -> Self {
         Self {
             status,
             code: code.into(),
@@ -533,7 +533,10 @@ async fn delete_deployment<S: Store, P: CapacityPlanner, C: Clock>(
     Ok(([etag(&pt)], Json(pt)).into_response())
 }
 
-fn operator<S, P, C>(svc: &Service<S, P, C>, headers: &HeaderMap) -> Result<(), ApiError> {
+pub(crate) fn operator<S, P, C>(
+    svc: &Service<S, P, C>,
+    headers: &HeaderMap,
+) -> Result<(), ApiError> {
     let expected = svc.config.operators.as_ref().map(|o| o.api_key.as_str());
     let given = headers
         .get(header::AUTHORIZATION)
@@ -687,7 +690,7 @@ async fn steering<S: Store, P: CapacityPlanner, C: Clock>(
 }
 
 /// The region a bearer region token belongs to.
-fn region_of<'a, S, P, C>(
+pub(crate) fn region_of<'a, S, P, C>(
     svc: &'a Service<S, P, C>,
     headers: &HeaderMap,
 ) -> Result<&'a str, ApiError> {

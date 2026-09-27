@@ -34,6 +34,8 @@ pub struct WorkerPod {
     pub role: Role,
     /// Being deleted already: its replacement is the owner's job, not a surge's.
     pub terminating: bool,
+    /// Its `Ready` condition is `True`.
+    pub ready: bool,
 }
 
 /// What the drain logic needs to know about a node.
@@ -148,6 +150,7 @@ mod tests {
             node: node.into(),
             role,
             terminating: false,
+            ready: true,
         }
     }
 

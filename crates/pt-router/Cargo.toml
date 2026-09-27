@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 pt-core.workspace = true
+pt-entitlement = { workspace = true, features = ["client"] }
 anyhow.workspace = true
 axum.workspace = true
 bytes.workspace = true
@@ -26,3 +27,5 @@ pt-mock-engine.workspace = true
 pt-gateway = { path = "../pt-gateway" }
 pt-admission.workspace = true
 uuid.workspace = true
+pt-control-plane.workspace = true
+jiff.workspace = true

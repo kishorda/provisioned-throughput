@@ -1,6 +1,6 @@
 # 09 · Metering, Observability & SLAs
 
-> Decision record: [ADR-010](adr/ADR-010-sla-at-gateway.md)
+> Decision records: [ADR-010](adr/ADR-010-sla-at-gateway.md), [ADR-043](adr/ADR-043-dashboards.md)
 
 ## 1. Usage record
 
@@ -172,6 +172,64 @@ flowchart LR
 - Gateways push to the control plane, which writes to ClickHouse. The Redpanda stage of
   the pipeline in §2 isn't built.
 - Usage records include `session_id`. They carry no prompt or completion content.
+
+## 6. Dashboards
+
+The control plane serves two pages ([ADR-043](adr/ADR-043-dashboards.md)): one for
+operators and one for customers. Both are static HTML and JS embedded in the binary, and
+both call the JSON endpoints below with a bearer key.
+
+```mermaid
+flowchart LR
+  ctl[Capacity controller] -->|PoolReport after each reconcile| cp[Control plane]
+  rt[pt-router] -->|status every 15 s| cp
+  gw[Gateways] -->|heartbeats, usage| cp
+  cp --> sys["/internal/dashboard: System, Customers"]
+  cp --> cust["/dashboard: customer usage"]
+```
+
+| Endpoint | Key | Shows |
+|----------|-----|-------|
+| `GET /internal/v1/dashboard/system` | operator | Alerts, control plane, regions, capacity sold, pools and replicas, routers and workers |
+| `GET /internal/v1/dashboard/customers` | operator | Every customer's reservations, CUs, models, monthly price |
+| `GET /internal/v1/dashboard/usage/{tenant}?hours=` | operator | One customer's usage view |
+| `GET /v1/dashboard/usage?hours=` | tenant admin | The caller's own usage view |
+| `POST /internal/v1/reports/pools` | region | A `ModelPool`'s state from the controller |
+| `POST /internal/v1/reports/routers` | region | A router's `/v1/router/status` |
+
+**System view.**
+- *Alerts*, most severe first. Critical alerts:
+  - no leader;
+  - a region down, or none of its gateways serving;
+  - capacity oversold;
+  - a pool not Ready, short of capacity, or with fewer ready replicas than must stay
+    available.
+
+  Warnings: capacity at 90% or more, a capped drain surge, stale reports, and
+  reservations below the 99.8% SLA commitment month to date.
+- *Pools and replicas*: desired, ready (from pod readiness, per role), floor, minimum
+  available, hot and loaded warm spares, allocations and failover demand, draining nodes,
+  and conditions.
+- *Capacity sold*: replicas each region's pool holds for reservations, CUs sold, and the
+  CUs still for sale per tier.
+- *Routers*: queues and dispatches by class, preemptions, the backfill ratio, and each
+  worker's slots, KV blocks and backfill.
+
+Reports are soft state in the store, so any control-plane instance can serve the page.
+A pool report older than 10 minutes, or a router report older than 60 seconds, is marked
+stale.
+
+**Customer usage view.** For each reservation over a window from 1 hour to 35 days:
+- requests by class, rejections by reason, and utilisation against the entitlement;
+- TTFT and TPOT p50, p95 and p99, and the cache hit rate;
+- tokens and WU, with sparklines over time;
+- declared versus observed shape;
+- SLA attainment and credit month to date;
+- a resize recommendation;
+- deployments, keys and endpoints.
+
+Invoices follow. The numbers come from the same code as the usage, SLA, quote and
+invoice APIs.
 
 ## Blog problems addressed
 P8, P18, P19. See [traceability](01-requirements-and-traceability.md#2-traceability-matrix).

@@ -14,6 +14,7 @@
 
 #[cfg(feature = "client")]
 pub mod client_tls;
+pub mod report;
 
 use ed25519_dalek::{Signer, Verifier};
 use pt_admission::BoundaryPolicy;

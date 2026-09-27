@@ -45,3 +45,10 @@ hot_spare = true
 reservation = "res-acme-agents"
 wu_per_sec = 2000.0
 kv_share = 0.5
+
+# Send this router's status to the control plane for the system dashboard (ADR-043).
+# [report]
+# control_plane_url = "http://127.0.0.1:8090"
+# token = "region-token-eu-west-dev"
+# router_id = "${HOSTNAME}"      # ${VAR} is read from the environment
+# interval_secs = 15

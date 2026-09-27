@@ -2,7 +2,7 @@
 
 use anyhow::Context;
 use pt_router::config::RouterConfig;
-use pt_router::http;
+use pt_router::{http, report};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -19,7 +19,12 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("binding {}", config.listen))?;
     tracing::info!(listen = %config.listen, workers = config.workers.len(), "router listening");
-    axum::serve(listener, http::router(http::Shared::new(&config)))
+    let shared = http::Shared::new(&config);
+    if let Some(r) = &config.report {
+        let reporter = report::Reporter::new(r).context("status reporting")?;
+        tokio::spawn(reporter.run(shared.clone()));
+    }
+    axum::serve(listener, http::router(shared))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })

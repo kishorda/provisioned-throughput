@@ -230,6 +230,24 @@ restart the control plane with the new `signing_key`, then remove the old key on
 `/internal/v1/regions` shows no gateway on its id (docs/12 §6, ADR-020). The keys in
 `config/` are for development only.
 
+## Dashboards
+
+The control plane serves an operator page and a customer page (docs/09 §6, ADR-043):
+
+```sh
+target/debug/pt-control-plane config/control-plane.toml &
+# Operators: http://127.0.0.1:8090/internal/dashboard   key sk-operator-dev
+#   System: alerts, regions, capacity sold, pools and ready replicas per model, routers and workers.
+#   Customers: every customer, and any one's usage, SLA, advice and invoices.
+# Customers: http://127.0.0.1:8090/dashboard            key sk-admin-acme-dev
+curl -s 127.0.0.1:8090/internal/v1/dashboard/system -H 'Authorization: Bearer sk-operator-dev'
+curl -s '127.0.0.1:8090/v1/dashboard/usage?hours=24' -H 'Authorization: Bearer sk-admin-acme-dev'
+```
+
+Replica counts come from the capacity controller, which reports each pool after every
+reconcile when a snapshot source is configured. Worker load comes from routers with a
+`[report]` section (see `config/router.toml`). With no reports yet, those sections are empty.
+
 ## Tenant-aware router
 
 `pt-router` sits between gateways and workers and decides which request runs next and where
@@ -364,5 +382,7 @@ Follow-ups from the roadmap in docs/11, grouped by what they need.
   volume. Each gateway replica keeps its own token-count cache (ADR-028).
 - **Transport.** Gateway → Quota Coordinator and gateway → engine are plain HTTP within a
   region.
+- **Dashboards show the latest state, not history.** Pool and router reports replace the
+  previous one; use Prometheus for trends (ADR-043).
 - **In-memory store.** It's single-instance. Use the SQL store to run several
   control-plane instances (ADR-023).

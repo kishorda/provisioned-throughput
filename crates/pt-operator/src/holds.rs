@@ -5,9 +5,12 @@
 //! region's token (`PUT /internal/v1/holds/{model}`), renews it while the drain lasts, and
 //! lifts it when it's over. Holds expire, so a controller that dies can't pause sales for
 //! good.
+//!
+//! The same client reports each pool's state for the system dashboard (ADR-043).
 
 use std::time::Duration;
 
+use pt_entitlement::report::PoolReport;
 use serde_json::json;
 
 use crate::failover::SnapshotSource;
@@ -60,6 +63,21 @@ impl HoldClient {
             .delete(format!("{}/internal/v1/holds/{model}", self.base))
             .query(&[("source", source)])
             .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        check(resp).await
+    }
+}
+
+impl HoldClient {
+    /// Report a pool's state for the system dashboard (ADR-043).
+    pub async fn report_pool(&self, report: &PoolReport) -> Result<(), String> {
+        let resp = self
+            .http
+            .post(format!("{}/internal/v1/reports/pools", self.base))
+            .bearer_auth(&self.token)
+            .json(report)
             .send()
             .await
             .map_err(|e| e.to_string())?;

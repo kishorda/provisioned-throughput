@@ -44,6 +44,29 @@ pub struct RouterConfig {
     pub workers: Vec<WorkerConfig>,
     #[serde(default)]
     pub allocations: Vec<AllocationConfig>,
+    /// Send `/v1/router/status` to the control plane for the system dashboard (ADR-043).
+    #[serde(default)]
+    pub report: Option<ReportConfig>,
+}
+
+/// `[report]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReportConfig {
+    pub control_plane_url: String,
+    /// The region's token, as the gateways use.
+    pub token: String,
+    /// Names this router on the dashboard, for example its pod name. `${VAR}` is read
+    /// from the environment.
+    pub router_id: String,
+    #[serde(default = "default_report_interval_secs")]
+    pub interval_secs: u64,
+    #[serde(default)]
+    pub tls: pt_entitlement::client_tls::ControlPlaneTls,
+}
+
+fn default_report_interval_secs() -> u64 {
+    15
 }
 
 /// `[adaptive_backfill]`.
@@ -158,6 +181,12 @@ impl RouterConfig {
 
     pub fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(!self.workers.is_empty(), "configure at least one worker");
+        if let Some(r) = &self.report {
+            anyhow::ensure!(r.interval_secs > 0, "report.interval_secs must be positive");
+            r.tls
+                .check(&r.control_plane_url)
+                .map_err(|e| anyhow::anyhow!("report: {e}"))?;
+        }
         anyhow::ensure!(self.block_size > 0, "block_size must be positive");
         anyhow::ensure!(
             (0.0..=1.0).contains(&self.backfill_ratio),

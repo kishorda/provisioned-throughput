@@ -38,7 +38,7 @@ use crate::failover::{next_heartbeat, GatewayHeartbeat};
 use crate::model::Heartbeat;
 use crate::model::{ApiKey, Deployment, Event, ProvisionedThroughput, RegionIncident};
 use crate::store::Lease;
-use crate::store::{IdempotencyRecord, SalesHold, Store, StoreError};
+use crate::store::{ComponentReport, IdempotencyRecord, SalesHold, Store, StoreError};
 use jiff::SignedDuration;
 
 /// Migrations in order. Never edit one that has shipped; add a new file.
@@ -68,6 +68,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         6,
         "sales_holds",
         include_str!("../migrations/0006_sales_holds.sql"),
+    ),
+    (
+        7,
+        "component_reports",
+        include_str!("../migrations/0007_component_reports.sql"),
     ),
 ];
 
@@ -868,6 +873,57 @@ impl Store for SqlStore {
             })
         })
         .transpose()
+    }
+
+    async fn put_report(&self, report: ComponentReport) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO component_reports (kind, region, id, body, reported_at)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (kind, region, id)
+                 DO UPDATE SET body = excluded.body, reported_at = excluded.reported_at",
+        )
+        .bind(&report.kind)
+        .bind(&report.region)
+        .bind(&report.id)
+        .bind(Json(&report.body))
+        .bind(to_db(report.reported_at))
+        .execute(&self.pool)
+        .await
+        .map_err(unavailable)?;
+        Ok(())
+    }
+
+    async fn reports(&self, kind: &str) -> Result<Vec<ComponentReport>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT kind, region, id, body, reported_at FROM component_reports
+             WHERE kind = $1 ORDER BY region, id",
+        )
+        .bind(kind)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(unavailable)?;
+        rows.into_iter()
+            .map(|r| {
+                let bad = |e| corrupt("component report", e);
+                let body: Json<serde_json::Value> = r.try_get("body").map_err(bad)?;
+                Ok(ComponentReport {
+                    kind: r.try_get("kind").map_err(bad)?,
+                    region: r.try_get("region").map_err(bad)?,
+                    id: r.try_get("id").map_err(bad)?,
+                    body: body.0,
+                    reported_at: from_db(r.try_get("reported_at").map_err(bad)?)?,
+                })
+            })
+            .collect()
+    }
+
+    async fn prune_reports(&self, before: Timestamp) -> Result<usize, StoreError> {
+        let done = sqlx::query("DELETE FROM component_reports WHERE reported_at < $1")
+            .bind(to_db(before))
+            .execute(&self.pool)
+            .await
+            .map_err(unavailable)?;
+        Ok(done.rows_affected() as usize)
     }
 
     async fn put_hold(&self, hold: SalesHold) -> Result<(), StoreError> {

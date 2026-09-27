@@ -177,6 +177,14 @@ pub trait CapacityPlanner: Send + Sync + 'static {
         at: Timestamp,
     ) -> impl Future<Output = Option<u32>> + Send;
 
+    /// A pool's configured capacity and reserved amount in micro-replicas, for the
+    /// dashboard (no scheduled arrivals). `None` if the pool doesn't exist or can't be read.
+    fn pool_micro(
+        &self,
+        region: &str,
+        model: &str,
+    ) -> impl Future<Output = Option<(u64, u64)>> + Send;
+
     /// Re-establish capacity already sold, from every live reservation (at startup). Never
     /// fails: a pool whose configured replicas have shrunk below what's sold is
     /// overcommitted, reports no availability, and new sales fail until it's fixed. A
@@ -359,6 +367,13 @@ impl CapacityPlanner for MemoryPlanner {
         at: Timestamp,
     ) -> Option<u32> {
         self.available_at(region, model, tier, at)
+    }
+
+    async fn pool_micro(&self, region: &str, model: &str) -> Option<(u64, u64)> {
+        let pools = self.pools.lock().unwrap_or_else(|e| e.into_inner());
+        pools
+            .get(&(region.to_string(), model.to_string()))
+            .map(|p| (p.capacity, p.reserved))
     }
 
     async fn restore(&self, live: &[Held]) {

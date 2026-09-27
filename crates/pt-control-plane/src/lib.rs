@@ -10,6 +10,8 @@ pub mod billing_api;
 pub mod capacity;
 pub mod clock;
 pub mod config;
+pub mod dashboard;
+pub mod dashboard_api;
 pub mod failover;
 pub mod model;
 pub mod planner;
@@ -51,11 +53,13 @@ pub fn app_with_usage<S: store::Store, P: planner::CapacityPlanner, C: Clock>(
     let (telemetry_routes, tel) = telemetry::telemetry(svc.clone(), usage);
     let quotes = quote_api::router(svc.clone(), tel.clone());
     let invoices = billing_api::router(svc.clone(), tel.clone());
+    let dashboards = dashboard_api::router(svc.clone(), tel.clone());
     (
         api::router(svc)
             .merge(telemetry_routes)
             .merge(quotes)
-            .merge(invoices),
+            .merge(invoices)
+            .merge(dashboards),
         tel,
     )
 }

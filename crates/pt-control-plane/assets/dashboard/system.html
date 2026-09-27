@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PT System Status</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="dashboard/app.css">
+<script src="dashboard/app.js" defer></script>
+</head>
+<body data-page="system">
+<header>
+  <h1>Provisioned Throughput · Operations</h1>
+  <nav class="tabs" aria-label="Views">
+    <button type="button" data-tab="system">System</button>
+    <button type="button" data-tab="customers">Customers</button>
+  </nav>
+  <span class="spacer"></span>
+  <span id="status" class="muted small"></span>
+  <label class="small muted"><input id="auto" type="checkbox" checked> Auto-refresh</label>
+  <button type="button" id="refresh">Refresh</button>
+  <button type="button" id="theme">Auto theme</button>
+  <button type="button" id="logout" hidden>Sign out</button>
+</header>
+<main></main>
+</body>
+</html>

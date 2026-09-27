@@ -29,6 +29,7 @@ use crate::failover::failover_extra;
 pub use crate::failover::SnapshotRx;
 use crate::plan::{self, PoolInput};
 use crate::render::Role;
+use crate::report;
 
 /// Resync even without changes, to repair drift in children.
 const RESYNC: Duration = Duration::from_secs(300);
@@ -178,7 +179,7 @@ async fn reconcile(pool: Arc<ModelPool>, ctx: Arc<Ctx>) -> Result<Action, Error>
         .get_opt(&pool.spec.profile_ref)
         .await?;
 
-    let drain = drain_state(client, &ns, &name).await?;
+    let (drain, ready) = drain_state(client, &ns, &name).await?;
     let input = PoolInput {
         name: &name,
         namespace: &ns,
@@ -248,6 +249,14 @@ async fn reconcile(pool: Arc<ModelPool>, ctx: Arc<Ctx>) -> Result<Action, Error>
         }
     }
 
+    // Report the pool for the system dashboard (ADR-043). Best effort, like the holds.
+    if let Some(cp) = &ctx.holds {
+        let r = report::pool_report(&ns, &name, &pool.spec, &plan.status, ready);
+        if let Err(e) = cp.report_pool(&r).await {
+            tracing::warn!(pool = %name, error = %e, "couldn't report the pool");
+        }
+    }
+
     Api::<ModelPool>::namespaced(client.clone(), &ns)
         .patch_status(
             &name,
@@ -284,7 +293,12 @@ fn node_state(n: &Node) -> NodeState {
 }
 
 /// The pool's worker pods and the state of the nodes they run on.
-async fn drain_state(client: &Client, ns: &str, pool: &str) -> Result<drain::Drain, Error> {
+/// Also returns the Ready worker pods per role, for the pool report.
+async fn drain_state(
+    client: &Client,
+    ns: &str,
+    pool: &str,
+) -> Result<(drain::Drain, pt_entitlement::report::Roles), Error> {
     let pods = Api::<Pod>::namespaced(client.clone(), ns)
         .list(&ListParams::default().labels(&format!("{}={pool}", labels::POOL)))
         .await?
@@ -296,6 +310,11 @@ async fn drain_state(client: &Client, ns: &str, pool: &str) -> Result<drain::Dra
                 node: p.spec.as_ref()?.node_name.clone()?,
                 role: Role::parse(p.labels().get(labels::ROLE)?)?,
                 terminating: p.metadata.deletion_timestamp.is_some(),
+                ready: p
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.conditions.as_ref())
+                    .is_some_and(|cs| cs.iter().any(|c| c.type_ == "Ready" && c.status == "True")),
             })
         })
         .collect();
@@ -309,7 +328,7 @@ async fn drain_state(client: &Client, ns: &str, pool: &str) -> Result<drain::Dra
             states.insert(name, node_state(&node));
         }
     }
-    Ok(drain::assess(&workers, &states))
+    Ok((drain::assess(&workers, &states), report::ready(&workers)))
 }
 
 fn error_policy(pool: Arc<ModelPool>, err: &Error, _ctx: Arc<Ctx>) -> Action {

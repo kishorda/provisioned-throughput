@@ -50,6 +50,7 @@ async fn gateway_classes_reach_the_router() {
             hot_spare: false,
         }],
         allocations: vec![],
+        report: None,
     };
     let router = serve(http::router(http::Shared::new(&router_cfg))).await;
 

@@ -49,7 +49,7 @@ async fn store(name: &str) -> Option<SqlStore> {
         .await
         .unwrap();
     let store = SqlStore::from_pool(pool);
-    assert_eq!(store.migrate().await.unwrap(), [1, 2, 3, 4, 5, 6]);
+    assert_eq!(store.migrate().await.unwrap(), [1, 2, 3, 4, 5, 6, 7]);
     assert!(store.migrate().await.unwrap().is_empty(), "idempotent");
     Some(store)
 }
@@ -365,4 +365,70 @@ async fn final_invoices_are_stored_once_and_survive_a_restart() {
         .await
         .unwrap()
         .is_empty());
+}
+
+#[tokio::test]
+async fn component_reports_are_replaced_listed_and_pruned() {
+    use pt_control_plane::store::ComponentReport;
+    let Some(store) = store("reports").await else {
+        return;
+    };
+    let t = t0();
+    let report = |region: &str, id: &str, n: u32, at| ComponentReport {
+        kind: "pool".into(),
+        region: region.into(),
+        id: id.into(),
+        body: serde_json::json!({ "ready": n }),
+        reported_at: at,
+    };
+    store
+        .put_report(report("eu-west", "ns/b", 1, t))
+        .await
+        .unwrap();
+    store
+        .put_report(report("eu-west", "ns/a", 2, t))
+        .await
+        .unwrap();
+    store
+        .put_report(report("eu-central", "ns/a", 3, t))
+        .await
+        .unwrap();
+    // A newer report replaces the reporter's previous one.
+    let later = t + SignedDuration::from_mins(5);
+    store
+        .put_report(report("eu-west", "ns/b", 4, later))
+        .await
+        .unwrap();
+    let mut router = report("eu-west", "router-0", 0, t);
+    router.kind = "router".into();
+    store.put_report(router).await.unwrap();
+
+    let pools = store.reports("pool").await.unwrap();
+    let keys: Vec<_> = pools
+        .iter()
+        .map(|r| {
+            (
+                r.region.as_str(),
+                r.id.as_str(),
+                r.body["ready"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            ("eu-central", "ns/a", 3),
+            ("eu-west", "ns/a", 2),
+            ("eu-west", "ns/b", 4)
+        ]
+    );
+    assert_eq!(pools[2].reported_at, later);
+    assert_eq!(store.reports("router").await.unwrap().len(), 1);
+
+    // Pruning removes reports older than the cut-off, of every kind.
+    assert_eq!(store.prune_reports(later).await.unwrap(), 3);
+    let left = store.reports("pool").await.unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].id, "ns/b");
+    assert!(store.reports("router").await.unwrap().is_empty());
 }

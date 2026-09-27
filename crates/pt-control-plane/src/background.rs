@@ -168,6 +168,10 @@ pub async fn run<S: Store, P: CapacityPlanner, C: Clock>(
             if let Err(e) = svc.store.prune_heartbeats(before).await {
                 tracing::warn!(error = %e, "heartbeat pruning failed");
             }
+            let stale = svc.clock.now() - crate::dashboard::REPORT_RETENTION;
+            if let Err(e) = svc.store.prune_reports(stale).await {
+                tracing::warn!(error = %e, "report pruning failed");
+            }
             let now_ms = telemetry.directory.now_ms();
             match telemetry
                 .store

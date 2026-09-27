@@ -332,6 +332,16 @@ impl CapacityPlanner for SqlPlanner {
         }
     }
 
+    async fn pool_micro(&self, region: &str, model: &str) -> Option<(u64, u64)> {
+        match SqlPlanner::pool_micro(self, region, model).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "capacity lookup failed");
+                None
+            }
+        }
+    }
+
     /// The database is authoritative, except for pools not yet counted in replicas (after
     /// the upgrade). Those are set from `live` once, by whichever instance gets there first.
     async fn restore(&self, live: &[Held]) {

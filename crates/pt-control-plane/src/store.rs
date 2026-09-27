@@ -50,6 +50,18 @@ pub struct SalesHold {
     pub expires_at: Timestamp,
 }
 
+/// The latest status a regional component reported, for the dashboards (ADR-043): a
+/// capacity controller's pool (`kind = "pool"`) or a router (`kind = "router"`). Soft state
+/// that other instances need, so it's in the store (ADR-023).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ComponentReport {
+    pub kind: String,
+    pub region: String,
+    pub id: String,
+    pub body: serde_json::Value,
+    pub reported_at: Timestamp,
+}
+
 /// What an idempotency key was first used for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdempotencyRecord {
@@ -194,6 +206,24 @@ pub trait Store: Send + Sync + 'static {
         &self,
         now: Timestamp,
     ) -> impl Future<Output = Result<Vec<SalesHold>, StoreError>> + Send;
+
+    /// Replace a component's report (keyed by kind, region, and id).
+    fn put_report(
+        &self,
+        report: ComponentReport,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// Every report of `kind`, by region then id.
+    fn reports(
+        &self,
+        kind: &str,
+    ) -> impl Future<Output = Result<Vec<ComponentReport>, StoreError>> + Send;
+
+    /// Forget reports older than `before`. Returns how many were removed.
+    fn prune_reports(
+        &self,
+        before: Timestamp,
+    ) -> impl Future<Output = Result<usize, StoreError>> + Send;
 }
 
 #[derive(Default)]
@@ -206,6 +236,7 @@ struct Inner {
     heartbeats: HashMap<(String, String), GatewayHeartbeat>,
     leases: HashMap<String, Lease>,
     holds: HashMap<(String, String, String), SalesHold>,
+    reports: HashMap<(String, String, String), ComponentReport>,
 }
 
 #[derive(Default)]
@@ -460,6 +491,35 @@ impl Store for MemoryStore {
         Ok(self.lock().holds.remove(&key).is_some())
     }
 
+    async fn put_report(&self, report: ComponentReport) -> Result<(), StoreError> {
+        let key = (
+            report.kind.clone(),
+            report.region.clone(),
+            report.id.clone(),
+        );
+        self.lock().reports.insert(key, report);
+        Ok(())
+    }
+
+    async fn reports(&self, kind: &str) -> Result<Vec<ComponentReport>, StoreError> {
+        let mut out: Vec<ComponentReport> = self
+            .lock()
+            .reports
+            .values()
+            .filter(|r| r.kind == kind)
+            .cloned()
+            .collect();
+        out.sort_by(|a, b| (&a.region, &a.id).cmp(&(&b.region, &b.id)));
+        Ok(out)
+    }
+
+    async fn prune_reports(&self, before: Timestamp) -> Result<usize, StoreError> {
+        let mut inner = self.lock();
+        let n = inner.reports.len();
+        inner.reports.retain(|_, r| r.reported_at >= before);
+        Ok(n - inner.reports.len())
+    }
+
     async fn holds(&self, now: Timestamp) -> Result<Vec<SalesHold>, StoreError> {
         let mut out: Vec<SalesHold> = self
             .lock()
@@ -581,5 +641,17 @@ impl<T: Store> Store for std::sync::Arc<T> {
 
     async fn holds(&self, now: Timestamp) -> Result<Vec<SalesHold>, StoreError> {
         (**self).holds(now).await
+    }
+
+    async fn put_report(&self, report: ComponentReport) -> Result<(), StoreError> {
+        (**self).put_report(report).await
+    }
+
+    async fn reports(&self, kind: &str) -> Result<Vec<ComponentReport>, StoreError> {
+        (**self).reports(kind).await
+    }
+
+    async fn prune_reports(&self, before: Timestamp) -> Result<usize, StoreError> {
+        (**self).prune_reports(before).await
     }
 }

@@ -558,6 +558,11 @@ impl SseTokens {
 }
 
 async fn status(State(shared): State<Arc<Shared>>) -> Json<Value> {
+    Json(status_json(&shared))
+}
+
+/// What `/v1/router/status` serves, also sent to the control plane (ADR-043).
+pub fn status_json(shared: &Shared) -> Value {
     let status = shared.lock().dispatcher.status(Instant::now());
     let mut v = serde_json::to_value(status).unwrap_or(Value::Null);
     v["preempted_prompt_tokens"] = shared
@@ -568,7 +573,7 @@ async fn status(State(shared): State<Arc<Shared>>) -> Json<Value> {
         .preempted_completion_tokens
         .load(Ordering::Relaxed)
         .into();
-    Json(v)
+    v
 }
 
 #[cfg(test)]
