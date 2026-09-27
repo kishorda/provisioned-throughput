@@ -67,6 +67,7 @@ Errors use the same shape as the gateway:
 |--------|--------|------|
 | 401 | `invalid_api_key` | Missing or unknown management key |
 | 404 | `not_found` | Unknown id, or the id belongs to another tenant |
+| 409 | `sales_paused` | New capacity for the model in that region is paused while a pool drains expedited ([ADR-041](adr/ADR-041-sales-holds.md)). Retry later |
 | 409 | `capacity_unavailable` | Not enough CUs at the requested tier in a region. A CU's cost depends on its tier ([ADR-031](adr/ADR-031-capacity-in-replicas-per-tier.md)). `available_from` says when scheduled capacity would fit it: retry with that `start_at` ([ADR-037](adr/ADR-037-planner-lead-times.md)) |
 | 409 | `name_taken`, `idempotency_key_reused`, `no_next_term`, `inactive`, `concurrent_modification` | State conflicts |
 | 412 | `version_mismatch` | `If-Match` doesn't match the current version |

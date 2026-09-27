@@ -52,6 +52,8 @@ pub struct Ctx {
     pub client: Client,
     pub dgd: ApiResource,
     pub snapshot: Option<SnapshotRx>,
+    /// Pauses sales during expedited drains (ADR-041), when the control plane is known.
+    pub holds: Option<crate::holds::HoldClient>,
 }
 
 pub fn dgd_resource() -> ApiResource {
@@ -62,11 +64,16 @@ pub fn dgd_resource() -> ApiResource {
     ))
 }
 
-pub async fn run(client: Client, snapshot: Option<SnapshotRx>) -> anyhow::Result<()> {
+pub async fn run(
+    client: Client,
+    snapshot: Option<SnapshotRx>,
+    holds: Option<crate::holds::HoldClient>,
+) -> anyhow::Result<()> {
     let ctx = Arc::new(Ctx {
         client: client.clone(),
         dgd: dgd_resource(),
         snapshot: snapshot.clone(),
+        holds,
     });
     // Every new snapshot may start, move, or end a failover: reconcile all pools.
     let snapshots = futures::stream::unfold(snapshot, |rx| async move {
@@ -181,6 +188,12 @@ async fn reconcile(pool: Arc<ModelPool>, ctx: Arc<Ctx>) -> Result<Action, Error>
         owner,
         drain,
     };
+    let was_expedited = pool.status.as_ref().is_some_and(|s| {
+        s.conditions
+            .iter()
+            .any(|c| c.type_ == plan::DRAINING && c.reason == "Expedited")
+    });
+    let hold = drain::sales_hold(&input.drain, was_expedited);
     let plan = plan::plan(
         &input,
         profile.as_ref().map(|p| &p.spec),
@@ -218,6 +231,20 @@ async fn reconcile(pool: Arc<ModelPool>, ctx: Arc<Ctx>) -> Result<Action, Error>
                     .delete(&stale.name_any(), &DeleteParams::default())
                     .await?;
             }
+        }
+    }
+
+    // Pause sales on the pool while it drains expedited (ADR-041). Best effort: a failure
+    // here never blocks reconciling the pool.
+    if let (Some(holds), Some(model)) = (&ctx.holds, &pool.spec.catalog_model) {
+        let source = format!("{ns}/{name}");
+        let result = match hold {
+            drain::SalesHold::Place => holds.place(model, &source, "expedited node drain").await,
+            drain::SalesHold::Lift => holds.lift(model, &source).await,
+            drain::SalesHold::Nothing => Ok(()),
+        };
+        if let Err(e) = result {
+            tracing::warn!(pool = %name, error = %e, ?hold, "couldn't update the sales hold");
         }
     }
 

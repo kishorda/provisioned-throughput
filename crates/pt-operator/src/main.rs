@@ -19,7 +19,16 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
     let client = kube::Client::try_default().await?;
-    let snapshot = match pt_operator::failover::SnapshotSource::from_env() {
+    let source = pt_operator::failover::SnapshotSource::from_env();
+    // Pause sales during expedited drains through the same control plane (ADR-041).
+    let holds = match &source {
+        Some(s) => match pt_operator::holds::HoldClient::new(s) {
+            Ok(h) => Some(h),
+            Err(e) => anyhow::bail!("control-plane client for sales holds: {e}"),
+        },
+        None => None,
+    };
+    let snapshot = match source {
         Some(source) => {
             let region = source.region.clone();
             let (follower, rx) = pt_operator::failover::SnapshotFollower::new(source)?;
@@ -39,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
     let Some(lease) = election else {
         tracing::warn!("leader election is off: run only one replica");
         tracing::info!("pt-operator starting");
-        return pt_operator::controller::run(client, snapshot).await;
+        return pt_operator::controller::run(client, snapshot, holds).await;
     };
     tracing::info!(identity = %lease.election.identity, lease = %lease.name, "standing by for leadership");
     let backend = KubeLease::new(
@@ -50,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
     );
     let work = move || async move {
         tracing::info!("pt-operator starting");
-        if let Err(e) = pt_operator::controller::run(client, snapshot).await {
+        if let Err(e) = pt_operator::controller::run(client, snapshot, holds).await {
             tracing::error!(error = %e, "controller stopped");
         }
     };

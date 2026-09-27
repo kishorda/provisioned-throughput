@@ -37,6 +37,19 @@ pub enum StoreError {
     Unavailable(String),
 }
 
+/// New sales paused in a pool, while its capacity is down (ADR-041). Reported by the
+/// region's capacity controller, for example during an expedited drain. Expires unless
+/// renewed, so a controller that dies can't pause sales for good.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SalesHold {
+    pub region: String,
+    pub model: String,
+    /// Who placed it, for example the pool's name. One hold per source.
+    pub source: String,
+    pub reason: String,
+    pub expires_at: Timestamp,
+}
+
 /// What an idempotency key was first used for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdempotencyRecord {
@@ -164,6 +177,23 @@ pub trait Store: Send + Sync + 'static {
     ) -> impl Future<Output = Result<bool, StoreError>> + Send;
 
     fn lease(&self, name: &str) -> impl Future<Output = Result<Option<Lease>, StoreError>> + Send;
+
+    /// Place or renew a sales hold (keyed by region, model, and source).
+    fn put_hold(&self, hold: SalesHold) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// Remove a hold. Returns whether it existed.
+    fn delete_hold(
+        &self,
+        region: &str,
+        model: &str,
+        source: &str,
+    ) -> impl Future<Output = Result<bool, StoreError>> + Send;
+
+    /// Holds that haven't expired at `now`.
+    fn holds(
+        &self,
+        now: Timestamp,
+    ) -> impl Future<Output = Result<Vec<SalesHold>, StoreError>> + Send;
 }
 
 #[derive(Default)]
@@ -175,6 +205,7 @@ struct Inner {
     version: u64,
     heartbeats: HashMap<(String, String), GatewayHeartbeat>,
     leases: HashMap<String, Lease>,
+    holds: HashMap<(String, String, String), SalesHold>,
 }
 
 #[derive(Default)]
@@ -412,6 +443,34 @@ impl Store for MemoryStore {
     async fn lease(&self, name: &str) -> Result<Option<Lease>, StoreError> {
         Ok(self.lock().leases.get(name).cloned())
     }
+
+    async fn put_hold(&self, hold: SalesHold) -> Result<(), StoreError> {
+        let key = (hold.region.clone(), hold.model.clone(), hold.source.clone());
+        self.lock().holds.insert(key, hold);
+        Ok(())
+    }
+
+    async fn delete_hold(
+        &self,
+        region: &str,
+        model: &str,
+        source: &str,
+    ) -> Result<bool, StoreError> {
+        let key = (region.to_string(), model.to_string(), source.to_string());
+        Ok(self.lock().holds.remove(&key).is_some())
+    }
+
+    async fn holds(&self, now: Timestamp) -> Result<Vec<SalesHold>, StoreError> {
+        let mut out: Vec<SalesHold> = self
+            .lock()
+            .holds
+            .values()
+            .filter(|h| h.expires_at > now)
+            .cloned()
+            .collect();
+        out.sort_by(|a, b| (&a.region, &a.model, &a.source).cmp(&(&b.region, &b.model, &b.source)));
+        Ok(out)
+    }
 }
 
 /// A shared store, so several service instances can use one (for example, a control plane
@@ -505,5 +564,22 @@ impl<T: Store> Store for std::sync::Arc<T> {
     }
     async fn lease(&self, name: &str) -> Result<Option<Lease>, StoreError> {
         (**self).lease(name).await
+    }
+
+    async fn put_hold(&self, hold: SalesHold) -> Result<(), StoreError> {
+        (**self).put_hold(hold).await
+    }
+
+    async fn delete_hold(
+        &self,
+        region: &str,
+        model: &str,
+        source: &str,
+    ) -> Result<bool, StoreError> {
+        (**self).delete_hold(region, model, source).await
+    }
+
+    async fn holds(&self, now: Timestamp) -> Result<Vec<SalesHold>, StoreError> {
+        (**self).holds(now).await
     }
 }

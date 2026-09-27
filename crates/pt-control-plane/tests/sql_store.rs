@@ -49,7 +49,7 @@ async fn store(name: &str) -> Option<SqlStore> {
         .await
         .unwrap();
     let store = SqlStore::from_pool(pool);
-    assert_eq!(store.migrate().await.unwrap(), [1, 2, 3, 4, 5]);
+    assert_eq!(store.migrate().await.unwrap(), [1, 2, 3, 4, 5, 6]);
     assert!(store.migrate().await.unwrap().is_empty(), "idempotent");
     Some(store)
 }

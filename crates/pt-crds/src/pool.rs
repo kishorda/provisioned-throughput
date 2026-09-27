@@ -48,6 +48,10 @@ pub struct ModelPoolSpec {
     /// Hard cap on total replicas (GPU budget). Exceeding it raises `CapacityShortfall`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_replicas: Option<u32>,
+    /// The control plane's id for this model (for example `llama-4-maverick`). With it,
+    /// an expedited drain pauses new sales of the model in the region (ADR-041).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_model: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

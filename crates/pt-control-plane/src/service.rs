@@ -29,7 +29,7 @@ use crate::model::{
 };
 use crate::planner::{CapacityPlanner, Held, PlanError};
 use crate::pricing;
-use crate::store::{IdempotencyRecord, Store, StoreError};
+use crate::store::{IdempotencyRecord, SalesHold, Store, StoreError};
 use crate::validate;
 
 /// The lease whose holder runs the background loops (ADR-023).
@@ -458,6 +458,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         }
 
         validate::create(&self.config, &req)?;
+        self.sales_open(&req.model, &req.regions).await?;
         let now = self.clock.now();
         let start = match req.start_at {
             None => now,
@@ -749,6 +750,19 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         }
 
         if let Some(new) = &req.regions {
+            // Anything that grows a region needs its sales open (ADR-041).
+            let growing: Vec<RegionShare> = new
+                .iter()
+                .filter(|n| {
+                    n.cus
+                        > pt.regions
+                            .iter()
+                            .find(|c| c.region == n.region)
+                            .map_or(0, |c| c.cus)
+                })
+                .cloned()
+                .collect();
+            self.sales_open(&pt.model, &growing).await?;
             if not_started {
                 if *new != pt.regions {
                     let before = held(pt);
@@ -1198,6 +1212,84 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         let pt = self.persist(pt, expected).await?;
         tracing::info!(id = %pt.id, %tenant, deployment = %deployment_id, key = %key_id, "inference key revoked");
         Ok(pt)
+    }
+
+    /// Fail if new sales of `model` are paused in any of `regions` (ADR-041).
+    async fn sales_open(&self, model: &str, regions: &[RegionShare]) -> Result<(), ServiceError> {
+        let now = self.clock.now();
+        let holds = self.store.holds(now).await?;
+        if let Some(h) = holds
+            .iter()
+            .find(|h| h.model == model && regions.iter().any(|r| r.region == h.region))
+        {
+            return Err(conflict(
+                "sales_paused",
+                format!(
+                    "New capacity for {model} in {} is paused until {} ({}). Try again later.",
+                    h.region, h.expires_at, h.reason
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Pause new sales of `model` in `region` for `ttl`, on behalf of `source` (ADR-041).
+    /// The region's capacity controller renews it while a drain lasts.
+    pub async fn hold_sales(
+        &self,
+        region: &str,
+        model: &str,
+        source: &str,
+        reason: &str,
+        ttl: SignedDuration,
+    ) -> Result<SalesHold, ServiceError> {
+        if self.config.capacity_for(region, model).is_none() {
+            return Err(ServiceError::Validation {
+                field: "model".into(),
+                message: format!("{model} isn't offered in {region}."),
+            });
+        }
+        if source.is_empty() || source.len() > 128 {
+            return Err(ServiceError::Validation {
+                field: "source".into(),
+                message: "source must be 1–128 characters.".into(),
+            });
+        }
+        if ttl <= SignedDuration::ZERO || ttl > SignedDuration::from_hours(1) {
+            return Err(ServiceError::Validation {
+                field: "ttl_seconds".into(),
+                message: "ttl_seconds must be between 1 and 3600.".into(),
+            });
+        }
+        let hold = SalesHold {
+            region: region.into(),
+            model: model.into(),
+            source: source.into(),
+            reason: reason.chars().take(256).collect(),
+            expires_at: self.clock.now() + ttl,
+        };
+        self.store.put_hold(hold.clone()).await?;
+        tracing::info!(%region, %model, %source, reason = %hold.reason, "sales paused");
+        Ok(hold)
+    }
+
+    /// Lift `source`'s hold on `model` in `region`.
+    pub async fn release_sales_hold(
+        &self,
+        region: &str,
+        model: &str,
+        source: &str,
+    ) -> Result<bool, ServiceError> {
+        let removed = self.store.delete_hold(region, model, source).await?;
+        if removed {
+            tracing::info!(%region, %model, %source, "sales resumed");
+        }
+        Ok(removed)
+    }
+
+    /// Holds in force now.
+    pub async fn sales_holds(&self) -> Result<Vec<SalesHold>, ServiceError> {
+        Ok(self.store.holds(self.clock.now()).await?)
     }
 
     /// Declare a region incident. One open incident per region at a time.

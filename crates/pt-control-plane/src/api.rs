@@ -12,6 +12,9 @@
 //! POST   /internal/v1/heartbeats               region token; gateway liveness (docs/07 §4)
 //! GET    /internal/v1/regions                  operator key; region health
 //! GET    /internal/v1/steering                 operator key; DNS weights per region and reservation
+//! PUT    /internal/v1/holds/{model}            region token; pause sales in the region (ADR-041)
+//! DELETE /internal/v1/holds/{model}?source=    region token; resume them
+//! GET    /internal/v1/holds                    operator key; holds in force
 //! ```
 
 use std::sync::Arc;
@@ -99,6 +102,11 @@ pub fn router<S: Store, P: CapacityPlanner, C: Clock>(svc: Svc<S, P, C>) -> Rout
         .route("/internal/v1/heartbeats", post(heartbeat::<S, P, C>))
         .route("/internal/v1/regions", get(regions::<S, P, C>))
         .route("/internal/v1/steering", get(steering::<S, P, C>))
+        .route("/internal/v1/holds", get(list_holds::<S, P, C>))
+        .route(
+            "/internal/v1/holds/{model}",
+            axum::routing::put(put_hold::<S, P, C>).delete(delete_hold::<S, P, C>),
+        )
         .route("/healthz", get(|| async { "ok" }))
         .with_state(svc)
 }
@@ -576,6 +584,63 @@ async fn list_incidents<S: Store, P: CapacityPlanner, C: Clock>(
 ) -> Result<Response, ApiError> {
     operator(&svc, &headers)?;
     Ok(Json(json!({ "data": svc.incidents().await? })).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HoldRequest {
+    source: String,
+    #[serde(default)]
+    reason: String,
+    ttl_seconds: i64,
+}
+
+/// `PUT /internal/v1/holds/{model}`: the region's capacity controller pauses new sales of
+/// `model` in its region while capacity is down, and renews it while that lasts.
+async fn put_hold<S: Store, P: CapacityPlanner, C: Clock>(
+    State(svc): State<Svc<S, P, C>>,
+    headers: HeaderMap,
+    Path(model): Path<String>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let region = region_of(&svc, &headers)?.to_string();
+    let req: HoldRequest = parse(&body)?;
+    let hold = svc
+        .hold_sales(
+            &region,
+            &model,
+            &req.source,
+            &req.reason,
+            jiff::SignedDuration::from_secs(req.ttl_seconds),
+        )
+        .await?;
+    Ok(Json(hold).into_response())
+}
+
+#[derive(Deserialize)]
+struct HoldSource {
+    source: String,
+}
+
+/// `DELETE /internal/v1/holds/{model}?source=`
+async fn delete_hold<S: Store, P: CapacityPlanner, C: Clock>(
+    State(svc): State<Svc<S, P, C>>,
+    headers: HeaderMap,
+    Path(model): Path<String>,
+    Query(q): Query<HoldSource>,
+) -> Result<Response, ApiError> {
+    let region = region_of(&svc, &headers)?.to_string();
+    svc.release_sales_hold(&region, &model, &q.source).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// `GET /internal/v1/holds`
+async fn list_holds<S: Store, P: CapacityPlanner, C: Clock>(
+    State(svc): State<Svc<S, P, C>>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    operator(&svc, &headers)?;
+    Ok(Json(json!({ "data": svc.sales_holds().await? })).into_response())
 }
 
 /// `POST /internal/v1/heartbeats`: a gateway reports that it's alive and whether it serves.

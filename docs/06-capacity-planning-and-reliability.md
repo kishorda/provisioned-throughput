@@ -108,7 +108,8 @@ A Rust controller that owns the "may I take this capacity away?" decision:
 > at `floor + failure_k`, so evictions wait for the surge and never use the maintenance
 > slots or hot spares. A node annotated `pt.example.com/drain=expedite` gets no surge and
 > drains through the maintenance slots. The budget bounds concurrency, so there's no
-> separate rate limit. Expedite doesn't pause sales yet.
+> separate rate limit. An expedited drain pauses new sales of the pool's model in the
+> region through an expiring hold ([ADR-041](adr/ADR-041-sales-holds.md)).
 
 ## Blog problems addressed
 P9, P10, plus headroom economics for P17. See [traceability](01-requirements-and-traceability.md#2-traceability-matrix).

@@ -119,6 +119,26 @@ pub fn add_surge(
     (out, added)
 }
 
+/// What to tell the control plane about new sales on a pool (ADR-041).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SalesHold {
+    /// Pause (or keep paused) new sales: an expedited drain is using the maintenance slots.
+    Place,
+    /// Resume them: the expedited drain is over.
+    Lift,
+    Nothing,
+}
+
+/// Pause sales while any node drains expedited, and lift the pause once none does.
+/// `was_expedited` is what the previous reconcile reported.
+pub fn sales_hold(d: &Drain, was_expedited: bool) -> SalesHold {
+    match (!d.expedited.is_empty(), was_expedited) {
+        (true, _) => SalesHold::Place,
+        (false, true) => SalesHold::Lift,
+        (false, false) => SalesHold::Nothing,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,5 +208,23 @@ mod tests {
         assert_eq!(out, RoleReplicas::disaggregated(5, 12));
         let (out, added) = add_surge(desired, surge, Some(10));
         assert_eq!((out, added.total), (desired, 0), "already over the cap");
+    }
+
+    #[test]
+    fn sales_pause_for_expedited_drains_only() {
+        let expedited = Drain {
+            surge: RoleReplicas::default(),
+            nodes: vec!["a".into()],
+            expedited: vec!["a".into()],
+        };
+        let surging = Drain {
+            surge: RoleReplicas::aggregated(1),
+            nodes: vec!["a".into()],
+            expedited: vec![],
+        };
+        assert_eq!(sales_hold(&expedited, false), SalesHold::Place);
+        assert_eq!(sales_hold(&expedited, true), SalesHold::Place, "renewed");
+        assert_eq!(sales_hold(&surging, true), SalesHold::Lift);
+        assert_eq!(sales_hold(&Drain::default(), false), SalesHold::Nothing);
     }
 }

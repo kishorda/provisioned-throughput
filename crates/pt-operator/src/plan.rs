@@ -286,6 +286,7 @@ mod tests {
             burst_z: 0.0,
             payg: Payg::default(),
             max_replicas: None,
+            catalog_model: None,
         }
     }
 

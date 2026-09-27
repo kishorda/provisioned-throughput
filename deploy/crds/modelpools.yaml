@@ -41,6 +41,12 @@ spec:
                 description: z-score for the correlated-burst allowance. 2.33 covers 99% of bursts.
                 format: double
                 type: number
+              catalogModel:
+                description: |-
+                  The control plane's id for this model (for example `llama-4-maverick`). With it,
+                  an expedited drain pauses new sales of the model in the region (ADR-041).
+                nullable: true
+                type: string
               disaggregation:
                 default:
                   conditional: true

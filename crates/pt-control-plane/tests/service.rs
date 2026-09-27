@@ -723,3 +723,96 @@ async fn availability_is_given_at_a_date() {
         .unwrap();
     assert_eq!((now, later), (227, 340));
 }
+
+#[tokio::test]
+async fn a_sales_hold_pauses_new_capacity_in_its_pool_only() {
+    let (svc, clock) = setup();
+    let existing = svc
+        .create(ACME, None, request("existing", &[("eu-west", 4)]))
+        .await
+        .unwrap()
+        .resource;
+    // The eu-west controller reports an expedited drain (ADR-041).
+    svc.hold_sales(
+        "eu-west",
+        MAVERICK,
+        "pool/maverick-b200-a1",
+        "expedited drain",
+        SignedDuration::from_mins(2),
+    )
+    .await
+    .unwrap();
+
+    fn paused<T>(r: Result<T, ServiceError>) -> bool {
+        matches!(
+            r,
+            Err(ServiceError::Conflict {
+                code: "sales_paused",
+                ..
+            })
+        )
+    }
+    assert!(paused(
+        svc.create(ACME, None, request("new", &[("eu-west", 1)]))
+            .await
+    ));
+    // Growing the existing reservation there is paused too...
+    let grow = UpdateRequest {
+        regions: Some(shares(&[("eu-west", 5)])),
+        ..Default::default()
+    };
+    assert!(paused(
+        svc.update(ACME, &existing.id, None, grow.clone()).await
+    ));
+    // ...but other regions, and changes that don't grow eu-west, are not.
+    svc.create(ACME, None, request("elsewhere", &[("eu-central", 1)]))
+        .await
+        .unwrap();
+    let rename = UpdateRequest {
+        auto_renew: Some(false),
+        ..Default::default()
+    };
+    svc.update(ACME, &existing.id, None, rename).await.unwrap();
+
+    // A hold nobody renews lapses.
+    clock.advance(SignedDuration::from_mins(3));
+    assert!(svc.sales_holds().await.unwrap().is_empty());
+    svc.update(ACME, &existing.id, None, grow).await.unwrap();
+
+    // And one can be lifted early.
+    svc.hold_sales(
+        "eu-west",
+        MAVERICK,
+        "pool/a",
+        "drain",
+        SignedDuration::from_mins(2),
+    )
+    .await
+    .unwrap();
+    assert!(svc
+        .release_sales_hold("eu-west", MAVERICK, "pool/a")
+        .await
+        .unwrap());
+    svc.create(ACME, None, request("after", &[("eu-west", 1)]))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn sales_holds_are_validated() {
+    let (svc, _) = setup();
+    let hold = |region: &'static str, model: &'static str, ttl: i64| {
+        let svc = svc.clone();
+        async move {
+            svc.hold_sales(region, model, "src", "r", SignedDuration::from_secs(ttl))
+                .await
+        }
+    };
+    assert!(
+        hold("eu-central", "qwen3-32b", 60).await.is_err(),
+        "not offered there"
+    );
+    assert!(hold("eu-west", MAVERICK, 0).await.is_err());
+    assert!(hold("eu-west", MAVERICK, 7_200).await.is_err());
+    assert!(hold("eu-west", MAVERICK, 60).await.is_ok());
+}

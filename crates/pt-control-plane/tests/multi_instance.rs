@@ -367,3 +367,45 @@ async fn scheduled_capacity_counts_for_later_starts() {
         Some(51)
     );
 }
+
+#[tokio::test]
+async fn a_sales_hold_placed_through_one_instance_pauses_the_other() {
+    let Some((a, b, clock)) = pair("holds").await else {
+        return;
+    };
+    a.hold_sales(
+        "eu-west",
+        MAVERICK,
+        "pt-serving/pool",
+        "expedited drain",
+        SignedDuration::from_mins(2),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        b.create(ACME, None, request("x", &[("eu-west", 1)])).await,
+        Err(ServiceError::Conflict {
+            code: "sales_paused",
+            ..
+        })
+    ));
+    // Renewed through the other instance: still one hold.
+    b.hold_sales(
+        "eu-west",
+        MAVERICK,
+        "pt-serving/pool",
+        "still draining",
+        SignedDuration::from_mins(2),
+    )
+    .await
+    .unwrap();
+    let holds = a.sales_holds().await.unwrap();
+    assert_eq!(holds.len(), 1);
+    assert_eq!(holds[0].reason, "still draining");
+    // Expired, it no longer counts.
+    clock.advance(SignedDuration::from_mins(3));
+    assert!(b.sales_holds().await.unwrap().is_empty());
+    b.create(ACME, None, request("x", &[("eu-west", 1)]))
+        .await
+        .unwrap();
+}

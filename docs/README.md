@@ -99,6 +99,7 @@ The design rests on six decisions:
 | [038](adr/ADR-038-vault-transit-signing.md) | Sign snapshots with a key held in Vault Transit, never in configuration |
 | [039](adr/ADR-039-adaptive-backfill.md) | Size the floor's room for provisioned work from its expected load, opt-in (refines 026) |
 | [040](adr/ADR-040-gateway-affinity.md) | Route sessions and small reservations to one gateway replica (home gateways) |
+| [041](adr/ADR-041-sales-holds.md) | Pause new sales on a pool during an expedited drain, through expiring holds |
 
 ## Glossary
 

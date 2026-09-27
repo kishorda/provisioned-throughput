@@ -337,8 +337,8 @@ Follow-ups from the roadmap in docs/11, grouped by what they need.
   configuration, not discovered from Kubernetes.
 - **Redpanda.** Gateways push usage to the control plane, which writes it to ClickHouse
   (ADR-019). Usage and SLA aggregation runs in Rust, not ClickHouse SQL.
-- **Controller workflows:** no Dynamo Planner floor integration, and an expedited drain
-  doesn't pause sales (ADR-033). The controller owns `replicas` on the DGD, so don't enable Planner
+- **Controller workflows:** no Dynamo Planner floor integration. An expedited drain pauses
+  sales of the whole model in the region, not only its pool (ADR-041). The controller owns `replicas` on the DGD, so don't enable Planner
   autoscaling on PT pools yet.
 
 ### Needs a cluster, Docker, or GPUs (none on the development machine)

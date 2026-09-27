@@ -7,6 +7,7 @@ metadata:
   namespace: pt-serving
 spec:
   model: meta-llama/Llama-4-Maverick-17B-128E-Instruct
+  catalogModel: llama-4-maverick    # the control plane's id: expedited drains pause its sales (ADR-041)
   profileRef: llama-4-maverick.b200.trtllm-1.2.tp8
   engine:
     backend: trtllm

@@ -38,7 +38,7 @@ use crate::failover::{next_heartbeat, GatewayHeartbeat};
 use crate::model::Heartbeat;
 use crate::model::{ApiKey, Deployment, Event, ProvisionedThroughput, RegionIncident};
 use crate::store::Lease;
-use crate::store::{IdempotencyRecord, Store, StoreError};
+use crate::store::{IdempotencyRecord, SalesHold, Store, StoreError};
 use jiff::SignedDuration;
 
 /// Migrations in order. Never edit one that has shipped; add a new file.
@@ -63,6 +63,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         5,
         "capacity_replicas",
         include_str!("../migrations/0005_capacity_replicas.sql"),
+    ),
+    (
+        6,
+        "sales_holds",
+        include_str!("../migrations/0006_sales_holds.sql"),
     ),
 ];
 
@@ -863,6 +868,64 @@ impl Store for SqlStore {
             })
         })
         .transpose()
+    }
+
+    async fn put_hold(&self, hold: SalesHold) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO sales_holds (region, model, source, reason, expires_at)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (region, model, source)
+                 DO UPDATE SET reason = excluded.reason, expires_at = excluded.expires_at",
+        )
+        .bind(&hold.region)
+        .bind(&hold.model)
+        .bind(&hold.source)
+        .bind(&hold.reason)
+        .bind(to_db(hold.expires_at))
+        .execute(&self.pool)
+        .await
+        .map_err(unavailable)?;
+        Ok(())
+    }
+
+    async fn delete_hold(
+        &self,
+        region: &str,
+        model: &str,
+        source: &str,
+    ) -> Result<bool, StoreError> {
+        let done =
+            sqlx::query("DELETE FROM sales_holds WHERE region = $1 AND model = $2 AND source = $3")
+                .bind(region)
+                .bind(model)
+                .bind(source)
+                .execute(&self.pool)
+                .await
+                .map_err(unavailable)?;
+        Ok(done.rows_affected() > 0)
+    }
+
+    async fn holds(&self, now: Timestamp) -> Result<Vec<SalesHold>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT region, model, source, reason, expires_at FROM sales_holds
+             WHERE expires_at > $1 ORDER BY region, model, source",
+        )
+        .bind(to_db(now))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(unavailable)?;
+        rows.into_iter()
+            .map(|r| {
+                let bad = |e| corrupt("sales hold", e);
+                Ok(SalesHold {
+                    region: r.try_get("region").map_err(bad)?,
+                    model: r.try_get("model").map_err(bad)?,
+                    source: r.try_get("source").map_err(bad)?,
+                    reason: r.try_get("reason").map_err(bad)?,
+                    expires_at: from_db(r.try_get("expires_at").map_err(bad)?)?,
+                })
+            })
+            .collect()
     }
 
     async fn list_incidents(&self) -> Result<Vec<RegionIncident>, StoreError> {
