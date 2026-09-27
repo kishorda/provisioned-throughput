@@ -169,6 +169,14 @@ replicas = 5            # 119 Interactive or 168 Standard CUs
 max_context = 32768
 profile = "qwen3-32b.h200.vllm-0.11.tp2"
 
+# Replicas arriving later (ADR-037): sales starting on or after `from` can use them, and a
+# sale that doesn't fit now is told the date it would.
+# [[capacity_changes]]
+# region = "eu-west"
+# model = "llama-4-maverick"
+# add_replicas = 4
+# from = "2026-12-01T00:00:00Z"
+
 # Calibrated cost profiles (stand-in for the Profile Registry). Coefficients are
 # placeholders until calibration runs. WU is normalised across hardware, so the same model
 # costs the same WU on B200 and H200; the hardware difference shows up in replica capacity.

@@ -87,6 +87,65 @@ impl Costs {
     }
 }
 
+/// Replicas scheduled to arrive, per pool, in micro-replicas (ADR-037). Capacity only
+/// grows, so a sale checked against its start date's capacity plus everything reserved
+/// can't oversell at any moment.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Schedule {
+    /// Sorted by date.
+    added: HashMap<(String, String), Vec<(jiff::Timestamp, u64)>>,
+}
+
+impl Schedule {
+    pub fn from_config(config: &ControlPlaneConfig) -> Self {
+        let mut added: HashMap<(String, String), Vec<(jiff::Timestamp, u64)>> = HashMap::new();
+        for c in &config.capacity_changes {
+            added
+                .entry((c.region.clone(), c.model.clone()))
+                .or_default()
+                .push((c.from, u64::from(c.add_replicas) * MICRO));
+        }
+        for v in added.values_mut() {
+            v.sort_by_key(|(t, _)| *t);
+        }
+        Self { added }
+    }
+
+    /// Add `replicas` to a pool from `from` (for tests and tools).
+    pub fn add(&mut self, region: &str, model: &str, from: jiff::Timestamp, replicas: u32) {
+        let v = self.added.entry((region.into(), model.into())).or_default();
+        v.push((from, u64::from(replicas) * MICRO));
+        v.sort_by_key(|(t, _)| *t);
+    }
+
+    /// Micro-replicas added to a pool by `at`.
+    pub fn added_by(&self, region: &str, model: &str, at: jiff::Timestamp) -> u64 {
+        self.added
+            .get(&(region.to_string(), model.to_string()))
+            .into_iter()
+            .flatten()
+            .filter(|(t, _)| *t <= at)
+            .map(|(_, m)| m)
+            .sum()
+    }
+
+    /// Dates after `after` when a pool grows, in order.
+    pub fn dates_after(
+        &self,
+        region: &str,
+        model: &str,
+        after: jiff::Timestamp,
+    ) -> Vec<jiff::Timestamp> {
+        self.added
+            .get(&(region.to_string(), model.to_string()))
+            .into_iter()
+            .flatten()
+            .map(|(t, _)| *t)
+            .filter(|t| *t > after)
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -59,7 +59,7 @@ docs/
   01-requirements-and-traceability.md   # blog problems P1–P20 → requirements → sections; NFRs N1–N10
   02 … 11-*.md                  # unit/cost model, system, request path, isolation, capacity,
                                 # multi-region, K8s+Dynamo, metering/SLA, lifecycle, roadmap
-  adr/ADR-001 … ADR-036-*.md    # Nygard format: Status, Date, Context, Decision, Consequences
+  adr/ADR-001 … ADR-037-*.md    # Nygard format: Status, Date, Context, Decision, Consequences
 ```
 Published summary page (private Artifact): https://claude.ai/artifact/HMSSEEU8fb8tWSrGE9NmSH
 Its source HTML lived in a session scratchpad, not in this repo. To update it, republish with that URL after reading it.
@@ -90,6 +90,7 @@ Its source HTML lived in a session scratchpad, not in this repo. To update it, r
 - Telemetry must not depend on control-plane storage. It reads reservations through the `pt_telemetry::Directory` trait (`CpDirectory` in `pt-control-plane/src/telemetry.rs`). `pt_control_plane::app(svc)` merges the customer API, snapshots, and telemetry routes.
 - Gateways stamp `received_at_ms` with wall time. Tests that query telemetry through the control plane must use `SystemClock` (or explicit `from`/`to`), or the default window misses the records.
 - Capacity by tier (ADR-031): `[[capacity]] replicas` is the pool size; `capacity::Costs` gives micro-replicas per CU per (region, model, tier) = ceil(1e6 × wu_per_cu ÷ (profile capacity × 0.8)). Every `CapacityPlanner` call takes the reservation's tier, and `PlanOp` records it. A tier change moves capacity: at once before the start (fails cleanly), at renewal otherwise (`ScheduledChangeFailed` if it doesn't fit). `SqlPlanner` uses `capacity_micro`/`reserved_micro`; `restore` recomputes pools with `micro_counted = false` once, under `FOR UPDATE`. Tests: eu-west has 8 replicas = 227 Agentic / 371 Standard CUs; eu-central 6 = 100 Agentic.
+- Lead times (ADR-037): `[[capacity_changes]]` → `capacity::Schedule`. `reserve` takes the start date and checks `reserved + need ≤ capacity + arrived_by(start)`; always add arrivals *before* subtracting reserved (`free_at`, `SqlPlanner::available_at`). Create passes `start`, pre-start changes `term_start`, renewals `term_end`, mid-term moves `max(now, term_start)`, undo `Timestamp::MAX`. `CapacityUnavailable.available_from` (via `planner::fits_from`) reaches the API as `error.available_from`.
 - Quote sizing constants (80% target utilisation, busiest-hour sustained, busiest-10 s peak) are in `pt-control-plane/src/quote.rs`. Requests are priced with the region pool's profile from `config.profiles`, and every `[[capacity]]` entry must name a profile that exists there.
 - pt-router: keep `scheduler.rs`, `workers.rs`, and `dispatch.rs` pure and synchronous. `workers.rs` placement functions are meant to become Dynamo `WorkerFilter`/`WorkerScorer` plugins (docs/13 §3). In `http.rs`, a dispatched request's `Go` owns a `Release` guard, so capacity is freed on every exit. Never release capacity outside that guard, except in `pump` (which holds the lock) when the client has already gone.
 - `TermMonths` lives in `pt-core` and is shared by the CRDs and the control plane.
@@ -150,7 +151,7 @@ These are recorded in `docs/11-roadmap-risks-open-questions.md` §4. Treat them 
 
 ## Open items
 - **Pricing:** no PM questions are open. `[[payg_prices]]` must mirror the regular PAYG price list; the values in `config/control-plane.toml` are development numbers.
-- **Not built:** hot spares rendered as router workers (router `hot_spare` flags are hand-configured); sizes of remote (URL) images (ADR-036 prices inline ones); a KV-event-fed prefix index (the gateway uses its own history, ADR-030); pool placement and lead times in the planner; KMS signing; home-gateway routing; Dynamo Planner floor integration; pausing sales during an expedited drain. `README.md` ("Not built yet") has the full list.
+- **Not built:** hot spares rendered as router workers (router `hot_spare` flags are hand-configured); sizes of remote (URL) images (ADR-036 prices inline ones); a KV-event-fed prefix index (the gateway uses its own history, ADR-030); pool placement in the planner; KMS signing; home-gateway routing; Dynamo Planner floor integration; pausing sales during an expedited drain. `README.md` ("Not built yet") has the full list.
 - **Needs a cluster or GPUs:** the Kubernetes Lease backend and `deploy/` manifests (never run), the Dockerfiles, the Dynamo router plugins and engine KV-budget patch, the staging interference soak, a weight-prefetch DaemonSet, and a GeoDNS/anycast controller for `/internal/v1/steering`.
 - **Known failover limits (ADR-014):** activation needs the control plane, so a region failure during a control-plane outage doesn't fail over. A partition between a healthy region and the control plane makes the reservation over-serve briefly, never under-serve. During the return ramp, a gateway's limiter can run up to 1% above the entitlement, because rate changes under 1% are skipped.
 - **Top technical risks:** Dynamo API churn and fork maintenance, and upstream acceptance of the engine KV-budget patch.

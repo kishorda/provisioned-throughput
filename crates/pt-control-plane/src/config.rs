@@ -18,6 +18,10 @@ pub struct ControlPlaneConfig {
     pub tenants: Vec<TenantConfig>,
     pub models: Vec<ModelConfig>,
     pub capacity: Vec<CapacityConfig>,
+    /// Replicas arriving later (hardware on order, a cluster coming up), so sales can
+    /// start once they're there (docs/06 §1, ADR-037).
+    #[serde(default)]
+    pub capacity_changes: Vec<CapacityChange>,
     /// Calibrated cost profiles, as published by the Profile Registry (docs/03 §2.1). Every
     /// capacity entry names one. Quotes price requests with them.
     pub profiles: Vec<pt_core::PerformanceProfile>,
@@ -381,6 +385,17 @@ pub struct ModelConfig {
     pub tiers: Vec<Tier>,
 }
 
+/// Replicas added to a pool from a date (ADR-037).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapacityChange {
+    pub region: String,
+    pub model: String,
+    pub add_replicas: u32,
+    /// When the replicas can serve.
+    pub from: jiff::Timestamp,
+}
+
 /// A model's sellable capacity in a region, in replicas (ADR-031).
 ///
 /// A CU at each tier draws a different number of replicas, from the pool's profile
@@ -561,6 +576,17 @@ impl ControlPlaneConfig {
         }
         if !self.server.endpoint_template.contains("{region}") {
             return invalid("server.endpoint_template must contain {region}".into());
+        }
+        for c in &self.capacity_changes {
+            if self.capacity_for(&c.region, &c.model).is_none() {
+                return invalid(format!(
+                    "capacity_changes for {} in {}, which has no [[capacity]] pool",
+                    c.model, c.region
+                ));
+            }
+            if c.add_replicas == 0 {
+                return invalid("capacity_changes add_replicas must be positive".into());
+            }
         }
         if let Some(i) = &self.server.internal {
             if i.listen == self.server.listen {

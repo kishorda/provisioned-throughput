@@ -648,3 +648,78 @@ fn a_pool_must_cost_every_tier_its_model_offers() {
     let err = c.validate().unwrap_err().to_string();
     assert!(err.contains("no interactive capacity"), "{err}");
 }
+
+/// eu-west gets 4 more B200 replicas in 30 days (ADR-037).
+fn with_arrivals() -> (Svc, ManualClock, jiff::Timestamp) {
+    let mut c = config();
+    let arrives = t0() + days(30);
+    c.capacity_changes
+        .push(pt_control_plane::config::CapacityChange {
+            region: "eu-west".into(),
+            model: MAVERICK.into(),
+            add_replicas: 4,
+            from: arrives,
+        });
+    let clock = ManualClock::new(t0());
+    (in_memory(c, clock.clone()), clock, arrives)
+}
+
+#[tokio::test]
+async fn a_sale_that_fits_later_says_from_when() {
+    let (svc, _, arrives) = with_arrivals();
+    // 227 Agentic CUs fit today; 4 more replicas add 113.
+    svc.create(ACME, None, at(Tier::Agentic, "today", 200))
+        .await
+        .unwrap();
+    let err = svc
+        .create(ACME, None, at(Tier::Agentic, "big", 100))
+        .await
+        .unwrap_err();
+    let ServiceError::Capacity(PlanError::CapacityUnavailable {
+        available,
+        available_from,
+        ..
+    }) = &err
+    else {
+        panic!("{err:?}");
+    };
+    assert_eq!(*available, 27);
+    assert_eq!(*available_from, Some(arrives));
+    assert!(err.to_string().contains("fits from"), "{err}");
+
+    // Starting when the replicas arrive, it's accepted.
+    let mut later = at(Tier::Agentic, "big", 100);
+    later.start_at = Some(arrives);
+    let pt = svc.create(ACME, None, later).await.unwrap().resource;
+    assert_eq!(pt.term_start, arrives);
+    // Today's free capacity isn't handed out twice: nothing more starts now.
+    assert!(svc
+        .create(ACME, None, at(Tier::Agentic, "one", 1))
+        .await
+        .is_err());
+    // Too big even then: no date.
+    let mut huge = at(Tier::Agentic, "huge", 100);
+    huge.start_at = Some(arrives);
+    let err = svc.create(ACME, None, huge).await.unwrap_err();
+    assert!(matches!(
+        err,
+        ServiceError::Capacity(PlanError::CapacityUnavailable {
+            available_from: None,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn availability_is_given_at_a_date() {
+    let (svc, _, arrives) = with_arrivals();
+    let now = svc
+        .planner
+        .available_at("eu-west", MAVERICK, Tier::Agentic, t0())
+        .unwrap();
+    let later = svc
+        .planner
+        .available_at("eu-west", MAVERICK, Tier::Agentic, arrives)
+        .unwrap();
+    assert_eq!((now, later), (227, 340));
+}

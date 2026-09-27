@@ -307,3 +307,36 @@ async fn validation_and_access() {
     }
     assert_eq!(quote(&base, "sk-nope", shape_body()).await.0, 401);
 }
+
+#[tokio::test]
+async fn a_quote_that_fits_later_says_from_when() {
+    // eu-west gets 4 more replicas in 30 days (ADR-037).
+    let mut c = config();
+    let arrives = t0() + jiff::SignedDuration::from_hours(24 * 30);
+    c.capacity_changes
+        .push(pt_control_plane::config::CapacityChange {
+            region: "eu-west".into(),
+            model: MAVERICK.into(),
+            add_replicas: 4,
+            from: arrives,
+        });
+    let svc = in_memory(c, ManualClock::new(t0()));
+    let (routes, _) = app(svc.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, routes).await });
+    // Nearly all of today's capacity is sold.
+    svc.create(ACME, None, request("full", &[("eu-west", 220)]))
+        .await
+        .unwrap();
+
+    let (code, v) = quote(&base, ACME_KEY, shape_body()).await;
+    assert_eq!(code, 200, "{v}");
+    let q = &v["quotes"][0];
+    assert_eq!(q["recommended_cus"], 22);
+    assert_eq!(q["available_cus"], 7);
+    assert_eq!(q["feasible"], false);
+    assert_eq!(q["available_from"], arrives.to_string());
+    let notes = q["notes"].to_string();
+    assert!(notes.contains("enough from"), "{notes}");
+}

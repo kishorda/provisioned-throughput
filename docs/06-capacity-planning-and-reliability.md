@@ -14,7 +14,9 @@
 > control plane answers (1) against each region's pool of `replicas`. A CU at tier T costs
 > `wu_per_cu ÷ (replica_cap(T) · target_util)` replicas, counted in micro-replicas, so
 > Agentic, Interactive, and Standard CUs draw what each really needs from the same pool.
-> Lead times and pool placement aren't built. A region is one pool per model.
+> Scheduled arrivals (`[[capacity_changes]]`) count from their date, so a sale that
+> doesn't fit now is told the date it would ([ADR-037](adr/ADR-037-planner-lead-times.md)).
+> Pool placement isn't built: a region is one pool per model.
 
 ## 2. Sizing formula
 

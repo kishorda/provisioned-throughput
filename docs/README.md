@@ -95,6 +95,7 @@ The design rests on six decisions:
 | [034](adr/ADR-034-separate-internal-listener.md) | Serve region traffic (`/internal/...`) on its own listener, with its own TLS (amends 022) |
 | [035](adr/ADR-035-preempted-payg-delivered-tokens.md) | Preempted PAYG responses report the tokens they delivered, so metering bills only those |
 | [036](adr/ADR-036-image-tokens-by-size.md) | Price inline images by their size (read from the header) and the model's tiling |
+| [037](adr/ADR-037-planner-lead-times.md) | Sell capacity scheduled to arrive, from the date it arrives ("yes, from date D") |
 
 ## Glossary
 

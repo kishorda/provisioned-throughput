@@ -196,6 +196,8 @@ pub struct Service<S, P, C> {
     signer: SnapshotSigner,
     /// What a CU costs each pool, per tier.
     costs: crate::capacity::Costs,
+    /// Replicas scheduled to arrive (ADR-037).
+    schedule: crate::capacity::Schedule,
     /// The latest entitlement version this instance knows of. The shared counter is in the
     /// store; this copy wakes snapshot long-polls, and [`Self::sync_version`] keeps it
     /// current with other instances' changes (ADR-023).
@@ -214,6 +216,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
             planner,
             clock,
             costs: crate::capacity::Costs::from_config(&config),
+            schedule: crate::capacity::Schedule::from_config(&config),
             config,
             signer,
             changes,
@@ -254,6 +257,11 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
     /// What a CU costs each pool, per tier (ADR-031).
     pub fn costs(&self) -> &crate::capacity::Costs {
         &self.costs
+    }
+
+    /// Replicas scheduled to arrive (ADR-037).
+    pub fn schedule(&self) -> &crate::capacity::Schedule {
+        &self.schedule
     }
 
     pub fn signer(&self) -> &SnapshotSigner {
@@ -475,6 +483,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                 req.tier,
                 &footprint(&req.regions, &headroom),
                 &req.shape,
+                start,
             )
             .await?;
 
@@ -726,7 +735,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                     self.planner.release(&pt.model, pt.tier, &current).await;
                     ops.push(PlanOp::Released(pt.tier, current.clone()));
                     self.planner
-                        .reserve(&pt.model, tier, &current, &shape)
+                        .reserve(&pt.model, tier, &current, &shape, pt.term_start)
                         .await?;
                     ops.push(PlanOp::Reserved(tier, current));
                     pt.tier = tier;
@@ -747,7 +756,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                     self.planner.release(&pt.model, pt.tier, &before).await;
                     ops.push(PlanOp::Released(pt.tier, before));
                     self.planner
-                        .reserve(&pt.model, pt.tier, &after, &shape)
+                        .reserve(&pt.model, pt.tier, &after, &shape, pt.term_start)
                         .await?;
                     ops.push(PlanOp::Reserved(pt.tier, after));
                     pt.regions = new.clone();
@@ -1669,7 +1678,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                 self.planner.release(&pt.model, pt.tier, &before).await;
                 match self
                     .planner
-                    .reserve(&pt.model, pt.tier, &after, &pt.shape)
+                    .reserve(&pt.model, pt.tier, &after, &pt.shape, pt.term_end)
                     .await
                 {
                     Ok(()) => {
@@ -1683,7 +1692,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                         // Put the current capacity back and renew unchanged.
                         let _ = self
                             .planner
-                            .reserve(&pt.model, pt.tier, &before, &pt.shape)
+                            .reserve(&pt.model, pt.tier, &before, &pt.shape, Timestamp::MAX)
                             .await;
                         pt.events.push(Event {
                             at: now,
@@ -1700,7 +1709,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                 self.planner.release(&pt.model, pt.tier, &current).await;
                 match self
                     .planner
-                    .reserve(&pt.model, t, &current, &pt.shape)
+                    .reserve(&pt.model, t, &current, &pt.shape, pt.term_end)
                     .await
                 {
                     Ok(()) => {
@@ -1712,7 +1721,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                         // Keep the current tier for another term.
                         let _ = self
                             .planner
-                            .reserve(&pt.model, pt.tier, &current, &pt.shape)
+                            .reserve(&pt.model, pt.tier, &current, &pt.shape, Timestamp::MAX)
                             .await;
                         pt.events.push(Event {
                             at: now,
@@ -1763,7 +1772,13 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         let grow = growth(&before, target);
         if !grow.is_empty() {
             self.planner
-                .reserve(&pt.model, pt.tier, &grow, shape)
+                .reserve(
+                    &pt.model,
+                    pt.tier,
+                    &grow,
+                    shape,
+                    pt.term_start.max(self.clock.now()),
+                )
                 .await?;
             ops.push(PlanOp::Reserved(pt.tier, grow));
         }
@@ -1780,7 +1795,11 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
             match op {
                 PlanOp::Reserved(tier, shares) => self.planner.release(model, tier, &shares).await,
                 PlanOp::Released(tier, shares) => {
-                    if let Err(e) = self.planner.reserve(model, tier, &shares, shape).await {
+                    if let Err(e) = self
+                        .planner
+                        .reserve(model, tier, &shares, shape, Timestamp::MAX)
+                        .await
+                    {
                         tracing::error!(error = %e, "failed to restore capacity during rollback");
                     }
                 }

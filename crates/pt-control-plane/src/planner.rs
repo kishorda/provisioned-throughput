@@ -12,7 +12,9 @@ use std::sync::Mutex;
 
 use pt_core::{Shape, Tier};
 
-use crate::capacity::{Costs, MICRO};
+use jiff::Timestamp;
+
+use crate::capacity::{Costs, Schedule, MICRO};
 use crate::config::CapacityConfig;
 use crate::model::RegionShare;
 
@@ -20,13 +22,18 @@ use crate::model::RegionShare;
 pub enum PlanError {
     #[error("{model} is not offered in {region}")]
     NotOffered { region: String, model: String },
-    #[error("{region} has {available} {tier} CUs of {model} available; {requested} requested")]
+    #[error(
+        "{region} has {available} {tier} CUs of {model} available; {requested} requested{}",
+        from_note(.available_from)
+    )]
     CapacityUnavailable {
         region: String,
         model: String,
         tier: Tier,
         requested: u32,
         available: u32,
+        /// The earliest start at which scheduled capacity would fit the request (ADR-037).
+        available_from: Option<Timestamp>,
     },
     #[error("{region} can serve contexts up to {max_context} tokens for {model}; the shape needs {needed}")]
     ShapeUnsupported {
@@ -38,6 +45,30 @@ pub enum PlanError {
     /// The planner's store couldn't be reached. Nothing was reserved; retry.
     #[error("capacity planner unavailable: {0}")]
     Unavailable(String),
+}
+
+fn from_note(from: &Option<Timestamp>) -> String {
+    match from {
+        Some(t) => format!(". It fits from {t}, when scheduled capacity arrives"),
+        None => String::new(),
+    }
+}
+
+/// The earliest date after `at` when a pool with `free` micro-replicas at `at` can take
+/// `need` more, as scheduled capacity arrives.
+pub(crate) fn fits_from(
+    schedule: &Schedule,
+    region: &str,
+    model: &str,
+    at: Timestamp,
+    free: u64,
+    need: u64,
+) -> Option<Timestamp> {
+    let now_added = schedule.added_by(region, model, at);
+    schedule
+        .dates_after(region, model, at)
+        .into_iter()
+        .find(|d| free + (schedule.added_by(region, model, *d) - now_added) >= need)
 }
 
 /// A pool whose reserved micro-replicas don't match its live reservations.
@@ -109,13 +140,15 @@ pub fn expected_micro(costs: &Costs, held: &[Held]) -> HashMap<(String, String),
 }
 
 pub trait CapacityPlanner: Send + Sync + 'static {
-    /// Reserve `shares` of `model` at `tier` for a workload of `shape`, all or nothing.
+    /// Reserve `shares` of `model` at `tier` for a workload of `shape` starting at `at`, all
+    /// or nothing. Capacity scheduled to arrive by `at` counts (ADR-037).
     fn reserve(
         &self,
         model: &str,
         tier: Tier,
         shares: &[RegionShare],
         shape: &Shape,
+        at: Timestamp,
     ) -> impl Future<Output = Result<(), PlanError>> + Send;
 
     /// Return capacity previously reserved at `tier`.
@@ -134,12 +167,14 @@ pub trait CapacityPlanner: Send + Sync + 'static {
         shape: &Shape,
     ) -> impl Future<Output = Result<(), PlanError>> + Send;
 
-    /// Unreserved CUs of `model` at `tier` in `region`, or `None` if it isn't offered there.
+    /// Unreserved CUs of `model` at `tier` in `region` for a start at `at`, or `None` if it
+    /// isn't offered there.
     fn available_cus(
         &self,
         region: &str,
         model: &str,
         tier: Tier,
+        at: Timestamp,
     ) -> impl Future<Output = Option<u32>> + Send;
 
     /// Re-establish capacity already sold, from every live reservation (at startup). Never
@@ -170,11 +205,12 @@ struct Pool {
 pub struct MemoryPlanner {
     pools: Mutex<HashMap<(String, String), Pool>>,
     costs: Costs,
+    schedule: Schedule,
     pending: PendingDrift,
 }
 
 impl MemoryPlanner {
-    pub fn new(capacity: &[CapacityConfig], costs: Costs) -> Self {
+    pub fn new(capacity: &[CapacityConfig], costs: Costs, schedule: Schedule) -> Self {
         let pools = capacity
             .iter()
             .map(|c| {
@@ -191,24 +227,41 @@ impl MemoryPlanner {
         Self {
             pools: Mutex::new(pools),
             costs,
+            schedule,
             pending: Default::default(),
         }
     }
 
-    /// Unreserved CUs of `model` at `tier` in `region`.
+    /// Unreserved CUs of `model` at `tier` in `region`, from the configured replicas alone
+    /// (no scheduled additions).
     pub fn available(&self, region: &str, model: &str, tier: Tier) -> Option<u32> {
-        let pools = self.pools.lock().unwrap_or_else(|e| e.into_inner());
-        let p = pools.get(&(region.to_string(), model.to_string()))?;
-        self.costs
-            .cus_in(region, model, tier, p.capacity.saturating_sub(p.reserved))
+        self.available_at(region, model, tier, Timestamp::MIN)
     }
 
-    /// Unreserved micro-replicas in a pool.
+    /// Unreserved CUs for a start at `at`, counting capacity scheduled by then.
+    pub fn available_at(
+        &self,
+        region: &str,
+        model: &str,
+        tier: Tier,
+        at: Timestamp,
+    ) -> Option<u32> {
+        let free = self.free_at(region, model, at)?;
+        self.costs.cus_in(region, model, tier, free)
+    }
+
+    /// Unreserved micro-replicas in a pool, from the configured replicas alone.
     pub fn available_micro(&self, region: &str, model: &str) -> Option<u64> {
+        self.free_at(region, model, Timestamp::MIN)
+    }
+
+    fn free_at(&self, region: &str, model: &str, at: Timestamp) -> Option<u64> {
         let pools = self.pools.lock().unwrap_or_else(|e| e.into_inner());
         pools
             .get(&(region.to_string(), model.to_string()))
-            .map(|p| p.capacity.saturating_sub(p.reserved))
+            .map(|p| {
+                (p.capacity + self.schedule.added_by(region, model, at)).saturating_sub(p.reserved)
+            })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -219,7 +272,7 @@ impl MemoryPlanner {
         tier: Tier,
         shares: &[RegionShare],
         shape: &Shape,
-        count_capacity: bool,
+        count_capacity: Option<Timestamp>,
     ) -> Result<(), PlanError> {
         for s in shares {
             let not_offered = || PlanError::NotOffered {
@@ -237,11 +290,12 @@ impl MemoryPlanner {
                     needed: shape.context_ceiling,
                 });
             }
-            if !count_capacity {
+            let Some(at) = count_capacity else {
                 continue;
-            }
+            };
             let need = self.costs.share(model, tier, s).ok_or_else(not_offered)?;
-            let free = pool.capacity.saturating_sub(pool.reserved);
+            let free = (pool.capacity + self.schedule.added_by(&s.region, model, at))
+                .saturating_sub(pool.reserved);
             if need > free {
                 return Err(PlanError::CapacityUnavailable {
                     region: s.region.clone(),
@@ -249,6 +303,7 @@ impl MemoryPlanner {
                     tier,
                     requested: s.cus,
                     available: self.costs.cus_in(&s.region, model, tier, free).unwrap_or(0),
+                    available_from: fits_from(&self.schedule, &s.region, model, at, free, need),
                 });
             }
         }
@@ -263,9 +318,10 @@ impl CapacityPlanner for MemoryPlanner {
         tier: Tier,
         shares: &[RegionShare],
         shape: &Shape,
+        at: Timestamp,
     ) -> Result<(), PlanError> {
         let mut pools = self.pools.lock().unwrap_or_else(|e| e.into_inner());
-        self.check(&pools, model, tier, shares, shape, true)?;
+        self.check(&pools, model, tier, shares, shape, Some(at))?;
         for s in shares {
             let need = self.costs.share(model, tier, s).unwrap_or(0);
             if let Some(p) = pools.get_mut(&(s.region.clone(), model.to_string())) {
@@ -292,11 +348,17 @@ impl CapacityPlanner for MemoryPlanner {
         shape: &Shape,
     ) -> Result<(), PlanError> {
         let pools = self.pools.lock().unwrap_or_else(|e| e.into_inner());
-        self.check(&pools, model, Tier::Standard, regions, shape, false)
+        self.check(&pools, model, Tier::Standard, regions, shape, None)
     }
 
-    async fn available_cus(&self, region: &str, model: &str, tier: Tier) -> Option<u32> {
-        self.available(region, model, tier)
+    async fn available_cus(
+        &self,
+        region: &str,
+        model: &str,
+        tier: Tier,
+        at: Timestamp,
+    ) -> Option<u32> {
+        self.available_at(region, model, tier, at)
     }
 
     async fn restore(&self, live: &[Held]) {
@@ -353,7 +415,7 @@ mod tests {
         let mut costs = Costs::default();
         costs.insert("r", "m", Tier::Standard, micro_per_cu(1_000.0, 58_000.0));
         costs.insert("r", "m", Tier::Agentic, micro_per_cu(1_000.0, 35_500.0));
-        MemoryPlanner::new(&capacity, costs)
+        MemoryPlanner::new(&capacity, costs, Schedule::default())
     }
 
     fn share(cus: u32) -> Vec<RegionShare> {
@@ -380,12 +442,12 @@ mod tests {
         assert_eq!(p.available("r", "m", Tier::Standard), Some(371));
         assert_eq!(p.available("r", "m", Tier::Agentic), Some(227));
         // 200 Standard CUs use 54% of the pool, leaving 104 Agentic CUs, not 27.
-        p.reserve("m", Tier::Standard, &share(200), &shape())
+        p.reserve("m", Tier::Standard, &share(200), &shape(), Timestamp::MIN)
             .await
             .unwrap();
         assert_eq!(p.available("r", "m", Tier::Agentic), Some(104));
         let err = p
-            .reserve("m", Tier::Agentic, &share(105), &shape())
+            .reserve("m", Tier::Agentic, &share(105), &shape(), Timestamp::MIN)
             .await
             .unwrap_err();
         assert_eq!(
@@ -396,6 +458,7 @@ mod tests {
                 tier: Tier::Agentic,
                 requested: 105,
                 available: 104,
+                available_from: None,
             }
         );
         assert!(err.to_string().contains("104 agentic CUs"), "{err}");
@@ -408,7 +471,8 @@ mod tests {
     async fn a_tier_the_pool_cannot_cost_is_not_offered() {
         let p = planner();
         assert!(matches!(
-            p.reserve("m", Tier::Interactive, &share(1), &shape()).await,
+            p.reserve("m", Tier::Interactive, &share(1), &shape(), Timestamp::MIN)
+                .await,
             Err(PlanError::NotOffered { .. })
         ));
         assert_eq!(p.available("r", "m", Tier::Interactive), None);

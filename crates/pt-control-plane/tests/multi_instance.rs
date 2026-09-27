@@ -207,6 +207,7 @@ async fn reconcile_repairs_a_leak_but_never_an_in_flight_sale() {
             Tier::Agentic,
             &shares(&[("eu-west", 3)]),
             &shape(32_768),
+            t0(),
         )
         .await
         .unwrap();
@@ -251,6 +252,7 @@ async fn reconcile_repairs_a_leak_but_never_an_in_flight_sale() {
             Tier::Agentic,
             &shares(&[("eu-west", 2)]),
             &shape(32_768),
+            t0(),
         )
         .await
         .unwrap();
@@ -323,5 +325,45 @@ async fn pools_are_counted_in_replicas_once_after_the_upgrade() {
             .await
             .unwrap(),
         Some(counted)
+    );
+}
+
+#[tokio::test]
+async fn scheduled_capacity_counts_for_later_starts() {
+    let Some(db) = store("arrivals").await else {
+        return;
+    };
+    let mut c = config();
+    let arrives = t0() + SignedDuration::from_hours(24 * 30);
+    c.capacity_changes
+        .push(pt_control_plane::config::CapacityChange {
+            region: "eu-central".into(),
+            model: MAVERICK.into(),
+            add_replicas: 6,
+            from: arrives,
+        });
+    let svc = with_sql(c, db, ManualClock::new(t0())).await.unwrap();
+    // eu-central holds 100 Agentic CUs today and 201 once the replicas arrive (ADR-037).
+    let err = svc
+        .create(ACME, None, request("now", &[("eu-central", 150)]))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ServiceError::Capacity(PlanError::CapacityUnavailable {
+            available: 100,
+            available_from: Some(t),
+            ..
+        }) if t == arrives
+    ));
+    let mut later = request("later", &[("eu-central", 150)]);
+    later.start_at = Some(arrives);
+    svc.create(ACME, None, later).await.unwrap();
+    assert_eq!(
+        svc.planner
+            .available_at("eu-central", MAVERICK, Tier::Agentic, arrives)
+            .await
+            .unwrap(),
+        Some(51)
     );
 }

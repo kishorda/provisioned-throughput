@@ -277,6 +277,10 @@ pub struct RegionQuote {
     pub slo: Slo,
     /// CUs that could be reserved now. For a reservation, includes its current CUs here.
     pub available_cus: u32,
+    /// When it isn't feasible now: the earliest start at which scheduled capacity makes it
+    /// fit (ADR-037).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available_from: Option<jiff::Timestamp>,
     /// The region's pools serve the workload's context length.
     pub serves_context: bool,
     pub feasible: bool,
@@ -594,7 +598,7 @@ where
             // A CU costs a different share of a replica at each tier (ADR-031).
             let available = svc
                 .planner
-                .available_cus(region, &model_id, tier)
+                .available_cus(region, &model_id, tier, svc.clock.now())
                 .await
                 .unwrap_or(0)
                 + svc
@@ -604,15 +608,39 @@ where
             let demand = workload.demand(profile, tier);
             let (recommended, peak, policy, mut notes) = size(&demand, wu_per_cu);
             let feasible = serves_context && available >= recommended;
+            // Not enough now: the first scheduled arrival that makes enough room.
+            let mut available_from = None;
+            if serves_context && !feasible {
+                let now = svc.clock.now();
+                let current = svc
+                    .costs()
+                    .cus_in(region, &model_id, tier, current_micro)
+                    .unwrap_or(0);
+                for d in svc.schedule().dates_after(region, &model_id, now) {
+                    let then = svc
+                        .planner
+                        .available_cus(region, &model_id, tier, d)
+                        .await
+                        .unwrap_or(0)
+                        + current;
+                    if then >= recommended {
+                        available_from = Some(d);
+                        break;
+                    }
+                }
+            }
             if !serves_context {
                 notes.push(format!(
                     "{region} serves contexts up to {} tokens, less than this workload needs.",
                     capacity.max_context
                 ));
             } else if available < recommended {
-                notes.push(format!(
-                    "{region} has only {available} {tier} CUs available."
-                ));
+                notes.push(match available_from {
+                    Some(d) => format!(
+                        "{region} has only {available} {tier} CUs available now; enough from {d}, when scheduled capacity arrives."
+                    ),
+                    None => format!("{region} has only {available} {tier} CUs available."),
+                });
             }
             let per_request = demand.wu_per_request.max(f64::MIN_POSITIVE);
             let rpm_per_cu = wu_per_cu * 60.0 / per_request;
@@ -645,6 +673,7 @@ where
                 recommended_cus: recommended,
                 peak_cus: peak,
                 available_cus: available,
+                available_from,
                 serves_context,
                 feasible,
                 suggested_boundary_policy: policy,

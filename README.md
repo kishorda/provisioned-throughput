@@ -326,9 +326,10 @@ Follow-ups from the roadmap in docs/11, grouped by what they need.
   doesn't fetch them.
 - **Prefix-cache index from Dynamo KV events.** The gateway predicts cache hits from its own
   history (ADR-030). It doesn't see evictions or other replicas' traffic.
-- **Capacity placement across pools.** The planner counts each region's pool in replicas
-  and costs each CU by its tier (ADR-031), but a region is one pool per model, and there
-  are no lead times ("yes, from date D").
+- **Capacity placement across pools.** The planner counts each region's pool in replicas,
+  costs each CU by its tier (ADR-031), and sells scheduled arrivals from their date
+  (ADR-037), but a region is one pool per model. Capacity freed by reservations that end
+  isn't scheduled.
 - **Signing in a KMS.** The snapshot signing key is read from configuration.
 - **Home-gateway routing** for small tenants (docs/04 §6). Every gateway replica holds a
   quota floor for every reservation.

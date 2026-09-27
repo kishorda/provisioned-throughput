@@ -109,6 +109,8 @@ pub struct ApiError {
     code: String,
     message: String,
     field: Option<String>,
+    /// For `capacity_unavailable`: when scheduled capacity would fit (ADR-037).
+    available_from: Option<jiff::Timestamp>,
 }
 
 impl ApiError {
@@ -118,6 +120,7 @@ impl ApiError {
             code: code.into(),
             message: message.into(),
             field: None,
+            available_from: None,
         }
     }
 }
@@ -134,6 +137,9 @@ impl IntoResponse for ApiError {
         let mut err = json!({ "type": kind, "code": self.code, "message": self.message });
         if let Some(f) = self.field {
             err["field"] = json!(f);
+        }
+        if let Some(t) = self.available_from {
+            err["available_from"] = json!(t.to_string());
         }
         (self.status, Json(json!({ "error": err }))).into_response()
     }
@@ -152,7 +158,14 @@ impl From<ServiceError> for ApiError {
                 ..ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_request", message)
             },
             ServiceError::Capacity(p @ PlanError::CapacityUnavailable { .. }) => {
-                ApiError::new(StatusCode::CONFLICT, "capacity_unavailable", p.to_string())
+                let available_from = match &p {
+                    PlanError::CapacityUnavailable { available_from, .. } => *available_from,
+                    _ => None,
+                };
+                ApiError {
+                    available_from,
+                    ..ApiError::new(StatusCode::CONFLICT, "capacity_unavailable", p.to_string())
+                }
             }
             ServiceError::Capacity(p @ PlanError::NotOffered { .. }) => ApiError {
                 field: Some("regions".into()),

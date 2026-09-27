@@ -22,16 +22,21 @@ use pt_core::{Shape, Tier};
 use sqlx::postgres::PgPool;
 use sqlx::Row;
 
-use crate::capacity::{Costs, MICRO};
+use jiff::Timestamp;
+
+use crate::capacity::{Costs, Schedule, MICRO};
 use crate::config::CapacityConfig;
 use crate::model::RegionShare;
 use crate::planner::{
-    expected_micro, judge_drift, CapacityPlanner, Drift, Held, PendingDrift, PlanError,
+    expected_micro, fits_from, judge_drift, CapacityPlanner, Drift, Held, PendingDrift, PlanError,
 };
 
 pub struct SqlPlanner {
     pool: PgPool,
     costs: Costs,
+    /// Replicas scheduled to arrive (ADR-037). From configuration, which every instance
+    /// shares, so it isn't stored.
+    schedule: Schedule,
     pending: PendingDrift,
 }
 
@@ -53,6 +58,7 @@ impl SqlPlanner {
         pool: PgPool,
         capacity: &[CapacityConfig],
         costs: Costs,
+        schedule: Schedule,
     ) -> Result<Self, PlanError> {
         for c in capacity {
             // A pool created now has nothing sold, so it's already counted.
@@ -114,21 +120,57 @@ impl SqlPlanner {
         Ok(Self {
             pool,
             costs,
+            schedule,
             pending: Default::default(),
         })
     }
 
-    /// Unreserved CUs of `model` at `tier` in `region`.
+    /// Unreserved CUs of `model` at `tier` in `region`, from the configured replicas alone
+    /// (no scheduled additions).
     pub async fn available(
         &self,
         region: &str,
         model: &str,
         tier: Tier,
     ) -> Result<Option<u32>, PlanError> {
+        self.available_at(region, model, tier, Timestamp::MIN).await
+    }
+
+    /// Unreserved CUs for a start at `at`, counting capacity scheduled by then.
+    pub async fn available_at(
+        &self,
+        region: &str,
+        model: &str,
+        tier: Tier,
+        at: Timestamp,
+    ) -> Result<Option<u32>, PlanError> {
+        // Add what's scheduled before subtracting: sales that start later may already
+        // hold capacity that hasn't arrived yet.
+        let added = self.schedule.added_by(region, model, at);
         Ok(self
-            .available_micro(region, model)
+            .pool_micro(region, model)
             .await?
-            .and_then(|free| self.costs.cus_in(region, model, tier, free)))
+            .and_then(|(cap, res)| {
+                let free = (cap + added).saturating_sub(res);
+                self.costs.cus_in(region, model, tier, free)
+            }))
+    }
+
+    /// A pool's (capacity, reserved) micro-replicas.
+    async fn pool_micro(&self, region: &str, model: &str) -> Result<Option<(u64, u64)>, PlanError> {
+        let row = sqlx::query(
+            "SELECT capacity_micro, reserved_micro FROM capacity_pools
+             WHERE region = $1 AND model = $2",
+        )
+        .bind(region)
+        .bind(model)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(unavailable)?;
+        Ok(row.map(|r| {
+            let (cap, res): (i64, i64) = (r.get("capacity_micro"), r.get("reserved_micro"));
+            (cap.max(0) as u64, res.max(0) as u64)
+        }))
     }
 
     /// Unreserved micro-replicas in a pool.
@@ -198,6 +240,7 @@ impl CapacityPlanner for SqlPlanner {
         tier: Tier,
         shares: &[RegionShare],
         shape: &Shape,
+        at: Timestamp,
     ) -> Result<(), PlanError> {
         let mut tx = self.pool.begin().await.map_err(unavailable)?;
         for s in ordered(shares) {
@@ -209,26 +252,28 @@ impl CapacityPlanner for SqlPlanner {
                     region: s.region.clone(),
                     model: model.into(),
                 })?;
+            let added = self.schedule.added_by(&s.region, model, at);
             let done = sqlx::query(
                 "UPDATE capacity_pools SET reserved_micro = reserved_micro + $3
-                 WHERE region = $1 AND model = $2 AND reserved_micro + $3 <= capacity_micro",
+                 WHERE region = $1 AND model = $2
+                   AND reserved_micro + $3 <= capacity_micro + $4",
             )
             .bind(&s.region)
             .bind(model)
             .bind(need as i64)
+            .bind(added as i64)
             .execute(&mut *tx)
             .await
             .map_err(unavailable)?;
             if done.rows_affected() == 0 {
+                let free = (capacity + added).saturating_sub(reserved);
                 return Err(PlanError::CapacityUnavailable {
                     region: s.region.clone(),
                     model: model.into(),
                     tier,
                     requested: s.cus,
-                    available: self
-                        .costs
-                        .cus_in(&s.region, model, tier, capacity.saturating_sub(reserved))
-                        .unwrap_or(0),
+                    available: self.costs.cus_in(&s.region, model, tier, free).unwrap_or(0),
+                    available_from: fits_from(&self.schedule, &s.region, model, at, free, need),
                 });
             }
         }
@@ -271,8 +316,14 @@ impl CapacityPlanner for SqlPlanner {
         Ok(())
     }
 
-    async fn available_cus(&self, region: &str, model: &str, tier: Tier) -> Option<u32> {
-        match self.available(region, model, tier).await {
+    async fn available_cus(
+        &self,
+        region: &str,
+        model: &str,
+        tier: Tier,
+        at: Timestamp,
+    ) -> Option<u32> {
+        match self.available_at(region, model, tier, at).await {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(error = %e, "capacity lookup failed");
