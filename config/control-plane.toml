@@ -13,6 +13,15 @@ lifecycle_interval_secs = 60
 # key = "/etc/pt/cp.key"
 # client_ca = "/etc/pt/gateways-ca.pem"
 
+# Region traffic (/internal/...) on its own listener and TLS (ADR-034). server.listen then
+# serves only the customer API. Point gateways and the controller here.
+# [server.internal]
+# listen = "0.0.0.0:8443"
+# [server.internal.tls]
+# cert = "/etc/pt/cp-internal.pem"
+# key = "/etc/pt/cp-internal.key"
+# client_ca = "/etc/pt/gateways-ca.pem"   # gateways and controllers need client certificates
+
 [pricing]
 currency = "USD"
 base_cu_price_per_month_cents = 150000  # one Standard CU for one month

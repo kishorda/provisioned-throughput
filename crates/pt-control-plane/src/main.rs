@@ -14,7 +14,9 @@ use pt_control_plane::clock::SystemClock;
 use pt_control_plane::planner::CapacityPlanner;
 use pt_control_plane::sql::SqlStore;
 use pt_control_plane::store::Store;
-use pt_control_plane::{app_with_usage, in_memory, with_sql, ControlPlaneConfig, Service};
+use pt_control_plane::{
+    app_with_usage, in_memory, restrict, with_sql, ControlPlaneConfig, Service, Surface,
+};
 use pt_telemetry::clickhouse::ClickHouseUsageStore;
 use pt_telemetry::UsageBackend;
 
@@ -101,26 +103,62 @@ async fn serve<S: Store, P: CapacityPlanner>(
         holder,
     ));
 
-    let listener = tokio::net::TcpListener::bind(&listen)
+    let server = svc.config.server.clone();
+    match &server.internal {
+        None => serve_on(&listen, server.tls.as_ref(), routes, store_kind, "all").await,
+        Some(internal) => {
+            // Customer API and region traffic on separate listeners (ADR-034).
+            let customer = restrict(routes.clone(), Surface::Customer);
+            let region = restrict(routes, Surface::Internal);
+            tokio::try_join!(
+                serve_on(
+                    &listen,
+                    server.tls.as_ref(),
+                    customer,
+                    store_kind,
+                    "customer"
+                ),
+                serve_on(
+                    &internal.listen,
+                    internal.tls.as_ref(),
+                    region,
+                    store_kind,
+                    "internal"
+                ),
+            )?;
+            Ok(())
+        }
+    }
+}
+
+/// Serve `routes` on `listen`, over TLS if `tls` is set, until Ctrl-C.
+async fn serve_on(
+    listen: &str,
+    tls: Option<&pt_control_plane::tls::ServerTlsConfig>,
+    routes: axum::Router,
+    store_kind: &str,
+    surface: &str,
+) -> anyhow::Result<()> {
+    let listener = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("binding {listen}"))?;
     let shutdown = async {
         let _ = tokio::signal::ctrl_c().await;
     };
-    match &svc.config.server.tls {
+    match tls {
         Some(tls) => {
             let config = pt_control_plane::tls::server_config(tls)
                 .map_err(anyhow::Error::msg)
-                .context("loading [server.tls]")?;
+                .with_context(|| format!("loading TLS for the {surface} listener"))?;
             let mtls = tls.client_ca.is_some();
-            tracing::info!(%listen, store = store_kind, tls = true, client_certificates = mtls, "control plane listening");
+            tracing::info!(%listen, store = store_kind, surface, tls = true, client_certificates = mtls, "control plane listening");
             let listener = pt_control_plane::tls::TlsListener::new(listener, config)?;
             axum::serve(listener, routes)
                 .with_graceful_shutdown(shutdown)
                 .await?;
         }
         None => {
-            tracing::info!(%listen, store = store_kind, tls = false, "control plane listening");
+            tracing::info!(%listen, store = store_kind, surface, tls = false, "control plane listening");
             axum::serve(listener, routes)
                 .with_graceful_shutdown(shutdown)
                 .await?;

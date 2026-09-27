@@ -59,7 +59,7 @@ docs/
   01-requirements-and-traceability.md   # blog problems P1–P20 → requirements → sections; NFRs N1–N10
   02 … 11-*.md                  # unit/cost model, system, request path, isolation, capacity,
                                 # multi-region, K8s+Dynamo, metering/SLA, lifecycle, roadmap
-  adr/ADR-001 … ADR-033-*.md    # Nygard format: Status, Date, Context, Decision, Consequences
+  adr/ADR-001 … ADR-034-*.md    # Nygard format: Status, Date, Context, Decision, Consequences
 ```
 Published summary page (private Artifact): https://claude.ai/artifact/HMSSEEU8fb8tWSrGE9NmSH
 Its source HTML lived in a session scratchpad, not in this repo. To update it, republish with that URL after reading it.
@@ -72,6 +72,7 @@ Its source HTML lived in a session scratchpad, not in this repo. To update it, r
 - Settlement and usage emission happen once, in `Settlement::drop` (`crates/pt-gateway/src/chat.rs`), so every exit path is covered, including client disconnects.
 - Engines are reached over plain HTTP (`reqwest` with default features off). Don't add crates that need cmake or TLS C libraries: this machine has no cmake. Where TLS is needed, use rustls with the ring provider: sqlx `tls-rustls-ring-webpki`, reqwest `rustls-tls-webpki-roots` (pt-telemetry only), kube `ring`. Never aws-lc-rs or native-tls.
 - Control-plane transport (ADR-022): `[server.tls]` serves HTTPS through `tls::TlsListener` (rustls with ring; handshakes run in their own tasks). ALPN must stay `http/1.1` only, because axum has no HTTP/2 here. Clients build reqwest through `pt_entitlement::client_tls::ControlPlaneTls` (feature `client`), which enforces the policy. Tests generate certificates with `rcgen`, so they always run.
+- Listeners (ADR-034): with `[server.internal]`, `main.rs` serves `restrict(routes, Surface::Customer)` on `server.listen` and `restrict(routes, Surface::Internal)` on `server.internal.listen`, each with its own TLS. Region endpoints must live under `/internal/`; customer endpoints must not.
 - Database transport (ADR-021): `sql::check_transport` and `clickhouse::check_transport` refuse non-loopback hosts without verified TLS unless `allow_insecure_transport` is set. Keep that default when adding new outbound connections that carry tenant data.
 - The machine has 4 cores and about 3 GB of RAM. Build with `CARGO_BUILD_JOBS=2` if the linker runs out of memory.
 - Pricing values in code (`pt_core::tier`) must match the product decisions below.
@@ -149,7 +150,7 @@ These are recorded in `docs/11-roadmap-risks-open-questions.md` §4. Treat them 
 
 ## Open items
 - **Pricing:** no PM questions are open. `[[payg_prices]]` must mirror the regular PAYG price list; the values in `config/control-plane.toml` are development numbers.
-- **Not built:** metering of preempted PAYG; hot spares rendered as router workers (router `hot_spare` flags are hand-configured); per-image token costs by size (ADR-032 uses a fixed `image_tokens`); a KV-event-fed prefix index (the gateway uses its own history, ADR-030); pool placement and lead times in the planner; KMS signing; a separate customer-API listener; home-gateway routing; Dynamo Planner floor integration; pausing sales during an expedited drain. `README.md` ("Not built yet") has the full list.
+- **Not built:** metering of preempted PAYG; hot spares rendered as router workers (router `hot_spare` flags are hand-configured); per-image token costs by size (ADR-032 uses a fixed `image_tokens`); a KV-event-fed prefix index (the gateway uses its own history, ADR-030); pool placement and lead times in the planner; KMS signing; home-gateway routing; Dynamo Planner floor integration; pausing sales during an expedited drain. `README.md` ("Not built yet") has the full list.
 - **Needs a cluster or GPUs:** the Kubernetes Lease backend and `deploy/` manifests (never run), the Dockerfiles, the Dynamo router plugins and engine KV-budget patch, the staging interference soak, a weight-prefetch DaemonSet, and a GeoDNS/anycast controller for `/internal/v1/steering`.
 - **Known failover limits (ADR-014):** activation needs the control plane, so a region failure during a control-plane outage doesn't fail over. A partition between a healthy region and the control plane makes the reservation over-serve briefly, never under-serve. During the return ramp, a gateway's limiter can run up to 1% above the entitlement, because rate changes under 1% are skipped.
 - **Top technical risks:** Dynamo API churn and fork maintenance, and upstream acceptance of the engine KV-budget patch.

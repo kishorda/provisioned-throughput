@@ -59,6 +59,51 @@ pub fn app_with_usage<S: store::Store, P: planner::CapacityPlanner, C: Clock>(
     )
 }
 
+/// Which part of the API a listener serves (ADR-034).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Surface {
+    /// Everything, on one listener.
+    All,
+    /// The customer API: everything but `/internal/...`.
+    Customer,
+    /// Region traffic only: `/internal/...`.
+    Internal,
+}
+
+impl Surface {
+    pub fn serves(self, path: &str) -> bool {
+        let internal = path.starts_with("/internal/");
+        match self {
+            _ if path == "/healthz" => true,
+            Surface::All => true,
+            Surface::Customer => !internal,
+            Surface::Internal => internal,
+        }
+    }
+}
+
+/// `routes`, answering 404 for paths outside `surface`.
+pub fn restrict(routes: axum::Router, surface: Surface) -> axum::Router {
+    if surface == Surface::All {
+        return routes;
+    }
+    routes.layer(axum::middleware::from_fn(
+        move |req: axum::extract::Request, next: axum::middleware::Next| async move {
+            if surface.serves(req.uri().path()) {
+                next.run(req).await
+            } else {
+                axum::response::IntoResponse::into_response((
+                    axum::http::StatusCode::NOT_FOUND,
+                    axum::Json(serde_json::json!({ "error": {
+                        "code": "not_found",
+                        "message": "Not served on this listener.",
+                    } })),
+                ))
+            }
+        },
+    ))
+}
+
 /// A service backed by the in-memory store and planner (one instance).
 pub fn in_memory<C: Clock>(
     config: ControlPlaneConfig,

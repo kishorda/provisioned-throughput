@@ -247,6 +247,11 @@ sequenceDiagram
   `client_key`), and the capacity controller uses `PT_CONTROL_PLANE_CA` and
   `PT_CONTROL_PLANE_CLIENT_CERT`/`_KEY`. Plain `http://` to a non-loopback control plane is
   refused at startup unless `allow_insecure_transport = true`.
+- **Separate listeners** ([ADR-034](adr/ADR-034-separate-internal-listener.md)). With
+  `[server.internal]`, region traffic (`/internal/...`) is served on its own address with
+  its own TLS, and `server.listen` serves only the customer API. So gateways can need
+  client certificates while customers don't. Point gateways and the controller at the
+  internal address.
 - **Key rotation** ([ADR-020](adr/ADR-020-signing-key-rotation.md)). Each snapshot names its
   key in `x-pt-key-id`: the first 16 hex characters of the SHA-256 of the public key.
   Verifiers trust a set of keys: gateways use `public_key` plus `extra_public_keys`, and the

@@ -337,6 +337,20 @@ pub struct ServerConfig {
     /// behind a TLS-terminating proxy.
     #[serde(default)]
     pub tls: Option<crate::tls::ServerTlsConfig>,
+    /// Serve `/internal/...` (snapshots, heartbeats, usage, incidents, steering) on its own
+    /// listener, with its own TLS (ADR-034). `listen` then serves only the customer API, so
+    /// gateways can need client certificates without customers needing them.
+    #[serde(default)]
+    pub internal: Option<InternalListener>,
+}
+
+/// `[server.internal]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InternalListener {
+    pub listen: String,
+    #[serde(default)]
+    pub tls: Option<crate::tls::ServerTlsConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -547,6 +561,11 @@ impl ControlPlaneConfig {
         }
         if !self.server.endpoint_template.contains("{region}") {
             return invalid("server.endpoint_template must contain {region}".into());
+        }
+        if let Some(i) = &self.server.internal {
+            if i.listen == self.server.listen {
+                return invalid("server.internal.listen must differ from server.listen".into());
+            }
         }
         Ok(())
     }

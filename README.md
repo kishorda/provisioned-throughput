@@ -329,9 +329,6 @@ Follow-ups from the roadmap in docs/11, grouped by what they need.
   and costs each CU by its tier (ADR-031), but a region is one pool per model, and there
   are no lead times ("yes, from date D").
 - **Signing in a KMS.** The snapshot signing key is read from configuration.
-- **Separate listeners.** With `[server.tls] client_ca`, the customer API also requires
-  client certificates, because it shares a listener with internal traffic (ADR-022).
-  Front it with its own ingress for now.
 - **Home-gateway routing** for small tenants (docs/04 §6). Every gateway replica holds a
   quota floor for every reservation.
 - **Redpanda.** Gateways push usage to the control plane, which writes it to ClickHouse
