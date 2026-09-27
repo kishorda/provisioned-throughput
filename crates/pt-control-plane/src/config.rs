@@ -228,8 +228,12 @@ fn default_check_interval_ms() -> u64 {
 #[serde(deny_unknown_fields)]
 pub struct EntitlementsConfig {
     /// Ed25519 seed (32 bytes, hex) that signs snapshots. Generate one with
-    /// `pt-control-plane keygen`. From a secret store in production.
+    /// `pt-control-plane keygen`. For development: in production, use `vault`.
+    #[serde(default)]
     pub signing_key: String,
+    /// Sign with a key held by Vault's Transit engine instead (ADR-038).
+    #[serde(default)]
+    pub vault: Option<crate::signing::VaultConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -566,8 +570,26 @@ impl ControlPlaneConfig {
                 ));
             }
         }
-        if pt_entitlement::SnapshotSigner::from_hex(&self.entitlements.signing_key).is_err() {
-            return invalid("entitlements.signing_key must be 32 bytes of hex".into());
+        match (
+            &self.entitlements.vault,
+            self.entitlements.signing_key.is_empty(),
+        ) {
+            (Some(_), false) => {
+                return invalid(
+                    "set entitlements.signing_key or [entitlements.vault], not both".into(),
+                )
+            }
+            (Some(v), true) => {
+                if let Err(e) = v.tls.check(&v.url) {
+                    return invalid(format!("entitlements.vault: {e}"));
+                }
+            }
+            (None, _) => {
+                if pt_entitlement::SnapshotSigner::from_hex(&self.entitlements.signing_key).is_err()
+                {
+                    return invalid("entitlements.signing_key must be 32 bytes of hex".into());
+                }
+            }
         }
         if self.telemetry.wu_per_cu <= 0.0 || self.telemetry.retention_days == 0 {
             return invalid(

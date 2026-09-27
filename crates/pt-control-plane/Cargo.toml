@@ -9,9 +9,11 @@ rust-version.workspace = true
 [dependencies]
 pt-core.workspace = true
 pt-admission.workspace = true
-pt-entitlement.workspace = true
+pt-entitlement = { workspace = true, features = ["client"] }
 pt-telemetry.workspace = true
 anyhow.workspace = true
+base64 = "0.22"
+reqwest = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 axum.workspace = true
 jiff.workspace = true
 serde.workspace = true
@@ -29,5 +31,5 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-reqwest = { workspace = true, features = ["rustls-tls-webpki-roots"] }
+ed25519-dalek.workspace = true
 rcgen.workspace = true

@@ -42,6 +42,10 @@ async fn main() -> anyhow::Result<()> {
     }
     let path = arg.unwrap_or_else(|| "config/control-plane.toml".into());
     let config = ControlPlaneConfig::load(&path)?;
+    // Fail here, with a message, if the Vault token is missing (ADR-038).
+    pt_control_plane::signing::Signer::from_config(&config)
+        .map_err(anyhow::Error::msg)
+        .context("configuring the snapshot signer")?;
     match config.store.as_ref().and_then(|s| s.resolved_url()) {
         Some(url) => {
             let store_cfg = config.store.clone().expect("checked above");

@@ -96,6 +96,7 @@ The design rests on six decisions:
 | [035](adr/ADR-035-preempted-payg-delivered-tokens.md) | Preempted PAYG responses report the tokens they delivered, so metering bills only those |
 | [036](adr/ADR-036-image-tokens-by-size.md) | Price inline images by their size (read from the header) and the model's tiling |
 | [037](adr/ADR-037-planner-lead-times.md) | Sell capacity scheduled to arrive, from the date it arrives ("yes, from date D") |
+| [038](adr/ADR-038-vault-transit-signing.md) | Sign snapshots with a key held in Vault Transit, never in configuration |
 
 ## Glossary
 

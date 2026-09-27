@@ -252,6 +252,10 @@ sequenceDiagram
   its own TLS, and `server.listen` serves only the customer API. So gateways can need
   client certificates while customers don't. Point gateways and the controller at the
   internal address.
+- **Signing key in Vault** ([ADR-038](adr/ADR-038-vault-transit-signing.md)). With
+  `[entitlements.vault]`, snapshots are signed by a Transit key that never leaves Vault.
+  The key id follows the Vault key version that signed. If Vault can't sign, the endpoint
+  answers 503 `signing_unavailable`, and gateways keep their cached snapshot.
 - **Key rotation** ([ADR-020](adr/ADR-020-signing-key-rotation.md)). Each snapshot names its
   key in `x-pt-key-id`: the first 16 hex characters of the SHA-256 of the public key.
   Verifiers trust a set of keys: gateways use `public_key` plus `extra_public_keys`, and the
@@ -315,7 +319,8 @@ and `total`, in minor units.
 - A remote Capacity Planner client, with placement across pools. The SQL planner counts
   each region's pool in replicas, costs CUs by tier (ADR-031), and sells scheduled
   arrivals from their date (ADR-037), but a region is one pool per model.
-- Signing in a KMS or secret store. The signing key is read from configuration.
+- Signing in a cloud KMS. Snapshots can be signed by Vault Transit (ADR-038), but not by
+  AWS or Google Cloud KMS.
 - Invoice adjustments, taxes, and payment collection. Final invoices are immutable, but
   there's no adjustment line for corrections yet.
 

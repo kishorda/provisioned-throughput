@@ -59,7 +59,7 @@ docs/
   01-requirements-and-traceability.md   # blog problems P1–P20 → requirements → sections; NFRs N1–N10
   02 … 11-*.md                  # unit/cost model, system, request path, isolation, capacity,
                                 # multi-region, K8s+Dynamo, metering/SLA, lifecycle, roadmap
-  adr/ADR-001 … ADR-037-*.md    # Nygard format: Status, Date, Context, Decision, Consequences
+  adr/ADR-001 … ADR-038-*.md    # Nygard format: Status, Date, Context, Decision, Consequences
 ```
 Published summary page (private Artifact): https://claude.ai/artifact/HMSSEEU8fb8tWSrGE9NmSH
 Its source HTML lived in a session scratchpad, not in this repo. To update it, republish with that URL after reading it.
@@ -113,6 +113,7 @@ Its source HTML lived in a session scratchpad, not in this repo. To update it, r
 - Share rebalancing (ADR-024): `regions` is the contract (price, renewals). `pt.effective()` is what gateways enforce, and snapshots, failover shares, steering, and `held()` must use it. Any change to `regions` clears `effective_regions`. Change what a reservation holds with `move_capacity` (reserve growth first, then release shrink), never by hand. `rebalance::target_split` is pure and starts from the contract each time.
 - A gateway uses either `[entitlements]` or static `[[reservations]]`/`[[deployments]]`, never both. Profiles are always local to the gateway.
 - The signing key in `config/control-plane.toml` and the public key in `config/gateway-*.toml` are a matched development pair. If you change one, regenerate both with `pt-control-plane keygen`.
+- Snapshot signing (ADR-038): `signing::Signer` is `Local` (`signing_key`) or `Vault` (`[entitlements.vault]`, Transit `ed25519`; token from `token_env`, never the file). `Signer::sign` is async and returns (body, signature, key id); the snapshot handler turns a signing error into 503 `signing_unavailable`, never an unsigned body. Vault signatures are cached by body hash. Tests use a mock Transit server (`tests/vault_signing.rs`).
 - Snapshot keys (ADR-020): a key's id is `pt_entitlement::key_id` (the first 16 hex characters of the SHA-256 of the public key), sent in `x-pt-key-id` and stored in caches. Verify with `SnapshotVerifier::verify_with(body, sig, key_id)` against a trusted set (`from_hex_list`). Never fall back to accepting an unknown key id. Gateways report their snapshot's key id in heartbeats, and `RegionStatus.snapshot_key_ids` shows when an old key can be removed.
 
 ## Conventions for editing docs
@@ -151,7 +152,7 @@ These are recorded in `docs/11-roadmap-risks-open-questions.md` §4. Treat them 
 
 ## Open items
 - **Pricing:** no PM questions are open. `[[payg_prices]]` must mirror the regular PAYG price list; the values in `config/control-plane.toml` are development numbers.
-- **Not built:** hot spares rendered as router workers (router `hot_spare` flags are hand-configured); sizes of remote (URL) images (ADR-036 prices inline ones); a KV-event-fed prefix index (the gateway uses its own history, ADR-030); pool placement in the planner; KMS signing; home-gateway routing; Dynamo Planner floor integration; pausing sales during an expedited drain. `README.md` ("Not built yet") has the full list.
+- **Not built:** hot spares rendered as router workers (router `hot_spare` flags are hand-configured); sizes of remote (URL) images (ADR-036 prices inline ones); a KV-event-fed prefix index (the gateway uses its own history, ADR-030); pool placement in the planner; cloud-KMS signing (Vault Transit is supported); home-gateway routing; Dynamo Planner floor integration; pausing sales during an expedited drain. `README.md` ("Not built yet") has the full list.
 - **Needs a cluster or GPUs:** the Kubernetes Lease backend and `deploy/` manifests (never run), the Dockerfiles, the Dynamo router plugins and engine KV-budget patch, the staging interference soak, a weight-prefetch DaemonSet, and a GeoDNS/anycast controller for `/internal/v1/steering`.
 - **Known failover limits (ADR-014):** activation needs the control plane, so a region failure during a control-plane outage doesn't fail over. A partition between a healthy region and the control plane makes the reservation over-serve briefly, never under-serve. During the return ramp, a gateway's limiter can run up to 1% above the entitlement, because rate changes under 1% are skipped.
 - **Top technical risks:** Dynamo API churn and fork maintenance, and upstream acceptance of the engine KV-budget patch.

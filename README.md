@@ -330,7 +330,8 @@ Follow-ups from the roadmap in docs/11, grouped by what they need.
   costs each CU by its tier (ADR-031), and sells scheduled arrivals from their date
   (ADR-037), but a region is one pool per model. Capacity freed by reservations that end
   isn't scheduled.
-- **Signing in a KMS.** The snapshot signing key is read from configuration.
+- **Signing in a cloud KMS.** Snapshots can be signed by a key in Vault Transit
+  (`[entitlements.vault]`, ADR-038). AWS and Google Cloud KMS aren't supported.
 - **Home-gateway routing** for small tenants (docs/04 §6). Every gateway replica holds a
   quota floor for every reservation.
 - **Redpanda.** Gateways push usage to the control plane, which writes it to ClickHouse

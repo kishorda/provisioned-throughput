@@ -18,6 +18,7 @@ pub mod quote;
 pub mod quote_api;
 pub mod rebalance;
 pub mod service;
+pub mod signing;
 pub mod sql;
 pub mod sql_planner;
 pub mod store;

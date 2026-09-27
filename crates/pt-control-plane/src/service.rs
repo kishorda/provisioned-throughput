@@ -14,7 +14,7 @@ use pt_core::{Shape, Tier};
 pub use pt_entitlement::sha256_hex;
 use pt_entitlement::{
     DeploymentEntitlement, FailoverShare, PreviousKey, RegionFailover, ReservationEntitlement,
-    Snapshot, SnapshotSigner,
+    Snapshot,
 };
 use tokio::sync::watch;
 
@@ -193,7 +193,7 @@ pub struct Service<S, P, C> {
     pub planner: P,
     pub clock: C,
     pub config: ControlPlaneConfig,
-    signer: SnapshotSigner,
+    signer: crate::signing::Signer,
     /// What a CU costs each pool, per tier.
     costs: crate::capacity::Costs,
     /// Replicas scheduled to arrive (ADR-037).
@@ -206,9 +206,10 @@ pub struct Service<S, P, C> {
 
 impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
     /// `config` must have passed [`ControlPlaneConfig::validate`].
+    /// With `[entitlements.vault]`, the Vault token must be in the environment
+    /// (`crate::signing::Signer::from_config` checks it first).
     pub fn new(store: S, planner: P, clock: C, config: ControlPlaneConfig) -> Self {
-        let signer = SnapshotSigner::from_hex(&config.entitlements.signing_key)
-            .expect("validated signing key");
+        let signer = crate::signing::Signer::from_config(&config).expect("valid signer");
         // Start from the clock in milliseconds, so versions keep increasing across restarts.
         let (changes, _) = watch::channel(clock.now().as_millisecond().max(1) as u64);
         Self {
@@ -264,7 +265,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         &self.schedule
     }
 
-    pub fn signer(&self) -> &SnapshotSigner {
+    pub fn signer(&self) -> &crate::signing::Signer {
         &self.signer
     }
 

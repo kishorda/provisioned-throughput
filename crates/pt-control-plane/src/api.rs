@@ -690,7 +690,15 @@ async fn entitlements<S: Store, P: CapacityPlanner, C: Clock>(
             format!("Unknown region {region}."),
         )
     })?;
-    let (body, signature) = svc.signer().sign(&snapshot);
+    // Never unsigned: if the signer (Vault) is unreachable, the gateway keeps its cache.
+    let (body, signature, key_id) = svc.signer().sign(&snapshot).await.map_err(|e| {
+        tracing::error!(error = %e, "signing a snapshot failed");
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "signing_unavailable",
+            "Snapshots can't be signed right now.",
+        )
+    })?;
     let tag = HeaderValue::from_str(&format!("\"{}\"", snapshot.version)).expect("valid etag");
     Ok((
         [
@@ -705,7 +713,7 @@ async fn entitlements<S: Store, P: CapacityPlanner, C: Clock>(
             ),
             (
                 header::HeaderName::from_static(pt_entitlement::KEY_ID_HEADER),
-                HeaderValue::from_str(&svc.signer().key_id()).expect("hex key id"),
+                HeaderValue::from_str(&key_id).expect("hex key id"),
             ),
         ],
         body,
