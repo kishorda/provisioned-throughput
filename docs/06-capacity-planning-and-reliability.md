@@ -1,6 +1,6 @@
 # 06 · Capacity Planning & Reliability (Hidden Headroom)
 
-> Decision records: [ADR-006](adr/ADR-006-headroom-backfill.md), [ADR-031](adr/ADR-031-capacity-in-replicas-per-tier.md), [ADR-033](adr/ADR-033-surge-before-drain.md), [ADR-044](adr/ADR-044-hot-spares-as-router-workers.md)
+> Decision records: [ADR-006](adr/ADR-006-headroom-backfill.md), [ADR-031](adr/ADR-031-capacity-in-replicas-per-tier.md), [ADR-033](adr/ADR-033-surge-before-drain.md), [ADR-044](adr/ADR-044-hot-spares-as-router-workers.md), [ADR-045](adr/ADR-045-capacity-placement-across-pools.md)
 
 ## 1. What the planner must answer
 
@@ -16,7 +16,10 @@
 > Agentic, Interactive, and Standard CUs draw what each really needs from the same pool.
 > Scheduled arrivals (`[[capacity_changes]]`) count from their date, so a sale that
 > doesn't fit now is told the date it would ([ADR-037](adr/ADR-037-planner-lead-times.md)).
-> Pool placement isn't built: a region is one pool per model.
+> A region can have several pools per model. Each region share is placed on one pool, the
+> **best fit** (least free capacity that still fits, ties to configuration order). A share
+> that outgrows its pool moves whole to one that fits, and operators move shares between
+> pools to migrate hardware ([ADR-045](adr/ADR-045-capacity-placement-across-pools.md)).
 
 ## 2. Sizing formula
 
@@ -38,7 +41,7 @@ replicas(p)     = N(p) + k(p)
   covered for Multi-region SKUs.
 - Disaggregated pools are sized separately for the prefill and decode roles.
 
-Placement is **greedy first-fit-decreasing** at sale time, so quotes are fast. A nightly
+Placement is **greedy best-fit** at sale time, so quotes are fast (built, ADR-045). A nightly
 **MILP rebalance** (good_lp + HiGHS, in Rust) minimises GPUs subject to SLO, isolation,
 and residency constraints. It emits migration plans that the Regional Capacity Controller
 executes gradually.

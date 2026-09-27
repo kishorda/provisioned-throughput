@@ -108,6 +108,8 @@ pub fn exclusion_windows(
                 EventKind::ChangeApplied { .. } => "scheduled_change",
                 // Capacity moved between regions and placement catches up, like a resize.
                 EventKind::SplitRebalanced { .. } => "rebalance",
+                // The new pool's floor catches up, like a resize.
+                EventKind::Relocated { .. } => "relocation",
                 _ => return None,
             };
             let start = ms(e.at);
@@ -202,6 +204,7 @@ mod tests {
             failover_headroom: vec![],
             rebalance: true,
             effective_regions: vec![],
+            placements: vec![],
             deployments: vec![],
             version: 1,
             created_at: at("2026-10-01T00:00:00Z"),

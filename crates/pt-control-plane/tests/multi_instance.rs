@@ -26,6 +26,16 @@ type Svc = Arc<Service<SqlStore, SqlPlanner, ManualClock>>;
 /// Micro-replicas an Agentic CU draws from the eu-west B200 pool (ADR-031).
 const AGENTIC_CU: u64 = 35_212;
 
+fn claims(v: &[(&str, u32)]) -> Vec<pt_control_plane::planner::Claim> {
+    v.iter()
+        .map(|(r, cus)| pt_control_plane::planner::Claim {
+            region: r.to_string(),
+            pool: None,
+            cus: *cus,
+        })
+        .collect()
+}
+
 async fn store(name: &str) -> Option<SqlStore> {
     let Ok(url) = std::env::var("PT_TEST_DATABASE_URL") else {
         eprintln!("PT_TEST_DATABASE_URL not set; skipping {name}");
@@ -205,7 +215,7 @@ async fn reconcile_repairs_a_leak_but_never_an_in_flight_sale() {
         .reserve(
             MAVERICK,
             Tier::Agentic,
-            &shares(&[("eu-west", 3)]),
+            &claims(&[("eu-west", 3)]),
             &shape(32_768),
             t0(),
         )
@@ -250,7 +260,7 @@ async fn reconcile_repairs_a_leak_but_never_an_in_flight_sale() {
         .reserve(
             MAVERICK,
             Tier::Agentic,
-            &shares(&[("eu-west", 2)]),
+            &claims(&[("eu-west", 2)]),
             &shape(32_768),
             t0(),
         )
@@ -294,7 +304,7 @@ async fn pools_are_counted_in_replicas_once_after_the_upgrade() {
     );
 
     // The state right after migration 0005: nothing counted in replicas yet.
-    sqlx::query("UPDATE capacity_pools SET reserved_micro = 0, micro_counted = false")
+    sqlx::query("UPDATE pool_capacity SET reserved_micro = 0, micro_counted = false")
         .execute(db.pool())
         .await
         .unwrap();
@@ -312,7 +322,7 @@ async fn pools_are_counted_in_replicas_once_after_the_upgrade() {
         Some(counted)
     );
     let uncounted: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM capacity_pools WHERE NOT micro_counted")
+        sqlx::query_scalar("SELECT count(*) FROM pool_capacity WHERE NOT micro_counted")
             .fetch_one(db.pool())
             .await
             .unwrap();
@@ -329,6 +339,36 @@ async fn pools_are_counted_in_replicas_once_after_the_upgrade() {
 }
 
 #[tokio::test]
+async fn migration_0008_copies_counters_to_pools_named_after_the_model() {
+    let Some(db) = store("migrate8").await else {
+        return;
+    };
+    // A (region, model) row as it stood before pools had ids.
+    sqlx::query(
+        "INSERT INTO capacity_pools
+             (region, model, capacity, reserved, max_context, capacity_micro, reserved_micro,
+              micro_counted)
+         VALUES ('ap-south', 'old-model', 0, 0, 8192, 4000000, 1500000, true)",
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
+    // The migration is idempotent, so running it again copies the new row.
+    sqlx::raw_sql(include_str!("../migrations/0008_capacity_by_pool.sql"))
+        .execute(db.pool())
+        .await
+        .unwrap();
+    let row: (String, i64, i64, bool) = sqlx::query_as(
+        "SELECT model, capacity_micro, reserved_micro, micro_counted FROM pool_capacity
+         WHERE region = 'ap-south' AND pool = 'old-model'",
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(row, ("old-model".into(), 4_000_000, 1_500_000, true));
+}
+
+#[tokio::test]
 async fn scheduled_capacity_counts_for_later_starts() {
     let Some(db) = store("arrivals").await else {
         return;
@@ -339,6 +379,7 @@ async fn scheduled_capacity_counts_for_later_starts() {
         .push(pt_control_plane::config::CapacityChange {
             region: "eu-central".into(),
             model: MAVERICK.into(),
+            pool: None,
             add_replicas: 6,
             from: arrives,
         });

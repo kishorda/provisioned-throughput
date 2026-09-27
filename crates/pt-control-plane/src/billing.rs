@@ -566,6 +566,7 @@ mod tests {
             failover_headroom: vec![],
             rebalance: true,
             effective_regions: vec![],
+            placements: vec![],
             deployments: vec![],
             version: 1,
             created_at: at("2026-10-11T00:00:00Z"),

@@ -395,28 +395,43 @@ pub struct ModelConfig {
 pub struct CapacityChange {
     pub region: String,
     pub model: String,
+    /// The pool that grows. Required when the region has several pools for the model.
+    #[serde(default)]
+    pub pool: Option<String>,
     pub add_replicas: u32,
     /// When the replicas can serve.
     pub from: jiff::Timestamp,
 }
 
-/// A model's sellable capacity in a region, in replicas (ADR-031).
+/// A pool's sellable capacity for a model in a region, in replicas (ADR-031).
 ///
 /// A CU at each tier draws a different number of replicas, from the pool's profile
-/// ([`crate::capacity::Costs`]).
+/// ([`crate::capacity::Costs`]). A region can have several pools for a model, for example
+/// on different GPU classes; each region share of a reservation is placed on one of them
+/// (ADR-045).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapacityConfig {
     pub region: String,
     pub model: String,
+    /// The pool's id, unique in its region. Defaults to the model id, which is also the
+    /// region's default pool for reservations placed before pools had ids.
+    #[serde(default)]
+    pub pool: Option<String>,
     /// Replicas that provisioned floors may use: the pool's size less failure-domain and
     /// maintenance headroom, which the operator adds on top (docs/06 §2).
     pub replicas: u32,
     /// Longest context the region's pools for this model can serve. Pools without
     /// disaggregation typically serve less than the model's maximum.
     pub max_context: u64,
-    /// `PerformanceProfile` of the region's pool, passed to gateways in snapshots.
+    /// `PerformanceProfile` of the pool, passed to gateways in snapshots.
     pub profile: String,
+}
+
+impl CapacityConfig {
+    pub fn pool_id(&self) -> &str {
+        self.pool.as_deref().unwrap_or(&self.model)
+    }
 }
 
 fn default_endpoint_template() -> String {
@@ -474,11 +489,15 @@ impl ControlPlaneConfig {
             let Some(m) = self.model(&c.model) else {
                 return invalid(format!("capacity for unknown model {}", c.model));
             };
-            if !pools.insert((c.region.as_str(), c.model.as_str())) {
+            if !pools.insert((c.region.as_str(), c.pool_id())) {
                 return invalid(format!(
-                    "duplicate capacity for {} in {}",
-                    c.model, c.region
+                    "duplicate capacity pool {} in {} (pool ids default to the model id, so give each pool of a model an id)",
+                    c.pool_id(),
+                    c.region
                 ));
+            }
+            if c.pool_id().is_empty() {
+                return invalid(format!("empty pool id in {}", c.region));
             }
             if c.max_context > m.max_context {
                 return invalid(format!(
@@ -600,11 +619,27 @@ impl ControlPlaneConfig {
             return invalid("server.endpoint_template must contain {region}".into());
         }
         for c in &self.capacity_changes {
-            if self.capacity_for(&c.region, &c.model).is_none() {
-                return invalid(format!(
-                    "capacity_changes for {} in {}, which has no [[capacity]] pool",
-                    c.model, c.region
-                ));
+            let pools = self.pools_for(&c.region, &c.model);
+            match &c.pool {
+                None if pools.is_empty() => {
+                    return invalid(format!(
+                        "capacity_changes for {} in {}, which has no [[capacity]] pool",
+                        c.model, c.region
+                    ))
+                }
+                None if pools.len() > 1 => {
+                    return invalid(format!(
+                        "capacity_changes for {} in {} must name a pool: the region has several",
+                        c.model, c.region
+                    ))
+                }
+                Some(p) if !pools.iter().any(|c| c.pool_id() == p) => {
+                    return invalid(format!(
+                        "capacity_changes names pool {p}, which isn't a {} pool in {}",
+                        c.model, c.region
+                    ))
+                }
+                _ => {}
             }
             if c.add_replicas == 0 {
                 return invalid("capacity_changes add_replicas must be positive".into());
@@ -649,17 +684,41 @@ impl ControlPlaneConfig {
         self.regions.iter().find(|r| r.name == name)
     }
 
+    /// The region's default pool for a model: the one whose id is the model id, else the
+    /// first listed. Reservations placed before pools had ids live there (ADR-045).
     pub fn capacity_for(&self, region: &str, model: &str) -> Option<&CapacityConfig> {
-        self.capacity
+        let pools = self.pools_for(region, model);
+        pools
             .iter()
-            .find(|c| c.region == region && c.model == model)
+            .find(|c| c.pool_id() == model)
+            .or(pools.first())
+            .copied()
     }
 
-    pub fn regions_for(&self, model: &str) -> Vec<&str> {
+    /// A region's pools for a model, in configuration order (the tie-break order for
+    /// placement).
+    pub fn pools_for(&self, region: &str, model: &str) -> Vec<&CapacityConfig> {
         self.capacity
             .iter()
-            .filter(|c| c.model == model)
-            .map(|c| c.region.as_str())
+            .filter(|c| c.region == region && c.model == model)
             .collect()
+    }
+
+    /// A pool by region and id.
+    pub fn pool(&self, region: &str, pool: &str) -> Option<&CapacityConfig> {
+        self.capacity
+            .iter()
+            .find(|c| c.region == region && c.pool_id() == pool)
+    }
+
+    /// Regions offering `model`, each once, in configuration order.
+    pub fn regions_for(&self, model: &str) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::new();
+        for c in self.capacity.iter().filter(|c| c.model == model) {
+            if !out.contains(&c.region.as_str()) {
+                out.push(&c.region);
+            }
+        }
+        out
     }
 }

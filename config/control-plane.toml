@@ -176,11 +176,23 @@ replicas = 5            # 119 Interactive or 168 Standard CUs
 max_context = 32768
 profile = "qwen3-32b.h200.vllm-0.11.tp2"
 
+# A second pool for the same model in a region (ADR-045), for example newer hardware.
+# Each region share of a reservation is placed on one pool, the best fit; list preferred
+# pools first, as ties go to the first listed. Pool ids default to the model id.
+# [[capacity]]
+# region = "eu-west"
+# model = "llama-4-maverick"
+# pool = "maverick-h200"
+# replicas = 6
+# max_context = 131072
+# profile = "llama-4-maverick.h200.vllm-0.11.tp8"
+
 # Replicas arriving later (ADR-037): sales starting on or after `from` can use them, and a
 # sale that doesn't fit now is told the date it would.
 # [[capacity_changes]]
 # region = "eu-west"
 # model = "llama-4-maverick"
+# pool = "llama-4-maverick"   # needed when the region has several pools for the model
 # add_replicas = 4
 # from = "2026-12-01T00:00:00Z"
 

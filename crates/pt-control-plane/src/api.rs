@@ -107,6 +107,14 @@ pub fn router<S: Store, P: CapacityPlanner, C: Clock>(svc: Svc<S, P, C>) -> Rout
             "/internal/v1/holds/{model}",
             axum::routing::put(put_hold::<S, P, C>).delete(delete_hold::<S, P, C>),
         )
+        .route(
+            "/internal/v1/reservations/{id}/placements",
+            get(placements::<S, P, C>),
+        )
+        .route(
+            "/internal/v1/reservations/{id}/move",
+            post(move_pool::<S, P, C>),
+        )
         .route("/healthz", get(|| async { "ok" }))
         .with_state(svc)
 }
@@ -276,12 +284,22 @@ async fn list_models<S: Store, P: CapacityPlanner, C: Clock>(
         .models
         .iter()
         .map(|m| {
+            // One entry per region, with the longest context any of its pools serves.
+            // Pools are internal (ADR-045).
             let regions: Vec<Value> = svc
                 .config
-                .capacity
-                .iter()
-                .filter(|c| c.model == m.id)
-                .map(|c| json!({ "region": c.region, "max_context": c.max_context }))
+                .regions_for(&m.id)
+                .into_iter()
+                .map(|r| {
+                    let max_context = svc
+                        .config
+                        .pools_for(r, &m.id)
+                        .iter()
+                        .map(|c| c.max_context)
+                        .max()
+                        .unwrap_or(0);
+                    json!({ "region": r, "max_context": max_context })
+                })
                 .collect();
             json!({
                 "id": m.id,
@@ -644,6 +662,36 @@ async fn list_holds<S: Store, P: CapacityPlanner, C: Clock>(
 ) -> Result<Response, ApiError> {
     operator(&svc, &headers)?;
     Ok(Json(json!({ "data": svc.sales_holds().await? })).into_response())
+}
+
+/// `GET /internal/v1/reservations/{id}/placements`: which pool holds each region (ADR-045).
+async fn placements<S: Store, P: CapacityPlanner, C: Clock>(
+    State(svc): State<Svc<S, P, C>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    operator(&svc, &headers)?;
+    Ok(Json(json!({ "id": id, "placements": svc.placements(&id).await? })).into_response())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MoveRequest {
+    region: String,
+    pool: String,
+}
+
+/// `POST /internal/v1/reservations/{id}/move`: move a region's holding to another pool.
+async fn move_pool<S: Store, P: CapacityPlanner, C: Clock>(
+    State(svc): State<Svc<S, P, C>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    operator(&svc, &headers)?;
+    let req: MoveRequest = parse(&body)?;
+    let placements = svc.move_to_pool(&id, &req.region, &req.pool).await?;
+    Ok(Json(json!({ "id": id, "placements": placements })).into_response())
 }
 
 /// `POST /internal/v1/heartbeats`: a gateway reports that it's alive and whether it serves.

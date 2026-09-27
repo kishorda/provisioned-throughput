@@ -1,4 +1,5 @@
-//! What a CU costs a region's pool, per tier (docs/06 §2, ADR-031).
+//! What a CU costs each pool, per tier (docs/06 §2, ADR-031). Pools are keyed by region and
+//! pool id (ADR-045).
 //!
 //! A pool's sellable capacity is counted in replicas, the unit the capacity controller
 //! deploys. A CU is a fixed WU/s, but a replica delivers fewer WU/s at a tighter latency
@@ -20,7 +21,7 @@ use std::collections::HashMap;
 use pt_core::Tier;
 
 use crate::config::ControlPlaneConfig;
-use crate::model::RegionShare;
+use crate::planner::PoolShare;
 use crate::quote::TARGET_UTILISATION;
 
 /// Micro-replicas in a replica.
@@ -52,7 +53,7 @@ impl Costs {
                 let cap = profile.capacity_wu_per_s.for_tier(tier);
                 if cap > 0.0 {
                     per_cu.insert(
-                        (c.region.clone(), c.model.clone(), tier),
+                        (c.region.clone(), c.pool_id().to_string(), tier),
                         micro_per_cu(config.telemetry.wu_per_cu, cap),
                     );
                 }
@@ -62,27 +63,27 @@ impl Costs {
     }
 
     /// Set one pool's cost per CU at a tier (for tests and tools).
-    pub fn insert(&mut self, region: &str, model: &str, tier: Tier, micro_per_cu: u64) {
+    pub fn insert(&mut self, region: &str, pool: &str, tier: Tier, micro_per_cu: u64) {
         self.per_cu
-            .insert((region.into(), model.into(), tier), micro_per_cu);
+            .insert((region.into(), pool.into(), tier), micro_per_cu);
     }
 
-    /// Micro-replicas one CU of `model` at `tier` needs in `region`.
-    pub fn per_cu(&self, region: &str, model: &str, tier: Tier) -> Option<u64> {
+    /// Micro-replicas one CU at `tier` needs in a pool.
+    pub fn per_cu(&self, region: &str, pool: &str, tier: Tier) -> Option<u64> {
         self.per_cu
-            .get(&(region.to_string(), model.to_string(), tier))
+            .get(&(region.to_string(), pool.to_string(), tier))
             .copied()
     }
 
-    /// Micro-replicas `share` needs, or `None` if the pool doesn't exist.
-    pub fn share(&self, model: &str, tier: Tier, share: &RegionShare) -> Option<u64> {
-        self.per_cu(&share.region, model, tier)
+    /// Micro-replicas `share` needs, or `None` if the pool can't cost `tier`.
+    pub fn share(&self, tier: Tier, share: &PoolShare) -> Option<u64> {
+        self.per_cu(&share.region, &share.pool, tier)
             .map(|c| c * u64::from(share.cus))
     }
 
-    /// Whole CUs at `tier` that `micro` micro-replicas can hold in `region`.
-    pub fn cus_in(&self, region: &str, model: &str, tier: Tier, micro: u64) -> Option<u32> {
-        self.per_cu(region, model, tier)
+    /// Whole CUs at `tier` that `micro` micro-replicas can hold in a pool.
+    pub fn cus_in(&self, region: &str, pool: &str, tier: Tier, micro: u64) -> Option<u32> {
+        self.per_cu(region, pool, tier)
             .map(|c| (micro / c).min(u64::from(u32::MAX)) as u32)
     }
 }
@@ -100,8 +101,16 @@ impl Schedule {
     pub fn from_config(config: &ControlPlaneConfig) -> Self {
         let mut added: HashMap<(String, String), Vec<(jiff::Timestamp, u64)>> = HashMap::new();
         for c in &config.capacity_changes {
+            // Validation made sure an unnamed pool is the region's only one for the model.
+            let pool = match &c.pool {
+                Some(p) => p.clone(),
+                None => match config.capacity_for(&c.region, &c.model) {
+                    Some(p) => p.pool_id().to_string(),
+                    None => continue,
+                },
+            };
             added
-                .entry((c.region.clone(), c.model.clone()))
+                .entry((c.region.clone(), pool))
                 .or_default()
                 .push((c.from, u64::from(c.add_replicas) * MICRO));
         }
@@ -112,16 +121,16 @@ impl Schedule {
     }
 
     /// Add `replicas` to a pool from `from` (for tests and tools).
-    pub fn add(&mut self, region: &str, model: &str, from: jiff::Timestamp, replicas: u32) {
-        let v = self.added.entry((region.into(), model.into())).or_default();
+    pub fn add(&mut self, region: &str, pool: &str, from: jiff::Timestamp, replicas: u32) {
+        let v = self.added.entry((region.into(), pool.into())).or_default();
         v.push((from, u64::from(replicas) * MICRO));
         v.sort_by_key(|(t, _)| *t);
     }
 
     /// Micro-replicas added to a pool by `at`.
-    pub fn added_by(&self, region: &str, model: &str, at: jiff::Timestamp) -> u64 {
+    pub fn added_by(&self, region: &str, pool: &str, at: jiff::Timestamp) -> u64 {
         self.added
-            .get(&(region.to_string(), model.to_string()))
+            .get(&(region.to_string(), pool.to_string()))
             .into_iter()
             .flatten()
             .filter(|(t, _)| *t <= at)
@@ -133,11 +142,11 @@ impl Schedule {
     pub fn dates_after(
         &self,
         region: &str,
-        model: &str,
+        pool: &str,
         after: jiff::Timestamp,
     ) -> Vec<jiff::Timestamp> {
         self.added
-            .get(&(region.to_string(), model.to_string()))
+            .get(&(region.to_string(), pool.to_string()))
             .into_iter()
             .flatten()
             .map(|(t, _)| *t)

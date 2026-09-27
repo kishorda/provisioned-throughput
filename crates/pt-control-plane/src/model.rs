@@ -149,6 +149,12 @@ pub enum EventKind {
     RebalanceChanged {
         rebalance: bool,
     },
+    /// The region's capacity moved to other hardware in the same region: because it grew
+    /// beyond what its pool had free, or an operator moved it (ADR-045). CUs and price are
+    /// unchanged.
+    Relocated {
+        region: String,
+    },
     CancellationRequested {
         effective_at: Timestamp,
     },
@@ -224,6 +230,12 @@ pub struct ProvisionedThroughput {
     /// contract and price follow `regions`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effective_regions: Vec<RegionShare>,
+    /// Which pool serves each region this reservation holds (ADR-045). Internal: customers
+    /// buy CUs, not hardware, so it's never in API responses. A region without an entry is
+    /// on its default pool ([`crate::config::ControlPlaneConfig::capacity_for`]), as for
+    /// reservations sold before pools had ids.
+    #[serde(skip)]
+    pub placements: Vec<Placement>,
     /// Deployments sharing this reservation's entitlement, each with its own keys and an
     /// optional cap. The first is the primary, created with the reservation.
     pub deployments: Vec<Deployment>,
@@ -231,6 +243,13 @@ pub struct ProvisionedThroughput {
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
     pub events: Vec<Event>,
+}
+
+/// The pool serving a reservation in one region (ADR-045).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Placement {
+    pub region: String,
+    pub pool: String,
 }
 
 /// `POST /v1/provisioned-throughput`

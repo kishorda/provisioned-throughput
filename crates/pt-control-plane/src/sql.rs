@@ -74,6 +74,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "component_reports",
         include_str!("../migrations/0007_component_reports.sql"),
     ),
+    (
+        8,
+        "capacity_by_pool",
+        include_str!("../migrations/0008_capacity_by_pool.sql"),
+    ),
 ];
 
 /// Idempotency keys older than this are ignored and may be reused.
@@ -381,6 +386,7 @@ fn pt_from_row(r: PgRow) -> Result<ProvisionedThroughput, StoreError> {
             r.try_get("effective_regions").map_err(bad)?,
             "effective_regions",
         )?,
+        placements: from_json(r.try_get("placements").map_err(bad)?, "placements")?,
         deployments: vec![],
         version: version as u64,
         created_at: from_db(r.try_get("created_at").map_err(bad)?)?,
@@ -392,7 +398,8 @@ fn pt_from_row(r: PgRow) -> Result<ProvisionedThroughput, StoreError> {
 /// Bind the main row's columns in this order:
 /// id, tenant, name, model, tier, sku, isolation, regions, failover_headroom, cus, shape,
 /// boundary_policy, term_months, term_start, term_end, auto_renew, state, pending_changes,
-/// endpoints, price, version, created_at, updated_at, rebalance, effective_regions.
+/// endpoints, price, version, created_at, updated_at, rebalance, effective_regions,
+/// placements.
 macro_rules! bind_pt {
     ($q:expr, $pt:expr) => {
         $q.bind(&$pt.id)
@@ -420,13 +427,14 @@ macro_rules! bind_pt {
             .bind(to_db($pt.updated_at))
             .bind($pt.rebalance)
             .bind(json(&$pt.effective_regions))
+            .bind(json(&$pt.placements))
     };
 }
 
 const COLUMNS: &str = "id, tenant, name, model, tier, sku, isolation, regions, failover_headroom, \
      cus, shape, boundary_policy, term_months, term_start, term_end, auto_renew, state, \
      pending_changes, endpoints, price, version, created_at, updated_at, rebalance, \
-     effective_regions";
+     effective_regions, placements";
 
 /// Replace a reservation's deployments and keys with `pt`'s.
 async fn write_children(
@@ -537,7 +545,7 @@ fn incident_from_row(r: PgRow) -> Result<RegionIncident, StoreError> {
 impl Store for SqlStore {
     async fn insert(&self, pt: ProvisionedThroughput) -> Result<(), StoreError> {
         let mut tx = self.pool.begin().await.map_err(unavailable)?;
-        let placeholders = (1..=25)
+        let placeholders = (1..=COLUMNS.split(',').count())
             .map(|i| format!("${i}"))
             .collect::<Vec<_>>()
             .join(", ");
@@ -576,16 +584,19 @@ impl Store for SqlStore {
         expected_version: u64,
     ) -> Result<(), StoreError> {
         let mut tx = self.pool.begin().await.map_err(unavailable)?;
-        // $1 is the id; $2..$25 are the other columns; $26 is the expected version.
-        let sets = COLUMNS
-            .split(", ")
+        // $1 is the id, then the other columns in order, then the expected version.
+        let columns: Vec<&str> = COLUMNS.split(',').map(str::trim).collect();
+        let sets = columns
+            .iter()
             .enumerate()
             .skip(1)
-            .map(|(i, c)| format!("{} = ${}", c.trim(), i + 1))
+            .map(|(i, c)| format!("{c} = ${}", i + 1))
             .collect::<Vec<_>>()
             .join(", ");
-        let sql =
-            format!("UPDATE provisioned_throughput SET {sets} WHERE id = $1 AND version = $26");
+        let sql = format!(
+            "UPDATE provisioned_throughput SET {sets} WHERE id = $1 AND version = ${}",
+            columns.len() + 1
+        );
         let done = bind_pt!(sqlx::query(&sql), pt)
             .bind(expected_version as i64)
             .execute(&mut *tx)

@@ -1,5 +1,7 @@
 # 10 · Hardware & Model Lifecycle
 
+> Decision record: [ADR-045](adr/ADR-045-capacity-placement-across-pools.md)
+
 ## 1. New GPU generation
 
 1. The new cluster/pool is provisioned (Cluster API). The Calibration Service produces a
@@ -14,6 +16,14 @@
    the blog's migration-ratio problem: the conversion happens per pool, using the
    calibrated cost model for that workload shape, not a single fleet-wide ratio.
 4. Old pools shrink as allocations drain, and are retired or repurposed for PAYG.
+
+> **Implementation** ([ADR-045](adr/ADR-045-capacity-placement-across-pools.md)): the new
+> pool is another `[[capacity]]` entry for the model in the region, with its own `pool` id
+> and profile. List it first and new sales prefer it on ties. Operators move a
+> reservation's regional share with `POST /internal/v1/reservations/{id}/move`, which
+> reserves on the new pool before releasing the old, and gives the customer a `relocated`
+> event with an SLA grace window. The gradual WU/s-share shifting and the MILP rebalance
+> aren't built: a share moves whole.
 5. Realised efficiency gains feed the next **CU re-rating**, which passes 50% of them to customers ([02 §7](02-capacity-unit-and-cost-model.md#7-hardware-efficiency-gains-the-blogs-dilemma)).
 
 ## 2. Hardware-pinned SKU

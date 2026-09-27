@@ -49,7 +49,7 @@ async fn store(name: &str) -> Option<SqlStore> {
         .await
         .unwrap();
     let store = SqlStore::from_pool(pool);
-    assert_eq!(store.migrate().await.unwrap(), [1, 2, 3, 4, 5, 6, 7]);
+    assert_eq!(store.migrate().await.unwrap(), [1, 2, 3, 4, 5, 6, 7, 8]);
     assert!(store.migrate().await.unwrap().is_empty(), "idempotent");
     Some(store)
 }
@@ -431,4 +431,73 @@ async fn component_reports_are_replaced_listed_and_pruned() {
     assert_eq!(left.len(), 1);
     assert_eq!(left[0].id, "ns/b");
     assert!(store.reports("router").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn pools_place_move_and_restore_on_the_database() {
+    use pt_control_plane::config::CapacityConfig;
+    let Some(store) = store("pools").await else {
+        return;
+    };
+    let mut c = config();
+    c.capacity.push(CapacityConfig {
+        region: "eu-west".into(),
+        model: MAVERICK.into(),
+        pool: Some("maverick-h200".into()),
+        replicas: 6,
+        max_context: 131_072,
+        profile: "llama-4-maverick.h200.vllm-0.11.tp8".into(),
+    });
+    let clock = ManualClock::new(t0());
+    let svc = pt_control_plane::with_sql(c.clone(), store.clone(), clock.clone())
+        .await
+        .unwrap();
+    let small = svc
+        .create(ACME, None, request("small", &[("eu-west", 50)]))
+        .await
+        .unwrap()
+        .resource;
+    let big = svc
+        .create(ACME, None, request("big", &[("eu-west", 150)]))
+        .await
+        .unwrap()
+        .resource;
+    let pool =
+        |pt: &pt_control_plane::model::ProvisionedThroughput| svc.pool_of(pt, "eu-west").unwrap();
+    assert_eq!(pool(&small), "maverick-h200");
+    assert_eq!(pool(&big), MAVERICK);
+    // Placements are stored.
+    let stored = svc.get(ACME, &small.id).await.unwrap();
+    assert_eq!(stored.placements.len(), 1);
+    assert_eq!(stored.placements[0].pool, "maverick-h200");
+
+    // Move "small" onto the B200 pool.
+    let moved = svc
+        .move_to_pool(&small.id, "eu-west", MAVERICK)
+        .await
+        .unwrap();
+    assert_eq!(moved[0].pool, MAVERICK);
+    assert_eq!(
+        svc.planner
+            .available_micro("eu-west", "maverick-h200")
+            .await
+            .unwrap(),
+        Some(6_000_000)
+    );
+
+    // Another instance sees the same counters and placements.
+    let other = pt_control_plane::with_sql(c, store, clock).await.unwrap();
+    assert_eq!(
+        other
+            .planner
+            .available_micro("eu-west", MAVERICK)
+            .await
+            .unwrap(),
+        svc.planner
+            .available_micro("eu-west", MAVERICK)
+            .await
+            .unwrap()
+    );
+    assert!(other.reconcile_capacity().await.unwrap().is_empty());
+    assert_eq!(other.placements(&small.id).await.unwrap()[0].pool, MAVERICK);
 }

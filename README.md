@@ -131,6 +131,10 @@ Server options in `config/control-plane.toml`:
   own listener, so only the customer API faces the internet (ADR-034).
 - `[entitlements.vault]` signs snapshots with a key held in Vault Transit instead of the
   local `signing_key` (ADR-038).
+- Several `[[capacity]]` pools for one model in a region (each with a `pool` id), for
+  example two GPU classes. Each region share is placed on one pool, the best fit. A
+  share that outgrows its pool moves to one that fits, and operators move shares with
+  `POST /internal/v1/reservations/{id}/move` (ADR-045).
 - `[[capacity_changes]]` schedules capacity that arrives later. Reservations that start
   after it arrives can be sold now, and a create that doesn't fit yet returns
   `capacity_unavailable` with `available_from` (ADR-037).
@@ -379,10 +383,10 @@ Follow-ups from the roadmap in docs/11, grouped by what they need.
   doesn't fetch them.
 - **Prefix-cache index from Dynamo KV events.** The gateway predicts cache hits from its own
   history (ADR-030). It doesn't see evictions or other replicas' traffic.
-- **Capacity placement across pools.** The planner counts each region's pool in replicas,
-  costs each CU by its tier (ADR-031), and sells scheduled arrivals from their date
-  (ADR-037), but a region is one pool per model. Capacity freed by reservations that end
-  isn't scheduled.
+- **Pool rebalancing and freed capacity.** Shares are placed on pools by best fit, and
+  move whole when they outgrow them or an operator moves them (ADR-045). There's no MILP
+  repacking or gradual share shifting, and capacity freed by reservations that end isn't
+  sold ahead of their term end.
 - **Signing in a cloud KMS.** Snapshots can be signed by a key in Vault Transit
   (`[entitlements.vault]`, ADR-038). AWS and Google Cloud KMS aren't supported.
 - **Redpanda.** Gateways push usage to the control plane, which writes it to ClickHouse

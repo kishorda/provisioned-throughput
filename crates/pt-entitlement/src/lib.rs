@@ -122,7 +122,7 @@ pub struct ReservationEntitlement {
     /// This region's share of the reservation's CUs.
     pub cus: u32,
     pub tier: Tier,
-    /// `PerformanceProfile` of the region's pool for this model.
+    /// `PerformanceProfile` of the pool this share is placed on (ADR-045).
     pub profile: String,
     pub shape: Shape,
     /// Failover entitlements, dormant until their region fails.

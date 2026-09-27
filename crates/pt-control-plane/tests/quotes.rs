@@ -317,6 +317,7 @@ async fn a_quote_that_fits_later_says_from_when() {
         .push(pt_control_plane::config::CapacityChange {
             region: "eu-west".into(),
             model: MAVERICK.into(),
+            pool: None,
             add_replicas: 4,
             from: arrives,
         });

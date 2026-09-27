@@ -249,7 +249,7 @@ const PT = (() => {
       <td>${r.open_incidents.map((i) => pill(`${i.source}: ${i.description}`, "warning")).join("") || "–"}</td>
       <td>${r.sales_holds.map((h) => pill(`${h.model} (${h.reason})`, "warning")).join("") || "–"}</td></tr>`).join("");
 
-    const capacity = v.capacity.map((c) => `<tr><td>${esc(c.region)}</td><td>${esc(c.model)}</td><td class="small muted">${esc(c.profile)}</td>
+    const capacity = v.capacity.map((c) => `<tr><td>${esc(c.region)}</td><td>${esc(c.model)}${c.pool && c.pool !== c.model ? `<div class="small muted">pool ${esc(c.pool)}</div>` : ""}</td><td class="small muted">${esc(c.profile)}</td>
       <td class="num">${num(c.reserved_replicas, 2)} / ${num(c.replicas)}</td><td>${bar(c.reserved_replicas, c.replicas)}</td><td class="num">${pct(c.used_pct)}</td>
       <td class="num">${num(c.reservations)}</td><td class="num">${num(c.cus_sold)}</td>
       <td>${Object.entries(c.free_cus).map(([t, n]) => pill(`${t} ${n}`, n > 0 ? "info" : "warning")).join("")}</td>

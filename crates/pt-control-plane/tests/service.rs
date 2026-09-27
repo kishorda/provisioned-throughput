@@ -657,6 +657,7 @@ fn with_arrivals() -> (Svc, ManualClock, jiff::Timestamp) {
         .push(pt_control_plane::config::CapacityChange {
             region: "eu-west".into(),
             model: MAVERICK.into(),
+            pool: None,
             add_replicas: 4,
             from: arrives,
         });

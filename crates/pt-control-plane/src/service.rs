@@ -23,11 +23,11 @@ use crate::config::ControlPlaneConfig;
 use crate::failover::{self, footprint, growth, Health, RegionStatus, Steering};
 use crate::model::{
     total_cus, ApiKey, CreateDeploymentRequest, CreateRequest, DeclareIncident, Deployment,
-    Endpoint, Event, EventKind, Heartbeat, IncidentSource, PendingChanges, ProvisionedThroughput,
-    RegionIncident, RegionShare, ResolveIncident, RotateKeyRequest, Sku, State,
-    UpdateDeploymentRequest, UpdateRequest,
+    Endpoint, Event, EventKind, Heartbeat, IncidentSource, PendingChanges, Placement,
+    ProvisionedThroughput, RegionIncident, RegionShare, ResolveIncident, RotateKeyRequest, Sku,
+    State, UpdateDeploymentRequest, UpdateRequest,
 };
-use crate::planner::{CapacityPlanner, Held, PlanError};
+use crate::planner::{CapacityPlanner, Claim, Held, PlanError, PoolShare};
 use crate::pricing;
 use crate::store::{IdempotencyRecord, SalesHold, Store, StoreError};
 use crate::validate;
@@ -184,8 +184,52 @@ pub struct LifecycleReport {
 /// A planner call made while applying a change, so a failed write can undo it. Capacity
 /// is reserved and released at a tier, which fixes what it costs (ADR-031).
 enum PlanOp {
-    Reserved(Tier, Vec<RegionShare>),
-    Released(Tier, Vec<RegionShare>),
+    Reserved(Tier, Vec<PoolShare>),
+    Released(Tier, Vec<PoolShare>),
+}
+
+/// Claims that name the pools `shares` were placed on, to put them back exactly.
+fn as_claims(shares: &[PoolShare]) -> Vec<Claim> {
+    shares
+        .iter()
+        .map(|s| Claim {
+            region: s.region.clone(),
+            pool: Some(s.pool.clone()),
+            cus: s.cus,
+        })
+        .collect()
+}
+
+/// Claims the planner places wherever fits best.
+fn unplaced(shares: &[RegionShare]) -> Vec<Claim> {
+    shares
+        .iter()
+        .map(|s| Claim {
+            region: s.region.clone(),
+            pool: None,
+            cus: s.cus,
+        })
+        .collect()
+}
+
+/// Remember where `placed` went.
+fn record(pt: &mut ProvisionedThroughput, placed: &[PoolShare]) {
+    for s in placed {
+        match pt.placements.iter_mut().find(|p| p.region == s.region) {
+            Some(p) => p.pool = s.pool.clone(),
+            None => pt.placements.push(Placement {
+                region: s.region.clone(),
+                pool: s.pool.clone(),
+            }),
+        }
+    }
+    pt.placements.sort_by(|a, b| a.region.cmp(&b.region));
+}
+
+/// Forget placements in regions `pt` no longer holds. Run before saving.
+fn tidy_placements(pt: &mut ProvisionedThroughput) {
+    let regions: Vec<String> = held(pt).into_iter().map(|s| s.region).collect();
+    pt.placements.retain(|p| regions.contains(&p.region));
 }
 
 pub struct Service<S, P, C> {
@@ -250,7 +294,13 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
     /// Correct the planner's reserved counts from live reservations (see
     /// [`CapacityPlanner::reconcile`]). Run by the leader.
     pub async fn reconcile_capacity(&self) -> Result<Vec<crate::planner::Drift>, ServiceError> {
-        let live: Vec<Held> = self.store.list_live().await?.iter().map(holding).collect();
+        let live: Vec<Held> = self
+            .store
+            .list_live()
+            .await?
+            .iter()
+            .map(|pt| holding(self, pt))
+            .collect();
         let expected = crate::planner::expected_micro(&self.costs, &live);
         Ok(self.planner.reconcile(&expected).await?)
     }
@@ -273,7 +323,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
     /// before serving. Returns how many reservations were restored.
     pub async fn restore_capacity(&self) -> Result<usize, StoreError> {
         let live = self.store.list_live().await?;
-        let held: Vec<Held> = live.iter().map(holding).collect();
+        let held: Vec<Held> = live.iter().map(|pt| holding(self, pt)).collect();
         self.planner.restore(&held).await;
         if !live.is_empty() {
             tracing::info!(reservations = live.len(), "restored reserved capacity");
@@ -332,8 +382,10 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
             let Some(share) = pt.effective().iter().find(|r| r.region == region) else {
                 continue;
             };
-            let Some(capacity) = self.config.capacity_for(region, &pt.model) else {
-                tracing::error!(id = %pt.id, %region, "no capacity entry for a live reservation");
+            // Priced with the profile of the pool the share is placed on (ADR-045).
+            let pool = self.pool_of(&pt, region);
+            let Some(capacity) = pool.and_then(|p| self.config.pool(region, &p)) else {
+                tracing::error!(id = %pt.id, %region, "no capacity pool for a live reservation");
                 continue;
             };
             reservations.push(ReservationEntitlement {
@@ -479,11 +531,12 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         self.ensure_name_free(tenant, &req.name, None).await?;
 
         let headroom = failover::headroom(&self.config, req.sku, &req.regions);
-        self.planner
+        let placed = self
+            .planner
             .reserve(
                 &req.model,
                 req.tier,
-                &footprint(&req.regions, &headroom),
+                &unplaced(&footprint(&req.regions, &headroom)),
                 &req.shape,
                 start,
             )
@@ -515,7 +568,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                 },
             });
         }
-        let pt = ProvisionedThroughput {
+        let mut pt = ProvisionedThroughput {
             id: format!("pt-{}", &suffix[..16]),
             tenant: tenant.to_string(),
             name: req.name,
@@ -538,6 +591,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
             failover_headroom: headroom,
             rebalance: req.rebalance,
             effective_regions: vec![],
+            placements: vec![],
             deployments: vec![Deployment {
                 id: format!("dep-{}", &suffix[16..]),
                 name: "default".into(),
@@ -551,8 +605,9 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
             events,
         };
 
+        record(&mut pt, &placed);
         if let Err(e) = self.store.insert(pt.clone()).await {
-            self.planner.release(&pt.model, pt.tier, &held(&pt)).await;
+            self.planner.release(pt.tier, &placed).await;
             return Err(match e {
                 // A concurrent create took the name (the store's live-name index).
                 StoreError::AlreadyExists(_) => conflict(
@@ -654,6 +709,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         if pt == before {
             return Ok(pt); // nothing changed; don't bump the version
         }
+        tidy_placements(&mut pt);
         pt.version += 1;
         pt.updated_at = now;
         match self.store.update(pt.clone(), expected).await {
@@ -733,13 +789,14 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
             if not_started {
                 if tier != pt.tier {
                     // A CU costs a different amount at another tier: hold the new amount.
-                    let current = held(pt);
-                    self.planner.release(&pt.model, pt.tier, &current).await;
+                    let current = self.pooled(pt);
+                    self.planner.release(pt.tier, &current).await;
                     ops.push(PlanOp::Released(pt.tier, current.clone()));
-                    self.planner
-                        .reserve(&pt.model, tier, &current, &shape, pt.term_start)
+                    let placed = self
+                        .planner
+                        .reserve(&pt.model, tier, &as_claims(&current), &shape, pt.term_start)
                         .await?;
-                    ops.push(PlanOp::Reserved(tier, current));
+                    ops.push(PlanOp::Reserved(tier, placed));
                     pt.tier = tier;
                 }
             } else if tier != pt.tier {
@@ -765,15 +822,17 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
             self.sales_open(&pt.model, &growing).await?;
             if not_started {
                 if *new != pt.regions {
-                    let before = held(pt);
+                    let before = self.pooled(pt);
                     let headroom = failover::headroom(&self.config, pt.sku, new);
-                    let after = footprint(new, &headroom);
-                    self.planner.release(&pt.model, pt.tier, &before).await;
+                    let after = self.claims(pt, &footprint(new, &headroom));
+                    self.planner.release(pt.tier, &before).await;
                     ops.push(PlanOp::Released(pt.tier, before));
-                    self.planner
+                    let placed = self
+                        .planner
                         .reserve(&pt.model, pt.tier, &after, &shape, pt.term_start)
                         .await?;
-                    ops.push(PlanOp::Reserved(pt.tier, after));
+                    record(pt, &placed);
+                    ops.push(PlanOp::Reserved(pt.tier, placed));
                     pt.regions = new.clone();
                     pt.effective_regions.clear();
                     pt.failover_headroom = headroom;
@@ -833,7 +892,8 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
 
         if let Some(s) = req.shape {
             if s != pt.shape {
-                self.planner.check_shape(&pt.model, &pt.regions, &s).await?;
+                let claims = self.claims(pt, &held(pt));
+                self.planner.check_shape(&pt.model, &claims, &s).await?;
                 pt.shape = s;
                 push(pt, EventKind::ShapeUpdated);
             }
@@ -917,7 +977,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         pt.updated_at = now;
         self.store.update(pt.clone(), expected).await?;
         if effect == DeleteEffect::CancelledNow {
-            self.planner.release(&pt.model, pt.tier, &held(&pt)).await;
+            self.planner.release(pt.tier, &self.pooled(&pt)).await;
         }
         self.bump().await;
         tracing::info!(id = %pt.id, %tenant, ?effect, "provisioned throughput deleted");
@@ -930,6 +990,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         mut pt: ProvisionedThroughput,
         expected: u64,
     ) -> Result<ProvisionedThroughput, ServiceError> {
+        tidy_placements(&mut pt);
         pt.version += 1;
         pt.updated_at = self.clock.now();
         self.store.update(pt.clone(), expected).await?;
@@ -1478,7 +1539,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
             let shape = pt.shape;
             let mut ops = Vec::new();
             match self
-                .move_capacity(&pt, &footprint(&target, &headroom), &shape, &mut ops)
+                .move_capacity(&mut pt, &footprint(&target, &headroom), &shape, &mut ops)
                 .await
             {
                 Ok(()) => {}
@@ -1730,8 +1791,8 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                     self.renew(&mut pt, now, &mut ops).await;
                     report.renewed += 1;
                 } else {
-                    let before = held(&pt);
-                    self.planner.release(&pt.model, pt.tier, &before).await;
+                    let before = self.pooled(&pt);
+                    self.planner.release(pt.tier, &before).await;
                     ops.push(PlanOp::Released(pt.tier, before));
                     pt.state = State::Ended;
                     pt.pending_changes = None;
@@ -1745,6 +1806,7 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
             if !changed {
                 continue;
             }
+            tidy_placements(&mut pt);
             pt.version += 1;
             pt.updated_at = now;
             let (model, shape) = (pt.model.clone(), pt.shape);
@@ -1765,18 +1827,19 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
     async fn renew(&self, pt: &mut ProvisionedThroughput, now: Timestamp, ops: &mut Vec<PlanOp>) {
         if let Some(pending) = pt.pending_changes.take() {
             if let Some(new) = pending.regions.filter(|r| *r != pt.regions) {
-                let before = held(pt);
+                let before = self.pooled(pt);
                 let headroom = failover::headroom(&self.config, pt.sku, &new);
-                let after = footprint(&new, &headroom);
-                self.planner.release(&pt.model, pt.tier, &before).await;
+                let after = self.claims(pt, &footprint(&new, &headroom));
+                self.planner.release(pt.tier, &before).await;
                 match self
                     .planner
                     .reserve(&pt.model, pt.tier, &after, &pt.shape, pt.term_end)
                     .await
                 {
-                    Ok(()) => {
+                    Ok(placed) => {
                         ops.push(PlanOp::Released(pt.tier, before));
-                        ops.push(PlanOp::Reserved(pt.tier, after));
+                        record(pt, &placed);
+                        ops.push(PlanOp::Reserved(pt.tier, placed));
                         pt.regions = new;
                         pt.effective_regions.clear();
                         pt.failover_headroom = headroom;
@@ -1785,7 +1848,13 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
                         // Put the current capacity back and renew unchanged.
                         let _ = self
                             .planner
-                            .reserve(&pt.model, pt.tier, &before, &pt.shape, Timestamp::MAX)
+                            .reserve(
+                                &pt.model,
+                                pt.tier,
+                                &as_claims(&before),
+                                &pt.shape,
+                                Timestamp::MAX,
+                            )
                             .await;
                         pt.events.push(Event {
                             at: now,
@@ -1798,23 +1867,29 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
             }
             if let Some(t) = pending.tier.filter(|t| *t != pt.tier) {
                 // The same shares cost a different amount at the new tier.
-                let current = held(pt);
-                self.planner.release(&pt.model, pt.tier, &current).await;
+                let current = self.pooled(pt);
+                self.planner.release(pt.tier, &current).await;
                 match self
                     .planner
-                    .reserve(&pt.model, t, &current, &pt.shape, pt.term_end)
+                    .reserve(&pt.model, t, &as_claims(&current), &pt.shape, pt.term_end)
                     .await
                 {
-                    Ok(()) => {
+                    Ok(placed) => {
                         ops.push(PlanOp::Released(pt.tier, current.clone()));
-                        ops.push(PlanOp::Reserved(t, current));
+                        ops.push(PlanOp::Reserved(t, placed));
                         pt.tier = t;
                     }
                     Err(e) => {
                         // Keep the current tier for another term.
                         let _ = self
                             .planner
-                            .reserve(&pt.model, pt.tier, &current, &pt.shape, Timestamp::MAX)
+                            .reserve(
+                                &pt.model,
+                                pt.tier,
+                                &as_claims(&current),
+                                &pt.shape,
+                                Timestamp::MAX,
+                            )
                             .await;
                         pt.events.push(Event {
                             at: now,
@@ -1852,45 +1927,229 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
         });
     }
 
+    /// Where each region of a live reservation is placed (operators).
+    pub async fn placements(&self, id: &str) -> Result<Vec<PoolShare>, ServiceError> {
+        let pt = self.find_live(id).await?;
+        Ok(self.pooled(&pt))
+    }
+
+    async fn find_live(&self, id: &str) -> Result<ProvisionedThroughput, ServiceError> {
+        self.store
+            .list_live()
+            .await?
+            .into_iter()
+            .find(|pt| pt.id == id)
+            .ok_or(ServiceError::NotFound)
+    }
+
+    /// Move a live reservation's holding in `region` to `pool`, for example onto newer
+    /// hardware (docs/10, ADR-045). Reserves on the new pool first, so a move that doesn't
+    /// fit changes nothing. CUs and price are unchanged; the customer sees a `relocated`
+    /// event, which opens an SLA grace window while the new pool's floor catches up.
+    pub async fn move_to_pool(
+        &self,
+        id: &str,
+        region: &str,
+        pool: &str,
+    ) -> Result<Vec<PoolShare>, ServiceError> {
+        let mut pt = self.find_live(id).await?;
+        let field = |f: &str, message: String| ServiceError::Validation {
+            field: f.into(),
+            message,
+        };
+        let Some(share) = held(&pt).into_iter().find(|s| s.region == region) else {
+            return Err(field("region", format!("{id} holds nothing in {region}.")));
+        };
+        if !self
+            .config
+            .pools_for(region, &pt.model)
+            .iter()
+            .any(|c| c.pool_id() == pool)
+        {
+            return Err(field(
+                "pool",
+                format!("{pool} isn't a {} pool in {region}.", pt.model),
+            ));
+        }
+        if self.pool_of(&pt, region).as_deref() == Some(pool) {
+            return Ok(self.pooled(&pt)); // already there
+        }
+        let expected = pt.version;
+        let (shape, model) = (pt.shape, pt.model.clone());
+        let at = pt.term_start.max(self.clock.now());
+        let mut ops = Vec::new();
+        if let Err(e) = self
+            .relocate(
+                &mut pt,
+                region,
+                share.cus,
+                Some(pool.to_string()),
+                &shape,
+                at,
+                &mut ops,
+            )
+            .await
+        {
+            self.undo(&model, &shape, ops).await;
+            return Err(e);
+        }
+        match self.persist(pt, expected).await {
+            Ok(pt) => Ok(self.pooled(&pt)),
+            Err(e) => {
+                self.undo(&model, &shape, ops).await;
+                Err(e)
+            }
+        }
+    }
+
+    /// The pool serving `pt` in `region`: its placement, else the region's default pool
+    /// (ADR-045).
+    pub fn pool_of(&self, pt: &ProvisionedThroughput, region: &str) -> Option<String> {
+        pt.placements
+            .iter()
+            .find(|p| p.region == region)
+            .map(|p| p.pool.clone())
+            .or_else(|| {
+                self.config
+                    .capacity_for(region, &pt.model)
+                    .map(|c| c.pool_id().to_string())
+            })
+    }
+
+    /// `shares` of `pt`, on the pools that hold them.
+    fn on_pools(&self, pt: &ProvisionedThroughput, shares: &[RegionShare]) -> Vec<PoolShare> {
+        shares
+            .iter()
+            .filter_map(|s| {
+                Some(PoolShare {
+                    region: s.region.clone(),
+                    pool: self.pool_of(pt, &s.region)?,
+                    cus: s.cus,
+                })
+            })
+            .collect()
+    }
+
+    /// Everything `pt` holds from the planner, on its pools.
+    fn pooled(&self, pt: &ProvisionedThroughput) -> Vec<PoolShare> {
+        self.on_pools(pt, &held(pt))
+    }
+
+    /// Claims for `shares`: a region `pt` holds now stays on its pool, and a new region is
+    /// placed where it fits best.
+    fn claims(&self, pt: &ProvisionedThroughput, shares: &[RegionShare]) -> Vec<Claim> {
+        let holds = held(pt);
+        shares
+            .iter()
+            .map(|s| Claim {
+                region: s.region.clone(),
+                pool: if holds.iter().any(|h| h.region == s.region) {
+                    self.pool_of(pt, &s.region)
+                } else {
+                    None
+                },
+                cus: s.cus,
+            })
+            .collect()
+    }
+
     /// Change what `pt` holds from the planner to `target`: reserve what grows first (which
-    /// may fail, changing nothing), then release what shrinks. Records both in `ops`.
+    /// may fail, changing nothing that isn't in `ops`), then release what shrinks. A region
+    /// whose pool has no room for its growth moves whole to a pool that fits it
+    /// ([`EventKind::Relocated`], ADR-045). Records every planner call in `ops`.
     async fn move_capacity(
         &self,
-        pt: &ProvisionedThroughput,
+        pt: &mut ProvisionedThroughput,
         target: &[RegionShare],
         shape: &Shape,
         ops: &mut Vec<PlanOp>,
     ) -> Result<(), ServiceError> {
         let before = held(pt);
-        let grow = growth(&before, target);
-        if !grow.is_empty() {
-            self.planner
-                .reserve(
-                    &pt.model,
-                    pt.tier,
-                    &grow,
-                    shape,
-                    pt.term_start.max(self.clock.now()),
-                )
-                .await?;
-            ops.push(PlanOp::Reserved(pt.tier, grow));
+        let at = pt.term_start.max(self.clock.now());
+        for g in growth(&before, target) {
+            let claim = self.claims(pt, std::slice::from_ref(&g));
+            match self
+                .planner
+                .reserve(&pt.model, pt.tier, &claim, shape, at)
+                .await
+            {
+                Ok(placed) => {
+                    record(pt, &placed);
+                    ops.push(PlanOp::Reserved(pt.tier, placed));
+                }
+                Err(PlanError::CapacityUnavailable { .. }) if claim[0].pool.is_some() => {
+                    let total = target
+                        .iter()
+                        .find(|t| t.region == g.region)
+                        .map_or(g.cus, |t| t.cus);
+                    self.relocate(pt, &g.region, total, None, shape, at, ops)
+                        .await?;
+                }
+                Err(e) => return Err(e.into()),
+            }
         }
-        let shrink = growth(target, &before);
+        let shrink = self.on_pools(pt, &growth(target, &before));
         if !shrink.is_empty() {
-            self.planner.release(&pt.model, pt.tier, &shrink).await;
+            self.planner.release(pt.tier, &shrink).await;
             ops.push(PlanOp::Released(pt.tier, shrink));
         }
+        Ok(())
+    }
+
+    /// Move `pt`'s whole holding in `region` to `to` (or the best-fitting pool), sized at
+    /// `total` CUs there: reserve on the new pool first, then release the old. Records a
+    /// [`EventKind::Relocated`] event.
+    #[allow(clippy::too_many_arguments)]
+    async fn relocate(
+        &self,
+        pt: &mut ProvisionedThroughput,
+        region: &str,
+        total: u32,
+        to: Option<String>,
+        shape: &Shape,
+        at: Timestamp,
+        ops: &mut Vec<PlanOp>,
+    ) -> Result<(), ServiceError> {
+        let old = self.on_pools(
+            pt,
+            &held(pt)
+                .into_iter()
+                .filter(|s| s.region == region)
+                .collect::<Vec<_>>(),
+        );
+        let claim = [Claim {
+            region: region.to_string(),
+            pool: to,
+            cus: total,
+        }];
+        let placed = self
+            .planner
+            .reserve(&pt.model, pt.tier, &claim, shape, at)
+            .await?;
+        ops.push(PlanOp::Reserved(pt.tier, placed.clone()));
+        if !old.is_empty() {
+            self.planner.release(pt.tier, &old).await;
+            ops.push(PlanOp::Released(pt.tier, old.clone()));
+        }
+        tracing::info!(id = %pt.id, %region, from = ?old.first().map(|s| &s.pool), to = %placed[0].pool, "relocated capacity");
+        record(pt, &placed);
+        pt.events.push(Event {
+            at: self.clock.now(),
+            kind: EventKind::Relocated {
+                region: region.to_string(),
+            },
+        });
         Ok(())
     }
 
     async fn undo(&self, model: &str, shape: &Shape, ops: Vec<PlanOp>) {
         for op in ops.into_iter().rev() {
             match op {
-                PlanOp::Reserved(tier, shares) => self.planner.release(model, tier, &shares).await,
+                PlanOp::Reserved(tier, shares) => self.planner.release(tier, &shares).await,
                 PlanOp::Released(tier, shares) => {
                     if let Err(e) = self
                         .planner
-                        .reserve(model, tier, &shares, shape, Timestamp::MAX)
+                        .reserve(model, tier, &as_claims(&shares), shape, Timestamp::MAX)
                         .await
                     {
                         tracing::error!(error = %e, "failed to restore capacity during rollback");
@@ -1958,11 +2217,15 @@ impl<S: Store, P: CapacityPlanner, C: Clock> Service<S, P, C> {
 /// Everything a reservation holds from the planner: its effective shares (the contract,
 /// or where rebalancing moved them) and its failover headroom.
 /// What `pt` holds from the planner, with the tier that costs it.
-fn holding(pt: &ProvisionedThroughput) -> Held {
+fn holding<S, P, C>(svc: &Service<S, P, C>, pt: &ProvisionedThroughput) -> Held
+where
+    S: Store,
+    P: CapacityPlanner,
+    C: Clock,
+{
     Held {
-        model: pt.model.clone(),
         tier: pt.tier,
-        shares: held(pt),
+        shares: svc.pooled(pt),
     }
 }
 

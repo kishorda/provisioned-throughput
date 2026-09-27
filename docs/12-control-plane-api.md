@@ -292,6 +292,8 @@ Internal endpoints for regions and operators:
 | `GET` | `/internal/v1/regions` | Operator key | Region health from heartbeats: `serving`, `down`, or `unknown` |
 | `GET` | `/internal/v1/steering` | Operator key | DNS weights per region and per reservation |
 | `GET`, `POST` | `/internal/v1/incidents`, `…/{id}/resolve` | Operator key | Region incidents. Each has `source`: `operator` or `automatic` |
+| `GET` | `/internal/v1/reservations/{id}/placements` | Operator key | Which pool holds each region share ([ADR-045](adr/ADR-045-capacity-placement-across-pools.md)) |
+| `POST` | `/internal/v1/reservations/{id}/move` | Operator key | `{"region", "pool"}`: move a region share to another pool. 409 `capacity_unavailable` if it doesn't fit, 422 for an unknown pool or region |
 
 ## 7. Invoices
 

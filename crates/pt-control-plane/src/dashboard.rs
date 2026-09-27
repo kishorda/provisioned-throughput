@@ -142,6 +142,8 @@ pub struct Arrival {
 pub struct CapacityView {
     pub region: String,
     pub model: String,
+    /// The pool's id in its region (ADR-045).
+    pub pool: String,
     pub profile: String,
     /// Configured sellable replicas, and what's reserved of them.
     pub replicas: u32,
@@ -227,7 +229,7 @@ pub async fn system<S: Store, P: CapacityPlanner, C: Clock>(
     for c in &svc.config.capacity {
         let (cap, reserved) = svc
             .planner
-            .pool_micro(&c.region, &c.model)
+            .pool_micro(&c.region, c.pool_id())
             .await
             .unwrap_or((u64::from(c.replicas) * MICRO, 0));
         let offered = svc
@@ -240,7 +242,7 @@ pub async fn system<S: Store, P: CapacityPlanner, C: Clock>(
             .map(|t| {
                 let n = svc
                     .costs()
-                    .cus_in(&c.region, &c.model, *t, cap.saturating_sub(reserved))
+                    .cus_in(&c.region, c.pool_id(), *t, cap.saturating_sub(reserved))
                     .unwrap_or(0);
                 (t.as_str().to_string(), n)
             })
@@ -248,6 +250,7 @@ pub async fn system<S: Store, P: CapacityPlanner, C: Clock>(
         let held_here: Vec<(&ProvisionedThroughput, u32)> = live
             .iter()
             .filter(|pt| pt.model == c.model)
+            .filter(|pt| svc.pool_of(pt, &c.region).as_deref() == Some(c.pool_id()))
             .filter_map(|pt| {
                 let cus: u32 = crate::service::held(pt)
                     .iter()
@@ -262,6 +265,7 @@ pub async fn system<S: Store, P: CapacityPlanner, C: Clock>(
             .capacity_changes
             .iter()
             .filter(|a| a.region == c.region && a.model == c.model && a.from > now)
+            .filter(|a| a.pool.as_deref().unwrap_or(c.pool_id()) == c.pool_id())
             .map(|a| Arrival {
                 from: a.from,
                 add_replicas: a.add_replicas,
@@ -270,6 +274,7 @@ pub async fn system<S: Store, P: CapacityPlanner, C: Clock>(
         capacity.push(CapacityView {
             region: c.region.clone(),
             model: c.model.clone(),
+            pool: c.pool_id().to_string(),
             profile: c.profile.clone(),
             replicas: c.replicas,
             reserved_replicas: reserved as f64 / MICRO as f64,
@@ -458,7 +463,11 @@ pub fn alerts(v: &SystemView, sla_at_risk: &[(String, String, f64, f64)]) -> Vec
         }
     }
     for c in &v.capacity {
-        let scope = format!("capacity {} {}", c.region, c.model);
+        let scope = if c.pool == c.model {
+            format!("capacity {} {}", c.region, c.model)
+        } else {
+            format!("capacity {} {} ({})", c.region, c.model, c.pool)
+        };
         if c.used_pct > 100.0 + 1e-9 {
             push(
                 Severity::Critical,
@@ -732,6 +741,7 @@ mod tests {
         CapacityView {
             region: "eu-west".into(),
             model: "m".into(),
+            pool: "m".into(),
             profile: "p".into(),
             replicas: 8,
             reserved_replicas: 8.0 * used_pct / 100.0,

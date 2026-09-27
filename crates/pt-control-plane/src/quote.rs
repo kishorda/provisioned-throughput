@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::clock::Clock;
 use crate::model::{Price, RegionShare, Sku};
-use crate::planner::CapacityPlanner;
+use crate::planner::{CapacityPlanner, Claim, PoolShare};
 use crate::pricing;
 use crate::service::{Service, ServiceError};
 use crate::store::Store;
@@ -390,6 +390,8 @@ where
 
     // Resolve the model, tiers, regions, and per-region workloads.
     let mut current = None;
+    // Where the reservation being resized is placed, per region (ADR-045).
+    let mut current_pools: HashMap<String, String> = HashMap::new();
     let mut reservation_sku = None;
     let (model_id, workloads, default_regions, default_tier, source, shape_for_context) =
         if let Some(id) = &req.from_reservation {
@@ -444,6 +446,11 @@ where
                 ));
             }
             reservation_sku = Some(pt.sku);
+            current_pools = pt
+                .regions
+                .iter()
+                .filter_map(|r| Some((r.region.clone(), svc.pool_of(&pt, &r.region)?)))
+                .collect();
             current = Some(Current {
                 reservation: pt.id.clone(),
                 tier: pt.tier,
@@ -574,18 +581,34 @@ where
         let Some(workload) = workload_for(region) else {
             continue; // a reservation region with no traffic in the lookback
         };
-        let capacity = config.capacity_for(region, &model_id).expect("validated");
+        // Priced on the pool the reservation is placed on here, or else on the region's
+        // default pool (ADR-045).
+        let placed = current_pools.get(region.as_str()).cloned();
+        let capacity = placed
+            .as_deref()
+            .and_then(|p| config.pool(region, p))
+            .or_else(|| config.capacity_for(region, &model_id))
+            .expect("validated");
+        let pool_id = capacity.pool_id().to_string();
         let profile = config.profile(&capacity.profile).expect("validated config");
         // What the reservation already holds here, in micro-replicas at its own tier.
         let current_micro = current
             .as_ref()
             .and_then(|c| {
                 let share = c.regions.iter().find(|r| r.region == *region)?;
-                svc.costs().share(&model_id, c.tier, share)
+                svc.costs().share(
+                    c.tier,
+                    &PoolShare {
+                        region: region.clone(),
+                        pool: pool_id.clone(),
+                        cus: share.cus,
+                    },
+                )
             })
             .unwrap_or(0);
-        let one = [RegionShare {
+        let one = [Claim {
             region: region.clone(),
+            pool: None,
             cus: 1,
         }];
         let serves_context = svc
@@ -603,7 +626,7 @@ where
                 .unwrap_or(0)
                 + svc
                     .costs()
-                    .cus_in(region, &model_id, tier, current_micro)
+                    .cus_in(region, &pool_id, tier, current_micro)
                     .unwrap_or(0);
             let demand = workload.demand(profile, tier);
             let (recommended, peak, policy, mut notes) = size(&demand, wu_per_cu);
@@ -614,9 +637,16 @@ where
                 let now = svc.clock.now();
                 let current = svc
                     .costs()
-                    .cus_in(region, &model_id, tier, current_micro)
+                    .cus_in(region, &pool_id, tier, current_micro)
                     .unwrap_or(0);
-                for d in svc.schedule().dates_after(region, &model_id, now) {
+                let mut dates: Vec<jiff::Timestamp> = config
+                    .pools_for(region, &model_id)
+                    .iter()
+                    .flat_map(|p| svc.schedule().dates_after(region, p.pool_id(), now))
+                    .collect();
+                dates.sort();
+                dates.dedup();
+                for d in dates {
                     let then = svc
                         .planner
                         .available_cus(region, &model_id, tier, d)
