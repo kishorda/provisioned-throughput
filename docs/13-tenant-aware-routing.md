@@ -83,8 +83,12 @@ without delaying provisioned work.
   even when no request arrives or finishes.
 - **What the PAYG client sees.** 503 `preempted` with `Retry-After: 1` if its response
   hadn't started. If it was streaming, it gets a final SSE event
-  `{"error":{"code":"preempted"}}`. The router drops the upstream response, which cancels
-  the work on the worker, and the release guard frees the capacity.
+  `{"error":{"code":"preempted"},"usage":{...}}`. The router drops the upstream response,
+  which cancels the work on the worker, and the release guard frees the capacity.
+- **Metering** ([ADR-035](adr/ADR-035-preempted-payg-delivered-tokens.md)). Both carry
+  `usage` with the `completion_tokens` actually delivered (content chunks counted as they
+  passed), and the 503 also has `x-pt-delivered-tokens`. PAYG metering bills those and
+  waives the prompt.
 - Only `payg` is preempted. Spillover is a PT customer's overflow and is never aborted.
 - `/v1/router/status` reports `failover_active` and `preempted`, and flags each worker's
   `hot_spare`.

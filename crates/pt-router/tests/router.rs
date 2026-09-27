@@ -484,8 +484,20 @@ async fn failover_preempts_payg_on_hot_spares() {
         first.contains("\"code\":\"preempted\""),
         "SSE error event: {first}"
     );
+    // It reports what it delivered, so PAYG metering bills only that (ADR-035).
+    let delivered = first.matches("\"content\":\"tok ").count() as u64;
+    assert!(delivered > 0, "{first}");
+    let last = first
+        .lines()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .next_back()
+        .unwrap();
+    let event: serde_json::Value = serde_json::from_str(last).unwrap();
+    assert_eq!(event["usage"]["completion_tokens"], delivered);
+    assert!(event["usage"]["prompt_tokens"].as_u64().unwrap() > 0);
     let s = status(&router).await;
     assert_eq!(s["preempted"], 1);
+    assert_eq!(s["preempted_completion_tokens"], delivered);
     assert_eq!(s["failover_active"], true);
 
     // The fence keeps new PAYG off the free spare while the failover lasts.
@@ -550,4 +562,7 @@ async fn preempted_before_the_response_starts_gets_503() {
     assert_eq!(payg.status(), 503);
     assert_eq!(payg.headers()["x-pt-reason"], "preempted");
     assert_eq!(payg.headers()["retry-after"], "1");
+    assert_eq!(payg.headers()["x-pt-delivered-tokens"], "0");
+    let body: serde_json::Value = payg.json().await.unwrap();
+    assert_eq!(body["usage"]["completion_tokens"], 0);
 }

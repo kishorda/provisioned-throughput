@@ -93,6 +93,7 @@ The design rests on six decisions:
 | [032](adr/ADR-032-chat-template-token-counts.md) | Count the chat template's framing (tools, tool calls, system defaults) by rendering it without message text |
 | [033](adr/ADR-033-surge-before-drain.md) | Surge a replica for every pool pod on a cordoned node, so drains never use the failure headroom |
 | [034](adr/ADR-034-separate-internal-listener.md) | Serve region traffic (`/internal/...`) on its own listener, with its own TLS (amends 022) |
+| [035](adr/ADR-035-preempted-payg-delivered-tokens.md) | Preempted PAYG responses report the tokens they delivered, so metering bills only those |
 
 ## Glossary
 

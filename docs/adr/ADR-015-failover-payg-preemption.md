@@ -38,7 +38,8 @@ and upsets PAYG customers, so the question was when to do it:
 - ✅ PAYG is never aborted outside a failover, and never more than needed.
 - ✅ Preemption lives in the pure dispatcher and selection code, so it can move into a
   Dynamo plugin with the rest (docs/13 §4).
-- ⚠️ Aborted PAYG work is lost. A preempted PAYG request should be billed only for tokens
+- ⚠️ Aborted PAYG work is lost. (Addressed by ADR-035: responses report delivered tokens.)
+  A preempted PAYG request should be billed only for tokens
   delivered. The PAYG metering path isn't in this repository yet.
 - ⚠️ This is whole-request preemption. Iteration-level preemption with KV offload
   (docs/05 §4) would lose less and still needs the engine patch.

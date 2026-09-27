@@ -22,6 +22,7 @@
 
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -91,6 +92,9 @@ pub struct Shared {
     queue_timeout: Duration,
     failover_hold: Duration,
     preempt_grace: Duration,
+    /// Totals over preempted requests, for PAYG metering (ADR-035).
+    preempted_prompt_tokens: AtomicU64,
+    preempted_completion_tokens: AtomicU64,
 }
 
 struct Inner {
@@ -117,6 +121,8 @@ impl Shared {
             queue_timeout: Duration::from_millis(config.queue_timeout_ms),
             failover_hold: Duration::from_millis(config.failover_hold_ms),
             preempt_grace: Duration::from_millis(config.preempt_grace_ms),
+            preempted_prompt_tokens: AtomicU64::new(0),
+            preempted_completion_tokens: AtomicU64::new(0),
         })
     }
 
@@ -368,9 +374,14 @@ async fn chat(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: Bytes
             upstream = upstream.header(name, value);
         }
     }
+    let request_id = header_str(&headers, "x-request-id").map(str::to_owned);
     let sent = tokio::select! {
         r = upstream.send() => r,
-        _ = &mut abort => return preempted(),
+        _ = &mut abort => {
+            let usage = Delivered { prompt_tokens, completion_tokens: 0 };
+            shared.record_preempted(&usage, request_id.as_deref());
+            return preempted(&usage);
+        }
     };
     let resp = match sent {
         Ok(r) => r,
@@ -407,25 +418,36 @@ async fn chat(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: Bytes
         .is_some_and(|v| v.starts_with("text/event-stream"));
 
     // The release guard lives with the body stream, so capacity frees when the response
-    // finishes, the client disconnects, or the request is preempted.
+    // finishes, the client disconnects, or the request is preempted. Content chunks are
+    // counted as they pass, so a preempted stream reports what it delivered (ADR-035).
+    let meter = shared.clone();
     let stream = futures::stream::unfold(
-        Some((resp.bytes_stream(), release, abort)),
-        move |state| async move {
-            let (mut s, g, mut abort) = state?;
-            tokio::select! {
-                chunk = s.next() => {
-                    let chunk = chunk?;
-                    Some((chunk.map_err(std::io::Error::other), Some((s, g, abort))))
-                }
-                _ = &mut abort => {
-                    // Dropping the upstream stream and guard cancels the work and frees it.
-                    drop((s, g));
-                    let end = if sse {
-                        Ok(Bytes::from_static(PREEMPTED_EVENT.as_bytes()))
-                    } else {
-                        Err(std::io::Error::other("preempted"))
-                    };
-                    Some((end, None))
+        Some((resp.bytes_stream(), release, abort, SseTokens::default())),
+        move |state| {
+            let meter = meter.clone();
+            let request_id = request_id.clone();
+            async move {
+                let (mut s, g, mut abort, mut tokens) = state?;
+                tokio::select! {
+                    chunk = s.next() => {
+                        let chunk = chunk?;
+                        if let (true, Ok(bytes)) = (sse, &chunk) {
+                            tokens.push(bytes);
+                        }
+                        Some((chunk.map_err(std::io::Error::other), Some((s, g, abort, tokens))))
+                    }
+                    _ = &mut abort => {
+                        // Dropping the upstream stream and guard cancels the work and frees it.
+                        drop((s, g));
+                        let usage = Delivered { prompt_tokens, completion_tokens: tokens.count };
+                        meter.record_preempted(&usage, request_id.as_deref());
+                        let end = if sse {
+                            Ok(Bytes::from(preempted_event(&usage)))
+                        } else {
+                            Err(std::io::Error::other("preempted"))
+                        };
+                        Some((end, None))
+                    }
                 }
             }
         },
@@ -433,23 +455,114 @@ async fn chat(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: Bytes
     (status, out_headers, Body::from_stream(stream)).into_response()
 }
 
-/// Final event for a preempted streaming response.
-const PREEMPTED_EVENT: &str = "data: {\"error\":{\"type\":\"router_error\",\"code\":\"preempted\",\"message\":\"Preempted to serve provisioned traffic. Retry.\"}}\n\n";
+const PREEMPTED_MESSAGE: &str = "Preempted to serve provisioned traffic. Retry.";
 
-fn preempted() -> Response {
-    let mut r = error(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "preempted",
-        "Preempted to serve provisioned traffic. Retry.",
+/// What a preempted request got before it was aborted (ADR-035). PAYG metering bills
+/// `completion_tokens`, the output the client actually received.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Delivered {
+    prompt_tokens: u64,
+    completion_tokens: u64,
+}
+
+impl Delivered {
+    fn json(&self) -> Value {
+        json!({
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.prompt_tokens + self.completion_tokens,
+        })
+    }
+}
+
+impl Shared {
+    /// The metering record for a preempted request.
+    fn record_preempted(&self, d: &Delivered, request_id: Option<&str>) {
+        self.preempted_prompt_tokens
+            .fetch_add(d.prompt_tokens, Ordering::Relaxed);
+        self.preempted_completion_tokens
+            .fetch_add(d.completion_tokens, Ordering::Relaxed);
+        tracing::info!(
+            target: "pt_router::metering",
+            request_id = request_id.unwrap_or(""),
+            prompt_tokens = d.prompt_tokens,
+            completion_tokens = d.completion_tokens,
+            "preempted"
+        );
+    }
+}
+
+/// Final event for a preempted streaming response, with what was delivered.
+fn preempted_event(d: &Delivered) -> String {
+    let event = json!({
+        "error": { "type": "router_error", "code": "preempted", "message": PREEMPTED_MESSAGE },
+        "usage": d.json(),
+    });
+    format!("data: {event}\n\n")
+}
+
+/// 503 for a request preempted before its response started: nothing was delivered.
+fn preempted(d: &Delivered) -> Response {
+    let body = json!({
+        "error": { "type": "router_error", "code": "preempted", "message": PREEMPTED_MESSAGE },
+        "usage": d.json(),
+    });
+    let mut r = (StatusCode::SERVICE_UNAVAILABLE, Json(body)).into_response();
+    let h = r.headers_mut();
+    h.insert("x-pt-reason", HeaderValue::from_static("preempted"));
+    h.insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    h.insert(
+        "x-pt-delivered-tokens",
+        HeaderValue::from(d.completion_tokens),
     );
-    r.headers_mut()
-        .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
     r
+}
+
+/// Counts content tokens in an OpenAI-style SSE stream: one per chunk whose delta carries
+/// content, as engines stream one token per chunk. Lines may span network chunks.
+#[derive(Debug, Default)]
+struct SseTokens {
+    partial: Vec<u8>,
+    count: u64,
+}
+
+impl SseTokens {
+    fn push(&mut self, bytes: &[u8]) {
+        self.partial.extend_from_slice(bytes);
+        while let Some(end) = self.partial.iter().position(|b| *b == b'\n') {
+            let line: Vec<u8> = self.partial.drain(..=end).collect();
+            let Some(data) = line.strip_prefix(b"data: ") else {
+                continue;
+            };
+            let Ok(v) = serde_json::from_slice::<Value>(data) else {
+                continue; // [DONE], or not JSON
+            };
+            let has_content = v["choices"].as_array().is_some_and(|cs| {
+                cs.iter().any(|c| {
+                    c["delta"]["content"]
+                        .as_str()
+                        .is_some_and(|s| !s.is_empty())
+                })
+            });
+            if has_content {
+                self.count += 1;
+            }
+        }
+    }
 }
 
 async fn status(State(shared): State<Arc<Shared>>) -> Json<Value> {
     let status = shared.lock().dispatcher.status(Instant::now());
-    Json(serde_json::to_value(status).unwrap_or(Value::Null))
+    let mut v = serde_json::to_value(status).unwrap_or(Value::Null);
+    v["preempted_prompt_tokens"] = shared
+        .preempted_prompt_tokens
+        .load(Ordering::Relaxed)
+        .into();
+    v["preempted_completion_tokens"] = shared
+        .preempted_completion_tokens
+        .load(Ordering::Relaxed)
+        .into();
+    Json(v)
 }
 
 #[cfg(test)]
@@ -464,5 +577,34 @@ mod tests {
             vec![(1, 200), (2, 500), (3, 800)]
         );
         assert_eq!(scale_prefixes(p.clone(), 0, 800), p);
+    }
+
+    #[test]
+    fn counts_content_chunks_across_network_chunks() {
+        let mut t = SseTokens::default();
+        let stream = concat!(
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"tok \"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"tok \"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"\"}}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        // Split mid-line, as the network does.
+        for piece in stream.as_bytes().chunks(7) {
+            t.push(piece);
+        }
+        assert_eq!(t.count, 2);
+    }
+
+    #[test]
+    fn the_preempted_event_carries_usage() {
+        let e = preempted_event(&Delivered {
+            prompt_tokens: 10,
+            completion_tokens: 3,
+        });
+        let v: Value = serde_json::from_str(e.trim().strip_prefix("data: ").unwrap()).unwrap();
+        assert_eq!(v["error"]["code"], "preempted");
+        assert_eq!(v["usage"]["completion_tokens"], 3);
+        assert_eq!(v["usage"]["total_tokens"], 13);
     }
 }

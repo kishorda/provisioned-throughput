@@ -251,7 +251,9 @@ Workers marked `hot_spare` serve PAYG until a region failover needs them. Gatewa
 provisioned requests that use a failover entitlement with `x-pt-failover`. While that
 marker keeps arriving, the router keeps new PAYG off hot spares. If provisioned work
 waits 250 ms, it aborts running PAYG, which then gets `x-pt-reason: preempted` (503,
-`Retry-After: 1`) or a final SSE error event (docs/13 §2, ADR-015). On other workers,
+`Retry-After: 1`) or a final SSE error event (docs/13 §2, ADR-015). Both carry `usage`
+with the completion tokens actually delivered, so PAYG metering bills only those
+(ADR-035). On other workers,
 PAYG and spillover may hold at most `backfill_ratio` (0.5) of the slots and KV, so
 provisioned work always finds room (ADR-026).
 
@@ -317,8 +319,6 @@ Follow-ups from the roadmap in docs/11, grouped by what they need.
 
 ### Not built
 
-- **Metering of preempted PAYG.** A preempted request should be billed only for the
-  tokens it delivered, but there's no PAYG metering path yet (ADR-015).
 - **Hot spares rendered as router workers.** Router `hot_spare` flags are set by hand in
   config. The capacity controller doesn't render spares as separately addressable workers.
 - **Image token costs.** Each image part costs a fixed `image_tokens` per model (ADR-032),
